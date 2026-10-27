@@ -78,8 +78,11 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "sealed")
 		return
 	}
+	// Reading the body to its end lets the server notice when the requester
+	// goes away, which cancels r.Context() (see the end of the callbacks).
+	data, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
 	var env protocol.Envelope
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&env); err != nil {
+	if err != nil || json.Unmarshal(data, &env) != nil {
 		a.writeError(w, http.StatusBadRequest, protocol.ErrBadRequest, "malformed envelope")
 		return
 	}
@@ -99,7 +102,10 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	now := a.now()
 	if d := now.Sub(req.Timestamp); d > a.cfg.ClockSkew || d < -a.cfg.ClockSkew {
-		a.log.Warn("request timestamp outside the accepted window", "identity", req.Identity, "skew", d.String())
+		// Not yet verified: anyone can send this, so the warning is limited.
+		if a.unverified.allow(now) {
+			a.log.Warn("request timestamp outside the accepted window", "identity", req.Identity, "skew", d.String())
+		}
 		a.writeError(w, http.StatusBadRequest, protocol.ErrClockSkew, "")
 		return
 	}
@@ -133,6 +139,12 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		a.deny(ctx, w, ResultForeignKey, obs, "request signature does not verify")
 		return
 	}
+	// The daemon never reuses a request ID. A repeat comes from a second
+	// holder of the key replaying an ID it has seen; it gets no callbacks.
+	if !a.seen.first(req.Identity+" "+req.RequestID, now) {
+		a.deny(ctx, w, ResultReplay, obs, "request ID already processed")
+		return
+	}
 
 	plan, notResponsible := a.plan(b, addrs)
 	if notResponsible != "" {
@@ -141,6 +153,14 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outcomes := a.runChecks(ctx, plan, &req, pub)
+	if ctx.Err() != nil {
+		// The requester is gone (timeout, crash, restart). Nobody can receive
+		// a token, and a "no open request" from a daemon that has dropped the
+		// request proves nothing: the request is discarded without a trace in
+		// the journal.
+		a.log.Info("request abandoned by the requester", "identity", req.Identity, "request_id", req.RequestID)
+		return
+	}
 	obs.Checks = outcomes
 
 	result := ResultIssued
@@ -371,14 +391,27 @@ func (a *Authority) deny(ctx context.Context, w http.ResponseWriter, result stri
 }
 
 // record updates the metric, writes the audit entry and appends the signed
-// observation. Requests without a valid binding key (foreign key, unknown
-// identity) are rate-limited per identity, as they can be sent by anyone.
+// observation. Only requests that verify against a bound key reach the
+// journal. Foreign keys and unknown identities can be sent by anyone: they
+// count in the metric and reach the audit log within an overall limit, but
+// never the journal. Refusals that a key holder can repeat at will (wrong
+// location, replay) are journaled once per identity and minute.
 func (a *Authority) record(ctx context.Context, result string, obs Observation) {
 	a.requests.Inc(result)
 	obs.Kind = journal.KindObservation + "." + result
-	limited := result == ResultForeignKey || result == ResultUnknownIdentity
-	if limited && !a.limiter.allow(result+"|"+obs.Identity, a.now()) {
+	now := a.now()
+	verified := result != ResultForeignKey && result != ResultUnknownIdentity
+	switch {
+	case !verified:
+		if a.unverified.allow(now) {
+			a.audit.Warn("token request "+result, "event", "token_request", "result", result,
+				"identity", obs.Identity, "key", obs.Key, "remote", obs.Remote, "reason", obs.Reason)
+		}
 		return
+	case result == ResultWrongLocation || result == ResultReplay:
+		if !a.limiter.allow(result+" "+obs.Identity, now) {
+			return
+		}
 	}
 	attrs := []any{
 		"event", "token_request", "result", result, "identity", obs.Identity,
@@ -398,7 +431,7 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 	case ResultKeyDuplicate:
 		level = slog.LevelError
 		attrs = append(attrs, "alert", "key duplicate proven: the bound key answered that it has no open request")
-	case ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity:
+	case ResultWrongLocation, ResultReplay:
 		level = slog.LevelWarn
 	}
 	a.audit.Log(ctx, level, "token request "+result, attrs...)

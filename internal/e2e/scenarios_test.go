@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,7 +23,6 @@ import (
 	"github.com/DunkelCloud/ergosum/internal/jwt"
 	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
-	"github.com/DunkelCloud/ergosum/internal/tlspin"
 )
 
 // Places used throughout: an overlay name, a public underlay address and a
@@ -266,8 +266,9 @@ func verifyEvidence(t *testing.T, e *env, fingerprint string) {
 }
 
 // TestRestartWithoutNegative: the daemon dies with a request in flight and
-// comes back. The request ID survives the restart, a late callback for it is
-// confirmed, and the retry with the same ID succeeds. No negative answer.
+// comes back. The instance notices that the requester is gone, cancels the
+// callbacks and discards the request without a finding; the restarted daemon
+// obtains a token with a new request. No negative answer, no observation.
 func TestRestartWithoutNegative(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	targets := []string{at(host1Tailnet), at(host1IP)}
@@ -278,7 +279,8 @@ func TestRestartWithoutNegative(t *testing.T) {
 	e.net.mu.Lock()
 	e.net.gate = make(chan struct{})
 	e.net.dialed = make(chan string, 4)
-	gate := e.net.gate
+	e.net.aborted = make(chan string, 4)
+	gate, aborted := e.net.gate, e.net.aborted
 	e.net.mu.Unlock()
 	ctx, crash := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
@@ -293,11 +295,15 @@ func TestRestartWithoutNegative(t *testing.T) {
 		t.Fatal("crashed request succeeded")
 	}
 	first.d.Close()
-	openID := pendingRequest(t, first.stateDir)
+	select {
+	case <-aborted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("authority kept calling back after the requester was gone")
+	}
 
 	e.net.mu.Lock()
 	close(gate)
-	e.net.gate, e.net.dialed = nil, nil
+	e.net.gate, e.net.dialed, e.net.aborted = nil, nil, nil
 	e.net.mu.Unlock()
 
 	// Restart with the same state directory.
@@ -305,107 +311,125 @@ func TestRestartWithoutNegative(t *testing.T) {
 	if second.d.Fingerprint() != first.d.Fingerprint() {
 		t.Fatal("key changed across restart")
 	}
-	release, err := second.d.HoldCallbackListener()
-	if err != nil {
-		t.Fatal(err)
-	}
-	status := lateCallback(t, e, second.d.Fingerprint(), at(host1IP), openID)
-	release()
-	if status != protocol.StatusConfirmed {
-		t.Fatalf("late callback after restart answered %q", status)
-	}
-
 	if _, _, err := second.d.Obtain(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if id := completedRequest(t, first.stateDir); id != openID {
-		t.Fatalf("retry used request ID %s, want %s", id, openID)
+	requireCount(t, e.auth, authority.ResultIssued, 1)
+	for _, r := range []string{authority.ResultKeyDuplicate, authority.ResultWrongLocation, authority.ResultReplay} {
+		requireCount(t, e.auth, r, 0)
 	}
-	requireCount(t, e.auth, authority.ResultKeyDuplicate, 0)
 	if got := second.d.CallbackCount(protocol.StatusNoOpenRequest); got != 0 {
 		t.Fatalf("negative answers after restart: %v", got)
 	}
+	if n := journalCount(t, e.auth, ""); n != 2 {
+		t.Fatalf("journal holds %d events, want the binding and one issuance", n)
+	}
 }
 
-func readBook(t *testing.T, dir string) []struct {
-	ID        string     `json:"id"`
-	Completed *time.Time `json:"completed"`
-} {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, "requests.json"))
+// TestReplayedRequestID: a clone with the key and a request ID the real
+// machine has used gets no token, even while the real machine is renewing.
+// The instance that processed the ID refuses the repeat without a callback;
+// at another instance the real machine does not confirm an ID that is not in
+// flight to that instance, and the journal holds the proof.
+func TestReplayedRequestID(t *testing.T) {
+	sim := newSimNet()
+	admins := jt.NewAdmins(t, "alice", "bob", "carol")
+	a := newEnv(t, envOptions{instance: "authority-a", net: sim, admins: admins})
+	b := newEnv(t, envOptions{instance: "authority-b", net: sim, admins: admins})
+	real := a.machine(host1, machineOptions{targets: []string{at(host1Tailnet), at(host1IP)}, authorities: []*env{a, b}})
+	a.bind(host1, real.d.Fingerprint(), 1, tailnetCheck(host1Tailnet), ipCheck(host1IP))
+	b.bind(host1, real.d.Fingerprint(), 1, tailnetCheck(host1Tailnet), ipCheck(host1IP))
+	if _, _, err := real.d.Obtain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	issued := a.observations(t, "observation.issued")
+	if len(issued) != 1 {
+		t.Fatalf("issued observations: %d", len(issued))
+	}
+	usedID := issued[0].RequestID
+
+	release, err := real.d.HoldCallbackListener()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f struct {
-		Requests []struct {
-			ID        string     `json:"id"`
-			Completed *time.Time `json:"completed"`
-		} `json:"requests"`
-	}
-	if err := json.Unmarshal(data, &f); err != nil {
+	defer release()
+	stolen, _, err := keys.LoadOrCreate(filepath.Join(cloneState(t, real.stateDir), "identity.key"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	return f.Requests
+
+	sim.mu.Lock()
+	before := len(sim.dials)
+	sim.mu.Unlock()
+	if status := postRequest(t, a, stolen, host1, usedID); status != http.StatusForbidden {
+		t.Fatalf("replay at the same instance: status %d", status)
+	}
+	requireCount(t, a.auth, authority.ResultReplay, 1)
+	sim.mu.Lock()
+	after := len(sim.dials)
+	sim.mu.Unlock()
+	if after != before {
+		t.Fatal("callbacks for a replayed request ID")
+	}
+
+	if status := postRequest(t, b, stolen, host1, usedID); status != http.StatusForbidden {
+		t.Fatalf("replay at another instance: status %d", status)
+	}
+	requireCount(t, b.auth, authority.ResultKeyDuplicate, 1)
+	requireCount(t, b.auth, authority.ResultIssued, 0)
+	verifyEvidence(t, b, real.d.Fingerprint())
 }
 
-func pendingRequest(t *testing.T, dir string) string {
-	t.Helper()
-	for _, r := range readBook(t, dir) {
-		if r.Completed == nil {
-			return r.ID
+// TestUnverifiedRefusalsStayOutOfJournal: requests that do not verify
+// against a bound key can be sent by anyone. They count in the metric but
+// never reach the journal, however many identities they name.
+func TestUnverifiedRefusalsStayOutOfJournal(t *testing.T) {
+	e := newEnv(t, envOptions{})
+	real := e.machine(host1, machineOptions{targets: []string{at(host1Tailnet), at(host1IP)}})
+	e.bind(host1, real.d.Fingerprint(), 1, tailnetCheck(host1Tailnet), ipCheck(host1IP))
+	stranger, err := keys.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const unknown, foreign = 200, 20
+	for i := 0; i < unknown; i++ {
+		if status := postRequest(t, e, stranger, fmt.Sprintf("host-%d.example.com", i), protocol.NewRequestID()); status != http.StatusForbidden {
+			t.Fatalf("unknown identity: status %d", status)
 		}
 	}
-	t.Fatal("no open request persisted")
-	return ""
-}
-
-func completedRequest(t *testing.T, dir string) string {
-	t.Helper()
-	reqs := readBook(t, dir)
-	if len(reqs) != 1 || reqs[0].Completed == nil {
-		t.Fatalf("request book: %+v", reqs)
+	for i := 0; i < foreign; i++ {
+		if status := postRequest(t, e, stranger, host1, protocol.NewRequestID()); status != http.StatusForbidden {
+			t.Fatalf("foreign key: status %d", status)
+		}
 	}
-	return reqs[0].ID
+	requireCount(t, e.auth, authority.ResultUnknownIdentity, unknown)
+	requireCount(t, e.auth, authority.ResultForeignKey, foreign)
+	if n := journalCount(t, e.auth, ""); n != 1 {
+		t.Fatalf("journal holds %d events, want only the binding", n)
+	}
 }
 
-// lateCallback performs a callback as the authority instance would and
-// returns the verified status.
-func lateCallback(t *testing.T, e *env, fingerprint, target, requestID string) string {
+// postRequest sends a token request signed with key, as a daemon would, and
+// returns the HTTP status.
+func postRequest(t *testing.T, e *env, key *ecdsa.PrivateKey, identity, requestID string) int {
 	t.Helper()
-	cert, err := tlspin.Certificate(e.key)
+	req := protocol.TokenRequest{
+		V: protocol.Version, Type: protocol.TypeTokenRequest, Identity: identity,
+		RequestID: requestID, Timestamp: time.Now().UTC(),
+		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&key.PublicKey)),
+	}
+	env, err := protocol.Seal(key, protocol.ContextRequest, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
-		TLSClientConfig: tlspin.ClientConfig(&cert, tlspin.Fingerprints(fingerprint)),
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return e.net.Dial(ctx, authority.Route{Check: protocol.CheckIP}, target)
-		},
-	}}
-	cb := protocol.Callback{V: 1, Type: protocol.TypeCallback, RequestID: requestID, Nonce: protocol.NewNonce(),
-		Target: "ip:" + target, Authority: keys.Thumbprint(&e.key.PublicKey)}
-	body, _ := json.Marshal(cb)
-	resp, err := client.Post("https://"+target+protocol.PathCallback, "application/json", bytes.NewReader(body))
+	body, _ := json.Marshal(env)
+	resp, err := e.apiClient().Post(e.url+protocol.PathToken, "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	var env protocol.Envelope
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		t.Fatal(err)
-	}
-	peer, err := tlspin.PeerKey(resp.TLS)
-	if err != nil || !env.Verify(peer, protocol.ContextCallbackResponse) {
-		t.Fatal("callback response not signed with the bound key")
-	}
-	var cr protocol.CallbackResponse
-	if err := env.Decode(&cr); err != nil {
-		t.Fatal(err)
-	}
-	if cr.Nonce != cb.Nonce || cr.RequestID != requestID {
-		t.Fatalf("response does not match: %+v", cr)
-	}
-	return cr.Status
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
 }
 
 // TestRenewalRunsAllChecks: the daemon renews from half the lifetime on, and

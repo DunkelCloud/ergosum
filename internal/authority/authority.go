@@ -32,7 +32,12 @@ const (
 	ResultWrongLocation   = "wrong_location"
 	ResultForeignKey      = "foreign_key"
 	ResultUnknownIdentity = "unknown_identity"
+	ResultReplay          = "replay"
 )
+
+// Limits for what unverified requests may cost. unverifiedPerMinute bounds
+// the audit lines of refusals that anyone can cause.
+const unverifiedPerMinute = 60
 
 // Options carries dependencies that tests replace.
 type Options struct {
@@ -45,15 +50,17 @@ type Options struct {
 
 // Authority is one authority instance.
 type Authority struct {
-	cfg     Config
-	log     *slog.Logger
-	audit   *slog.Logger
-	store   *journal.Store
-	net     Network
-	routes  routes
-	now     func() time.Time
-	listen  func(network, address string) (net.Listener, error)
-	limiter *limiter
+	cfg        Config
+	log        *slog.Logger
+	audit      *slog.Logger
+	store      *journal.Store
+	net        Network
+	routes     routes
+	now        func() time.Time
+	listen     func(network, address string) (net.Listener, error)
+	limiter    *limiter     // per identity, for verified refusals
+	unverified *window      // overall, for refusals anyone can cause
+	seen       *replayCache // request IDs already processed
 
 	metrics  *metrics.Registry
 	requests *metrics.Vec
@@ -84,13 +91,17 @@ func New(cfg Config, opts Options) (*Authority, error) {
 	}
 	rs, _ := cfg.routes()
 	a := &Authority{
-		cfg:      cfg,
-		log:      opts.Logger,
-		net:      opts.Network,
-		routes:   rs,
-		now:      opts.Now,
-		listen:   opts.Listen,
-		limiter:  newLimiter(time.Minute),
+		cfg:        cfg,
+		log:        opts.Logger,
+		net:        opts.Network,
+		routes:     rs,
+		now:        opts.Now,
+		listen:     opts.Listen,
+		limiter:    newLimiter(time.Minute),
+		unverified: &window{every: time.Minute, max: unverifiedPerMinute},
+		// A daemon's request is in flight for far less than this; after
+		// that, a replayed ID meets a daemon that no longer confirms it.
+		seen:     newReplayCache(2 * cfg.ClockSkew),
 		unsealed: make(chan struct{}),
 		ready:    make(chan struct{}),
 	}
@@ -131,7 +142,7 @@ func New(cfg Config, opts Options) (*Authority, error) {
 	a.metrics = metrics.NewRegistry()
 	a.requests = a.metrics.Counter("machine_identity_requests_total",
 		"Token requests by result.", "result",
-		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity)
+		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity, ResultReplay)
 	a.sealedG = a.metrics.Gauge("machine_identity_authority_sealed",
 		"1 while the signing key is still encrypted and the instance issues nothing.")
 	a.bindings = a.metrics.Counter("machine_identity_binding_events_total",
@@ -366,12 +377,13 @@ func (a *Authority) writeError(w http.ResponseWriter, status int, code, detail s
 	writeJSON(w, status, protocol.ErrorResponse{V: protocol.Version, Error: code, Detail: detail, ServerTime: a.now().UTC()})
 }
 
-// limiter allows one event per key and interval; it rate-limits warnings
-// and observations for unsolicited requests.
+// limiter allows one event per key and interval. Its keys come from
+// verified requests only, so their number is bounded by the bindings.
 type limiter struct {
 	mu    sync.Mutex
 	every time.Duration
 	last  map[string]time.Time
+	swept time.Time
 }
 
 func newLimiter(every time.Duration) *limiter {
@@ -384,13 +396,67 @@ func (l *limiter) allow(key string, now time.Time) bool {
 	if t, ok := l.last[key]; ok && now.Sub(t) < l.every {
 		return false
 	}
-	if len(l.last) > 10000 {
+	if now.Sub(l.swept) >= l.every {
 		for k, t := range l.last {
 			if now.Sub(t) >= l.every {
 				delete(l.last, k)
 			}
 		}
+		l.swept = now
 	}
 	l.last[key] = now
+	return true
+}
+
+// window allows at most max events per interval, whatever their origin.
+type window struct {
+	mu    sync.Mutex
+	every time.Duration
+	max   int
+	start time.Time
+	n     int
+}
+
+func (w *window) allow(now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if now.Sub(w.start) >= w.every {
+		w.start, w.n = now, 0
+	}
+	if w.n >= w.max {
+		return false
+	}
+	w.n++
+	return true
+}
+
+// replayCache remembers keys for a while; first reports whether a key is
+// new. Only verified requests add keys.
+type replayCache struct {
+	mu    sync.Mutex
+	ttl   time.Duration
+	seen  map[string]time.Time
+	swept time.Time
+}
+
+func newReplayCache(ttl time.Duration) *replayCache {
+	return &replayCache{ttl: ttl, seen: map[string]time.Time{}}
+}
+
+func (c *replayCache) first(key string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if now.Sub(c.swept) >= c.ttl {
+		for k, t := range c.seen {
+			if now.Sub(t) >= c.ttl {
+				delete(c.seen, k)
+			}
+		}
+		c.swept = now
+	}
+	if t, ok := c.seen[key]; ok && now.Sub(t) < c.ttl {
+		return false
+	}
+	c.seen[key] = now
 	return true
 }

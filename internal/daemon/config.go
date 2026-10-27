@@ -18,8 +18,7 @@ import (
 type Config struct {
 	// Identity is the machine's name (FQDN), e.g. host1.example.com.
 	Identity string `yaml:"identity"`
-	// StateDir holds the identity key and the request book.
-	// Default: /var/lib/ergosum.
+	// StateDir holds the identity key. Default: /var/lib/ergosum.
 	StateDir string `yaml:"state_dir"`
 	// TokenFile is written atomically. Default: /run/ergosum/token.
 	TokenFile string `yaml:"token_file"`
@@ -33,6 +32,10 @@ type Config struct {
 	// Addresses are the underlay addresses reported in requests. Empty
 	// means: all global unicast addresses outside the overlay.
 	Addresses []string `yaml:"addresses"`
+	// OverlayPrefixes are left out of the detected addresses, as the
+	// authority's tailnet prefixes are. Default: 100.64.0.0/10,
+	// fd7a:115c:a1e0::/48.
+	OverlayPrefixes []string `yaml:"overlay_prefixes"`
 	// Authorities are tried in order.
 	Authorities []AuthorityConfig `yaml:"authorities"`
 	// RequestTimeout bounds one request including its callbacks.
@@ -108,6 +111,9 @@ func (c *Config) Validate() error {
 	}
 	if _, err := protocol.ParseAddresses(c.Addresses); err != nil {
 		errs = append(errs, err)
+	}
+	if _, err := protocol.ParsePrefixes(c.OverlayPrefixes); err != nil {
+		errs = append(errs, fmt.Errorf("overlay_prefixes: %w", err))
 	}
 	return errors.Join(errs...)
 }

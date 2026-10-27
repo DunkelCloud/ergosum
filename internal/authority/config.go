@@ -3,6 +3,7 @@ package authority
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
@@ -33,9 +34,13 @@ type Config struct {
 	SigningKey string `yaml:"signing_key"`
 	// Journal is the SQLite file. Default: /var/lib/ergosum/journal.db.
 	Journal string `yaml:"journal"`
-	// Listen is the TLS listener for token requests and binding writes.
-	// Default: :7432.
+	// Listen is the TLS listener for token requests and binding writes,
+	// normally the instance's overlay address with port 7432. It is
+	// required and must name an address.
 	Listen string `yaml:"listen"`
+	// ListenAllInterfaces allows Listen to bind all interfaces (":7432",
+	// "0.0.0.0:7432", "[::]:7432").
+	ListenAllInterfaces bool `yaml:"listen_all_interfaces"`
 	// OpsListen serves /metrics, /healthz and the public keys over plain
 	// HTTP. Default: 127.0.0.1:7434. Empty string "-" disables it.
 	OpsListen string `yaml:"ops_listen"`
@@ -116,9 +121,6 @@ func (c *Config) SetDefaults() {
 	if c.Journal == "" {
 		c.Journal = "/var/lib/ergosum/journal.db"
 	}
-	if c.Listen == "" {
-		c.Listen = fmt.Sprintf(":%d", protocol.DefaultAuthorityPort)
-	}
 	if c.OpsListen == "" {
 		c.OpsListen = fmt.Sprintf("127.0.0.1:%d", protocol.DefaultOpsPort)
 	}
@@ -151,6 +153,9 @@ func (c *Config) Validate() error {
 	if c.TokenTTL < 10*time.Second || c.TokenTTL > 24*time.Hour {
 		errs = append(errs, fmt.Errorf("token_ttl %s out of range", c.TokenTTL))
 	}
+	if err := c.validateListen(); err != nil {
+		errs = append(errs, err)
+	}
 	if _, err := c.routes(); err != nil {
 		errs = append(errs, err)
 	}
@@ -158,6 +163,25 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// validateListen requires an address to bind: the API belongs on the
+// overlay, and binding all interfaces would expose it on a public host.
+func (c *Config) validateListen() error {
+	if c.Listen == "" {
+		return fmt.Errorf("listen is required, normally the instance's overlay address and port %d", protocol.DefaultAuthorityPort)
+	}
+	host, _, err := net.SplitHostPort(c.Listen)
+	if err != nil {
+		return fmt.Errorf("listen %q: %w", c.Listen, err)
+	}
+	if c.ListenAllInterfaces {
+		return nil
+	}
+	if a, err := netip.ParseAddr(host); host == "" || (err == nil && a.IsUnspecified()) {
+		return fmt.Errorf("listen %q binds all interfaces; name an address or set listen_all_interfaces", c.Listen)
+	}
+	return nil
 }
 
 type routes struct {
@@ -204,16 +228,8 @@ func (c *Config) routes() (routes, error) {
 		}
 		rs.networks = append(rs.networks, attachedNetwork{prefix: p, route: r})
 	}
-	if len(c.Callbacks.Tailnet.Prefixes) == 0 {
-		rs.overlay = DefaultTailnetPrefixes
-	} else {
-		for _, s := range c.Callbacks.Tailnet.Prefixes {
-			p, err := netip.ParsePrefix(s)
-			if err != nil {
-				return rs, fmt.Errorf("callbacks: bad tailnet prefix %q", s)
-			}
-			rs.overlay = append(rs.overlay, p.Masked())
-		}
+	if rs.overlay, err = protocol.ParsePrefixes(c.Callbacks.Tailnet.Prefixes); err != nil {
+		return rs, fmt.Errorf("callbacks: tailnet: %w", err)
 	}
 	return rs, nil
 }

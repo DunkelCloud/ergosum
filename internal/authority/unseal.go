@@ -14,14 +14,21 @@ import (
 
 // serveUnsealSocket listens on the local Unix socket for a passphrase. The
 // socket is the only way to unseal: it is not reachable over the network,
-// and its file mode (0600) limits it to the service user and root.
+// and its file mode (0600) limits it to the service user and root. The
+// socket is created under a umask of 0177, so it never exists with wider
+// permissions, whatever the directory allows.
 func (a *Authority) serveUnsealSocket(ctx context.Context) (stop func(), err error) {
 	path := a.cfg.UnsealSocket
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	_ = os.Remove(path) // stale socket from a previous run
-	ln, err := a.listen("unix", path)
+	var ln net.Listener
+	err = withUmask(0o177, func() error {
+		var lerr error
+		ln, lerr = a.listen("unix", path)
+		return lerr
+	})
 	if err != nil {
 		return nil, fmt.Errorf("unseal socket: %w", err)
 	}

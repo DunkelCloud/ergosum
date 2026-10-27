@@ -60,6 +60,7 @@ signing_key: $W/signing.key
 journal: $W/authority/journal.db
 unseal_socket: $W/authority/unseal.sock
 listen: ":7432"
+listen_all_interfaces: true  # reached on both test networks
 ops_listen: "127.0.0.1:7434"
 callbacks:
   networks:

@@ -9,7 +9,7 @@ import (
 )
 
 func TestReachabilityRules(t *testing.T) {
-	n := &SystemNetwork{TailnetPrefixes: DefaultTailnetPrefixes}
+	n := &SystemNetwork{TailnetPrefixes: protocol.DefaultOverlayPrefixes}
 	overlay := netip.MustParseAddr("100.101.102.103")
 	overlay6 := netip.MustParseAddr("fd7a:115c:a1e0::1")
 	underlay := netip.MustParseAddr("192.0.2.10")

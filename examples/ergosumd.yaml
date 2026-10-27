@@ -17,6 +17,9 @@ callback_listen: ":7433"
 # Underlay addresses reported for net checks. Empty: all global unicast
 # addresses outside the overlay.
 addresses: []
+# Overlay ranges left out of the detected addresses. Empty: the Tailscale
+# ranges 100.64.0.0/10 and fd7a:115c:a1e0::/48.
+overlay_prefixes: []
 
 # Tried in order. key is the fingerprint printed by "ergosum keygen".
 authorities:

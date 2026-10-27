@@ -7,7 +7,7 @@ All addresses below are documentation examples (RFC 5737, RFC 3849).
 | Path | Owner, mode | Content |
 | --- | --- | --- |
 | `/etc/ergosum/` | root, 0755 | `ergosumd.yaml`, `serve.yaml`, `signing.key` (0640, group `ergosum`) |
-| `/var/lib/ergosum/` | `ergosum`, 0700 | daemon: `identity.key` (0600), `requests.json`; authority: `journal.db`, `unseal.sock` |
+| `/var/lib/ergosum/` | `ergosum`, 0700 | daemon: `identity.key` (0600); authority: `journal.db`, `unseal.sock` |
 | `/run/ergosum/token` | `ergosum`:`ergosum-token`, 0640 | identity token, read by Vault Agent |
 
 Create the user and groups with `deploy/sysusers.d/ergosum.conf`
@@ -76,6 +76,14 @@ way in; it is not reachable over the network. A sealed instance does not
 restart into service on its own; another instance keeps issuing meanwhile.
 `machine_identity_authority_sealed` is 1 while sealed — alert on it.
 
+### Listener
+
+`listen` is required and names the address the API binds to, normally the
+instance's overlay address (`100.64.0.10:7432` in `examples/serve.yaml`).
+An address that binds all interfaces (`:7432`, `0.0.0.0:7432`,
+`[::]:7432`) is refused unless `listen_all_interfaces: true` is set; on a
+public host that would expose the API to the internet.
+
 ### Modes of operation
 
 The authority runs as a native binary (`ergosum serve`) or as the OCI image,
@@ -117,18 +125,22 @@ on a host of its own or on a shared host.
 
 | Metric | Meaning |
 | --- | --- |
-| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `foreign_key`, `unknown_identity` |
+| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `foreign_key`, `unknown_identity` |
 | `machine_identity_authority_sealed` | 1 while sealed |
 | `machine_identity_binding_events_total{outcome}` | write API: `accepted`, `rejected` |
 
 `key_duplicate` is proof that a machine key exists twice and deserves a
-critical alert; `wrong_location` a warning.
+critical alert. `replay` means that someone with the machine key reused a
+request ID the machine had sent, typically a copy from a disk image; treat
+it like `key_duplicate`. `wrong_location` is a warning.
 
 Audit entries are JSON log lines with `"log_type":"audit"` on stdout — one
 per token request (result, identity, request ID, presented key, per-check
 outcome, token ID) and per binding write — ready for any log pipeline.
-Warnings for `foreign_key` and `unknown_identity` are rate-limited per
-identity.
+Requests that do not verify against a bound key (`foreign_key`,
+`unknown_identity`, and timestamps outside the window) can come from anyone:
+they are never journaled, and their log lines are limited to 60 per minute
+in total. The metric counts all of them.
 
 ## Writing a binding
 

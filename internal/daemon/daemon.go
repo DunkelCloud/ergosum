@@ -49,10 +49,11 @@ type Daemon struct {
 	listen      func(network, address string) (net.Listener, error)
 	key         *ecdsa.PrivateKey
 	cert        tls.Certificate
-	book        *requestBook
+	inflight    *inflight
 	authorities []*authorityClient
 	preferred   int
 	tokenGID    int
+	overlay     []netip.Prefix
 
 	metrics    *metrics.Registry
 	mExpiry    *metrics.Vec
@@ -73,13 +74,15 @@ type authorityClient struct {
 	client *http.Client
 }
 
-// New loads (or creates) the identity key and the request book.
+// New loads (or creates) the identity key.
 func New(cfg Config, opts Options) (*Daemon, error) {
 	cfg.SetDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	d := &Daemon{cfg: cfg, log: opts.Logger, now: opts.Now, listen: opts.Listen, tokenGID: -1}
+	overlay, _ := protocol.ParsePrefixes(cfg.OverlayPrefixes) // checked by Validate
+	d := &Daemon{cfg: cfg, log: opts.Logger, now: opts.Now, listen: opts.Listen, tokenGID: -1,
+		inflight: newInflight(), overlay: overlay}
 	if d.log == nil {
 		d.log = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	}
@@ -101,9 +104,6 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 		d.log.Info("generated identity key", "fingerprint", d.Fingerprint())
 	}
 	if d.cert, err = tlspin.Certificate(key); err != nil {
-		return nil, err
-	}
-	if d.book, err = loadRequestBook(filepath.Join(cfg.StateDir, "requests.json"), d.now); err != nil {
 		return nil, err
 	}
 	for _, a := range cfg.Authorities {
@@ -214,13 +214,9 @@ func (b *backoff) next() time.Duration {
 func (b *backoff) reset() { b.n = 0 }
 
 // Obtain performs one request round: it keeps the callback listener open,
-// tries the authorities one after another with the same request ID, and
-// returns the first token.
+// tries the authorities one after another, each with a fresh request ID,
+// and returns the first token.
 func (d *Daemon) Obtain(ctx context.Context) (string, jwt.Claims, error) {
-	id, err := d.book.open()
-	if err != nil {
-		return "", jwt.Claims{}, fmt.Errorf("persisting request ID: %w", err)
-	}
 	if err := d.acquireListener(); err != nil {
 		return "", jwt.Claims{}, err
 	}
@@ -231,12 +227,9 @@ func (d *Daemon) Obtain(ctx context.Context) (string, jwt.Claims, error) {
 	for i := 0; i < n; i++ {
 		idx := (d.preferred + i) % n
 		a := d.authorities[idx]
-		token, claims, err := d.request(ctx, a, id)
+		token, claims, err := d.request(ctx, a)
 		if err == nil {
 			d.preferred = idx
-			if err := d.book.complete(id); err != nil {
-				d.log.Warn("persisting request state failed", "err", err)
-			}
 			return token, claims, nil
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
@@ -261,7 +254,12 @@ func (e *RequestError) Error() string {
 	return fmt.Sprintf("%s (%d)", e.Code, e.Status)
 }
 
-func (d *Daemon) request(ctx context.Context, a *authorityClient, id string) (string, jwt.Claims, error) {
+// request sends one token request. Its request ID is new, is never reused,
+// and counts as in flight to this instance until the answer arrives.
+func (d *Daemon) request(ctx context.Context, a *authorityClient) (string, jwt.Claims, error) {
+	id := protocol.NewRequestID()
+	d.inflight.add(id, a.pin)
+	defer d.inflight.remove(id)
 	req := protocol.TokenRequest{
 		V: protocol.Version, Type: protocol.TypeTokenRequest, Identity: d.cfg.Identity,
 		RequestID: id, Timestamp: d.now().UTC(), Addresses: d.addresses(),
@@ -356,7 +354,7 @@ func (d *Daemon) addresses() []string {
 				continue
 			}
 			ip = ip.Unmap()
-			if !ip.IsGlobalUnicast() || overlay(ip) {
+			if !ip.IsGlobalUnicast() || protocol.InPrefixes(ip, d.overlay) {
 				continue
 			}
 			out = append(out, ip.String())
@@ -366,20 +364,6 @@ func (d *Daemon) addresses() []string {
 		}
 	}
 	return out
-}
-
-var overlayPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
-}
-
-func overlay(a netip.Addr) bool {
-	for _, p := range overlayPrefixes {
-		if p.Contains(a) {
-			return true
-		}
-	}
-	return false
 }
 
 // acquireListener opens the callback listener for the first user; it stays
@@ -420,9 +404,10 @@ func (d *Daemon) releaseListener() {
 	d.listener, d.server = nil, nil
 }
 
-// handleCallback answers an authority's callback. It confirms only request
-// IDs it knows; for any other ID it signs "no open request", which proves
-// that the identity key is being used somewhere else.
+// handleCallback answers an authority's callback. It confirms only a request
+// that is in flight to the calling instance; for anything else it signs "no
+// open request", which proves that the identity key is being used somewhere
+// else.
 func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 	peer, err := tlspin.PeerKey(r.TLS)
 	if err != nil {
@@ -440,7 +425,7 @@ func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := protocol.StatusNoOpenRequest
-	if d.book.known(cb.RequestID) {
+	if d.inflight.confirms(cb.RequestID, keys.Fingerprint(peer)) {
 		status = protocol.StatusConfirmed
 	}
 	resp := protocol.CallbackResponse{
@@ -465,17 +450,13 @@ func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeToken replaces the token file atomically (mode 0640, token group).
+// The group is set before the rename, so a reader never sees the new token
+// with the wrong group, and a failed chown leaves the old file in place.
 func (d *Daemon) writeToken(token string) error {
 	if err := os.MkdirAll(filepath.Dir(d.cfg.TokenFile), 0o755); err != nil { //nolint:gosec // the token file itself is 0640
 		return err
 	}
-	if err := keys.WriteFileAtomic(d.cfg.TokenFile, []byte(token), 0o640); err != nil {
-		return err
-	}
-	if d.tokenGID >= 0 {
-		return os.Chown(d.cfg.TokenFile, -1, d.tokenGID)
-	}
-	return nil
+	return keys.WriteFileAtomicGroup(d.cfg.TokenFile, []byte(token), 0o640, d.tokenGID)
 }
 
 func (d *Daemon) writeMetrics() {

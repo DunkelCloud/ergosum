@@ -25,12 +25,6 @@ type Network interface {
 	Dial(ctx context.Context, route Route, address string) (net.Conn, error)
 }
 
-// DefaultTailnetPrefixes are the address ranges Tailscale assigns.
-var DefaultTailnetPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
-}
-
 // SystemNetwork dials with the operating system and enforces the
 // reachability rules: a tailnet callback must reach an overlay address, an
 // ip or net callback must neither reach nor leave from one. That keeps an
@@ -46,13 +40,7 @@ type SystemNetwork struct {
 var ErrRouteViolation = errors.New("callback route violates reachability rules")
 
 func (n *SystemNetwork) inTailnet(a netip.Addr) bool {
-	a = a.Unmap()
-	for _, p := range n.TailnetPrefixes {
-		if p.Contains(a) {
-			return true
-		}
-	}
-	return false
+	return protocol.InPrefixes(a, n.TailnetPrefixes)
 }
 
 // CheckRemote applies the reachability rule to a resolved remote address.

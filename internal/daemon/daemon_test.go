@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -32,50 +31,23 @@ func TestBackoff(t *testing.T) {
 	}
 }
 
-func TestRequestBook(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "requests.json")
-	now := time.Unix(1_800_000_000, 0)
-	clock := func() time.Time { return now }
-	b, err := loadRequestBook(path, clock)
-	if err != nil {
-		t.Fatal(err)
+func TestInflight(t *testing.T) {
+	const a, b = "SHA256:authority-a", "SHA256:authority-b"
+	f := newInflight()
+	id := "AAAAAAAAAAAAAAAAAAAAAA"
+	if f.confirms(id, a) {
+		t.Fatal("unknown request confirmed")
 	}
-	id, err := b.open()
-	if err != nil {
-		t.Fatal(err)
+	f.add(id, a)
+	if !f.confirms(id, a) {
+		t.Fatal("request in flight not confirmed")
 	}
-	if again, _ := b.open(); again != id {
-		t.Fatal("open request not reused")
+	// The same request ID from another instance is not ours.
+	if f.confirms(id, b) {
+		t.Fatal("request confirmed for an instance it was not sent to")
 	}
-	// A restart reloads the open request.
-	b2, _ := loadRequestBook(path, clock)
-	if again, _ := b2.open(); again != id {
-		t.Fatal("open request lost across restart")
-	}
-	if !b2.known(id) || b2.known("AAAAAAAAAAAAAAAAAAAAAA") {
-		t.Fatal("known() wrong")
-	}
-	if err := b2.complete(id); err != nil {
-		t.Fatal(err)
-	}
-	now = now.Add(9 * time.Minute)
-	if !b2.known(id) {
-		t.Fatal("completed request forgotten before ten minutes")
-	}
-	if next, _ := b2.open(); next == id {
-		t.Fatal("completed request ID reused")
-	}
-	now = now.Add(2 * time.Minute)
-	if b2.known(id) {
-		t.Fatal("completed request still known after ten minutes")
-	}
-	// An open request is abandoned after MaxOpen and gets a new ID.
-	stale, _ := b2.open()
-	now = now.Add(MaxOpen + time.Second)
-	if fresh, _ := b2.open(); fresh == stale {
-		t.Fatal("stale open request reused")
-	}
-	if !b2.known(stale) {
-		t.Fatal("abandoned request forgotten immediately")
+	f.remove(id)
+	if f.confirms(id, a) {
+		t.Fatal("finished request still confirmed")
 	}
 }

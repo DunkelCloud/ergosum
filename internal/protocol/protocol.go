@@ -48,6 +48,41 @@ const (
 	DefaultOpsPort       = 7434 // authority metrics, health, public keys (HTTP)
 )
 
+// DefaultOverlayPrefixes are the address ranges Tailscale assigns. Daemon
+// and authority use them unless configured otherwise.
+var DefaultOverlayPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
+}
+
+// ParsePrefixes parses overlay prefixes from configuration; an empty list
+// yields DefaultOverlayPrefixes.
+func ParsePrefixes(in []string) ([]netip.Prefix, error) {
+	if len(in) == 0 {
+		return DefaultOverlayPrefixes, nil
+	}
+	out := make([]netip.Prefix, 0, len(in))
+	for _, s := range in {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return nil, fmt.Errorf("bad prefix %q", s)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
+}
+
+// InPrefixes reports whether a lies in one of the prefixes.
+func InPrefixes(a netip.Addr, prefixes []netip.Prefix) bool {
+	a = a.Unmap()
+	for _, p := range prefixes {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
 // Envelope carries a signed payload. Payload is the base64url encoding of
 // the exact JSON bytes that were signed; receivers verify those bytes and
 // only then decode them, so no canonicalization of JSON is needed.

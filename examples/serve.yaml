@@ -20,9 +20,10 @@ signing_key: /etc/ergosum/signing.key
 journal: /var/lib/ergosum/journal.db
 unseal_socket: /var/lib/ergosum/unseal.sock
 
-# Token requests and binding writes (TLS with the instance key). Bind it to
-# the overlay address if the instance should only be reachable there.
-listen: ":7432"
+# Token requests and binding writes (TLS with the instance key). Required:
+# the instance's overlay address. Binding all interfaces (":7432") needs
+# listen_all_interfaces: true.
+listen: "100.64.0.10:7432"
 # Metrics, health and public keys over plain HTTP.
 ops_listen: "127.0.0.1:7434"
 

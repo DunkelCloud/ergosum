@@ -180,19 +180,26 @@ epoch. Through ingest, every verified event is stored, and the rule decides.
 
 ### Observations
 
-An instance records the outcome of each token request as
-`observation.issued`, `observation.key_duplicate`,
-`observation.wrong_location`, `observation.foreign_key` or
-`observation.unknown_identity`. The body is a signed envelope (ADR 0001,
+An instance records the outcome of a token request that verifies against
+a bound key as `observation.issued`, `observation.key_duplicate`,
+`observation.wrong_location` or `observation.replay`. The body is a signed
+envelope (ADR 0001,
 context `ergosum/v1/observation`) made with the instance key, containing
 instance, kid, identity, epoch, request ID, presented key, remote address,
 per-check outcomes, token ID and reason. For `key_duplicate` it contains the
 daemon's signed `no_open_request` response as evidence, verifiable with the
 bound key alone.
 
-Observations never set or end a binding. `foreign_key` and
-`unknown_identity` can be caused by anyone and are rate-limited (one per
-identity and minute) before they reach the journal.
+Observations never set or end a binding. Only what the current
+configuration authenticates enters the journal: binding events with the
+approvals the registry demands, and observations of requests signed by the
+key that the identity's binding names. Refusals of requests that do not
+verify that way (`unknown_identity`, `foreign_key`) can be caused by anyone
+with any number of names; they count in the metric and reach the audit log
+within an overall limit (60 lines per minute), but never the journal.
+`wrong_location` and `replay` can be repeated at will by a holder of the key
+and are journaled once per identity and minute; `issued` and
+`key_duplicate` always.
 
 ### Checkpoints and compaction
 

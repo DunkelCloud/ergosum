@@ -252,6 +252,13 @@ func checkPrivateMode(path string) error {
 // WriteFileAtomic writes data to a temporary file next to path, syncs it
 // and renames it over path.
 func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	return WriteFileAtomicGroup(path, data, mode, -1)
+}
+
+// WriteFileAtomicGroup is WriteFileAtomic that also gives the file the
+// group gid (if gid >= 0) before the rename, so that path never shows the
+// new content with the wrong group.
+func WriteFileAtomicGroup(path string, data []byte, mode os.FileMode, gid int) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -262,6 +269,12 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := f.Chmod(mode); err != nil && runtime.GOOS != "windows" {
 		_ = f.Close()
 		return err
+	}
+	if gid >= 0 {
+		if err := f.Chown(-1, gid); err != nil {
+			_ = f.Close()
+			return err
+		}
 	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()

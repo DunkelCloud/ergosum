@@ -35,18 +35,19 @@ const trustDomain = "example.com"
 
 // simNet is the simulated network between authority and machines.
 type simNet struct {
-	mu     sync.Mutex
-	routes map[string]string // target "host:port" -> loopback address
-	gate   chan struct{}     // when set, dials wait for it
-	dialed chan string
-	dials  []string
+	mu      sync.Mutex
+	routes  map[string]string // target "host:port" -> loopback address
+	gate    chan struct{}     // when set, dials wait for it
+	dialed  chan string
+	aborted chan string // receives dials canceled while waiting at the gate
+	dials   []string
 }
 
 func newSimNet() *simNet { return &simNet{routes: map[string]string{}} }
 
 func (n *simNet) Dial(ctx context.Context, route authority.Route, address string) (net.Conn, error) {
 	n.mu.Lock()
-	gate, dialed := n.gate, n.dialed
+	gate, dialed, aborted := n.gate, n.dialed, n.aborted
 	n.dials = append(n.dials, route.Check+" "+address)
 	n.mu.Unlock()
 	if dialed != nil {
@@ -59,6 +60,12 @@ func (n *simNet) Dial(ctx context.Context, route authority.Route, address string
 		select {
 		case <-gate:
 		case <-ctx.Done():
+			if aborted != nil {
+				select {
+				case aborted <- address:
+				default:
+				}
+			}
 			return nil, ctx.Err()
 		}
 	}
