@@ -1,0 +1,26 @@
+# Machine daemon (ergosumd). All addresses are documentation examples.
+
+# The machine's identity (FQDN). It must match the binding.
+identity: host1.example.com
+
+state_dir: /var/lib/ergosum
+token_file: /run/ergosum/token
+# Group of the token file (mode 0640); put Vault Agent's user into it.
+token_group: ergosum-token
+# node_exporter textfile collector; leave empty to disable.
+metrics_file: /var/lib/node_exporter/textfile_collector/ergosum.prom
+
+# Opened only while a request is in flight. Allow the authorities' source
+# addresses in the firewall.
+callback_listen: ":7432"
+
+# Underlay addresses reported for net checks. Empty: all global unicast
+# addresses outside the overlay.
+addresses: []
+
+# Tried in order. key is the fingerprint printed by "ergosum keygen".
+authorities:
+  - url: https://authority-a.example.com:7431
+    key: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  - url: https://authority-b.example.com:7431
+    key: "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"

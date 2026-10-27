@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+# ergosum machine identity daemon (OpenRC, supervise-daemon).
+
+name="ergosumd"
+description="ergosum machine identity daemon"
+
+: "${ERGOSUMD_CONFIG:=/etc/ergosum/ergosumd.yaml}"
+
+supervisor="supervise-daemon"
+command="/usr/bin/ergosumd"
+command_args="run --config ${ERGOSUMD_CONFIG}"
+# Supplementary groups of the user (ergosum-token) are applied as well.
+command_user="ergosum:ergosum"
+umask="027"
+# The daemon runs in the foreground and logs to stdout.
+output_logger="logger -t ergosumd -p daemon.info"
+error_logger="logger -t ergosumd -p daemon.err"
+respawn_delay=5
+respawn_max=0
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath --directory --owner ergosum:ergosum --mode 0700 /var/lib/ergosum
+	checkpath --directory --owner ergosum:ergosum --mode 0755 /run/ergosum
+}

@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+# ergosum authority (OpenRC, supervise-daemon).
+
+name="ergosum"
+description="ergosum authority"
+
+: "${ERGOSUM_CONFIG:=/etc/ergosum/serve.yaml}"
+
+supervisor="supervise-daemon"
+command="/usr/bin/ergosum"
+command_args="serve --config ${ERGOSUM_CONFIG}"
+command_user="ergosum:ergosum"
+umask="077"
+output_logger="logger -t ergosum -p daemon.info"
+error_logger="logger -t ergosum -p daemon.err"
+# With a passphrase-encrypted signing key a respawned instance is sealed
+# until "ergosum unseal" is run on this host.
+respawn_delay=5
+respawn_max=0
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath --directory --owner ergosum:ergosum --mode 0700 /var/lib/ergosum
+}
