@@ -76,7 +76,7 @@ Chosen option 1.
 | --- | --- | --- | --- | --- |
 | Token request | authority, port 7431 | daemon | – | authority keys from the daemon config |
 | Callback | daemon, port 7432 | authority | authority keys from the daemon config | the bound daemon key |
-| Ops (metrics, health, public keys) | authority, port 7433, plain HTTP | operator, scraper | – | – |
+| Ops (metrics, health, public keys, journal state hash) | authority, port 7433, plain HTTP | operator, scraper | – | – |
 
 All ports are configurable. The callback port of a target may be set per
 binding (`192.0.2.10:7440`); otherwise the authority uses its configured
@@ -104,6 +104,7 @@ for one never verifies for another:
 | `ergosum/v1/token-request` | daemon key | token request |
 | `ergosum/v1/callback-response` | daemon key | callback response |
 | `ergosum/v1/observation` | instance key | journal observation (ADR 0003) |
+| `ergosum/v1/checkpoint` | instance key | journal checkpoint (ADR 0003) |
 
 ### Messages
 
