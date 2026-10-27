@@ -45,8 +45,10 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+# The Go runtime adjusts resource limits at start, so @resources stays
+# allowed (it is part of @system-service).
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

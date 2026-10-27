@@ -46,8 +46,10 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+# The daemon changes the group of its token file and the Go runtime adjusts
+# resource limits at start, so @chown and @resources stay allowed.
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target
