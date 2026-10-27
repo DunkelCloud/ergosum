@@ -19,11 +19,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath \
       -X github.com/DunkelCloud/ergosum/internal/version.Commit=${COMMIT}" \
     -o /out/usr/bin/ergosum ./cmd/ergosum
 
-# State and runtime directories owned by the unprivileged user, so that a
-# named volume mounted at /var/lib/ergosum inherits the ownership.
-RUN mkdir -p /out/var/lib/ergosum /out/run/ergosum /out/etc/ergosum \
- && chown 65532:65532 /out/var/lib/ergosum /out/run/ergosum \
- && chmod 0700 /out/var/lib/ergosum /out/run/ergosum
+# The state directory (journal, unseal socket) belongs to the unprivileged
+# user, so that a named volume mounted there inherits the ownership.
+RUN mkdir -p /out/var/lib/ergosum /out/etc/ergosum \
+ && chown 65532:65532 /out/var/lib/ergosum \
+ && chmod 0700 /out/var/lib/ergosum
 
 FROM scratch
 

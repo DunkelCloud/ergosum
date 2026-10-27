@@ -1,0 +1,350 @@
+// Package e2e runs authority and daemons in one process. A simulated
+// network maps callback targets ("host:port" as the authority dials them) to
+// loopback listeners, so a machine's place is just the set of targets that
+// reach its listener. A clone elsewhere is a daemon with the same key that
+// is reachable under other targets, or under none.
+package e2e
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/DunkelCloud/ergosum/internal/authority"
+	"github.com/DunkelCloud/ergosum/internal/daemon"
+	"github.com/DunkelCloud/ergosum/internal/journal"
+	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
+	"github.com/DunkelCloud/ergosum/internal/keys"
+	"github.com/DunkelCloud/ergosum/internal/protocol"
+	"github.com/DunkelCloud/ergosum/internal/tlspin"
+)
+
+const trustDomain = "example.com"
+
+// simNet is the simulated network between authority and machines.
+type simNet struct {
+	mu     sync.Mutex
+	routes map[string]string // target "host:port" -> loopback address
+	gate   chan struct{}     // when set, dials wait for it
+	dialed chan string
+	dials  []string
+}
+
+func newSimNet() *simNet { return &simNet{routes: map[string]string{}} }
+
+func (n *simNet) Dial(ctx context.Context, route authority.Route, address string) (net.Conn, error) {
+	n.mu.Lock()
+	gate, dialed := n.gate, n.dialed
+	n.dials = append(n.dials, route.Check+" "+address)
+	n.mu.Unlock()
+	if dialed != nil {
+		select {
+		case dialed <- address:
+		default:
+		}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	n.mu.Lock()
+	real, ok := n.routes[address]
+	n.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("simnet: %s unreachable", address)
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", real)
+}
+
+// at returns a Listen function for a daemon reachable under the targets.
+func (n *simNet) at(targets ...string) func(string, string) (net.Listener, error) {
+	return func(string, string) (net.Listener, error) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		n.mu.Lock()
+		for _, t := range targets {
+			n.routes[t] = ln.Addr().String()
+		}
+		n.mu.Unlock()
+		return ln, nil
+	}
+}
+
+// env is one authority instance with its admins.
+type env struct {
+	t      *testing.T
+	net    *simNet
+	admins *jt.Admins
+	auth   *authority.Authority
+	key    *ecdsa.PrivateKey
+	url    string
+	socket string
+	cancel context.CancelFunc
+	done   chan error
+}
+
+type envOptions struct {
+	threshold  int
+	passphrase string // non-empty: encrypted signing key, starts sealed
+	networks   []string
+	ttl        time.Duration
+	instance   string
+	net        *simNet
+	admins     *jt.Admins
+}
+
+func quietLogger(t *testing.T) *slog.Logger {
+	if testing.Verbose() {
+		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func freePort(t *testing.T) string {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+func newEnv(t *testing.T, o envOptions) *env {
+	t.Helper()
+	if o.threshold == 0 {
+		o.threshold = 1
+	}
+	if o.ttl == 0 {
+		o.ttl = 30 * time.Minute
+	}
+	if o.instance == "" {
+		o.instance = "authority-a"
+	}
+	if o.net == nil {
+		o.net = newSimNet()
+	}
+	if o.admins == nil {
+		o.admins = jt.NewAdmins(t, "alice", "bob", "carol")
+	}
+	dir := t.TempDir()
+	key, err := keys.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pemBytes []byte
+	if o.passphrase != "" {
+		pemBytes, err = keys.EncryptPEM(key, []byte(o.passphrase))
+	} else {
+		pemBytes, err = keys.MarshalPrivatePEM(key)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "signing.key")
+	if err := os.WriteFile(keyPath, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	apiAddr := freePort(t)
+	cfg := authority.Config{
+		Instance:     o.instance,
+		TrustDomain:  trustDomain,
+		Issuer:       "https://ergosum.example.com",
+		TokenTTL:     o.ttl,
+		SigningKey:   keyPath,
+		Journal:      filepath.Join(dir, "journal.db"),
+		Listen:       apiAddr,
+		OpsListen:    "127.0.0.1:0",
+		UnsealSocket: filepath.Join(dir, "unseal.sock"),
+		Registry:     o.admins.Registry(o.threshold),
+	}
+	cfg.Callbacks.Timeout = 3 * time.Second
+	for _, n := range o.networks {
+		cfg.Callbacks.Networks = append(cfg.Callbacks.Networks, authority.NetworkRoute{CIDR: n})
+	}
+	a, err := authority.New(cfg, authority.Options{Logger: quietLogger(t), Network: o.net})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	e := &env{t: t, net: o.net, admins: o.admins, auth: a, key: key, url: "https://" + apiAddr, socket: cfg.UnsealSocket, cancel: cancel, done: make(chan error, 1)}
+	go func() { e.done <- a.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-e.done
+		a.Close()
+	})
+	if o.passphrase == "" {
+		e.waitReady()
+	} else {
+		e.waitOps()
+	}
+	return e
+}
+
+func (e *env) waitReady() {
+	e.t.Helper()
+	select {
+	case <-e.auth.Ready():
+	case err := <-e.done:
+		e.t.Fatalf("authority stopped: %v", err)
+	case <-time.After(10 * time.Second):
+		e.t.Fatal("authority not ready")
+	}
+}
+
+func (e *env) waitOps() {
+	e.t.Helper()
+	for i := 0; i < 200; i++ {
+		if e.auth.OpsAddr() != "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	e.t.Fatal("ops listener not up")
+}
+
+func (e *env) fingerprint() string { return keys.Fingerprint(&e.key.PublicKey) }
+
+// apiClient talks to the authority API with its key pinned.
+func (e *env) apiClient() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+		TLSClientConfig: tlspin.ClientConfig(nil, tlspin.Fingerprints(e.fingerprint())),
+	}}
+}
+
+// writeBinding posts a binding event to the write API.
+func (e *env) writeBinding(ev *journal.BindingEvent) (int, string) {
+	e.t.Helper()
+	body, _ := json.Marshal(ev)
+	resp, err := e.apiClient().Post(e.url+protocol.PathBindings, "application/json", bytes.NewReader(body))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(data)
+}
+
+// bind writes an approved binding.set through the API.
+func (e *env) bind(identity, fingerprint string, epoch uint64, checks ...journal.Check) {
+	e.t.Helper()
+	ev := e.admins.Sign(e.t, jt.Set(trustDomain, identity, epoch, fingerprint, checks...), "alice", "bob", "carol")
+	if status, body := e.writeBinding(ev); status != http.StatusCreated {
+		e.t.Fatalf("binding %s: %d %s", identity, status, body)
+	}
+}
+
+func (e *env) revoke(identity string, epoch uint64) {
+	e.t.Helper()
+	ev := e.admins.Sign(e.t, jt.Revoke(trustDomain, identity, epoch), "alice", "bob", "carol")
+	if status, body := e.writeBinding(ev); status != http.StatusCreated {
+		e.t.Fatalf("revoke %s: %d %s", identity, status, body)
+	}
+}
+
+type machine struct {
+	d        *daemon.Daemon
+	stateDir string
+	tokenDir string
+}
+
+type machineOptions struct {
+	stateDir    string // reuse a state dir (restart, or a clone's copied key)
+	addresses   []string
+	targets     []string
+	authorities []*env
+}
+
+// machine creates a daemon for identity, reachable under the given targets.
+func (e *env) machine(identity string, o machineOptions) *machine {
+	e.t.Helper()
+	if o.stateDir == "" {
+		o.stateDir = e.t.TempDir()
+	}
+	if len(o.authorities) == 0 {
+		o.authorities = []*env{e}
+	}
+	if o.addresses == nil {
+		o.addresses = []string{"192.0.2.250"}
+	}
+	tokenDir := e.t.TempDir()
+	cfg := daemon.Config{
+		Identity:       identity,
+		StateDir:       o.stateDir,
+		TokenFile:      filepath.Join(tokenDir, "token"),
+		TokenGroup:     "-",
+		MetricsFile:    filepath.Join(tokenDir, "ergosum.prom"),
+		CallbackListen: "127.0.0.1:0",
+		Addresses:      o.addresses,
+		RequestTimeout: 20 * time.Second,
+	}
+	for _, a := range o.authorities {
+		cfg.Authorities = append(cfg.Authorities, daemon.AuthorityConfig{URL: a.url, Key: a.fingerprint()})
+	}
+	d, err := daemon.New(cfg, daemon.Options{Logger: quietLogger(e.t), Listen: e.net.at(o.targets...)})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(d.Close)
+	return &machine{d: d, stateDir: o.stateDir, tokenDir: tokenDir}
+}
+
+// cloneState copies a machine's state directory, as a disk image would.
+func cloneState(t *testing.T, from string) string {
+	t.Helper()
+	to := t.TempDir()
+	entries, err := os.ReadDir(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, en := range entries {
+		data, err := os.ReadFile(filepath.Join(from, en.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(to, en.Name()), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return to
+}
+
+func denied(err error) bool {
+	var re *daemon.RequestError
+	return errors.As(err, &re) && re.Code == protocol.ErrDenied
+}
+
+func requireCount(t *testing.T, a *authority.Authority, result string, want float64) {
+	t.Helper()
+	if got := a.RequestCount(result); got != want {
+		t.Fatalf("machine_identity_requests_total{result=%q} = %v, want %v", result, got, want)
+	}
+}
+
+func journalCount(t *testing.T, a *authority.Authority, kind string) int {
+	t.Helper()
+	n, err := a.Store().Count(context.Background(), kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}

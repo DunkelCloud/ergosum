@@ -1,0 +1,396 @@
+// Package authority implements "ergosum serve": it holds the binding
+// journal, verifies token requests, calls the machine back at the places its
+// binding names, and signs identity tokens.
+package authority
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/DunkelCloud/ergosum/internal/journal"
+	"github.com/DunkelCloud/ergosum/internal/keys"
+	"github.com/DunkelCloud/ergosum/internal/metrics"
+	"github.com/DunkelCloud/ergosum/internal/protocol"
+	"github.com/DunkelCloud/ergosum/internal/tlspin"
+)
+
+// Results of a token request, as exported in
+// machine_identity_requests_total{result=...}.
+const (
+	ResultIssued          = "issued"
+	ResultKeyDuplicate    = "key_duplicate"
+	ResultWrongLocation   = "wrong_location"
+	ResultForeignKey      = "foreign_key"
+	ResultUnknownIdentity = "unknown_identity"
+)
+
+// Options carries dependencies that tests replace.
+type Options struct {
+	Logger  *slog.Logger
+	Network Network
+	Now     func() time.Time
+	// Listen creates listeners; default net.Listen.
+	Listen func(network, address string) (net.Listener, error)
+}
+
+// Authority is one authority instance.
+type Authority struct {
+	cfg     Config
+	log     *slog.Logger
+	audit   *slog.Logger
+	store   *journal.Store
+	net     Network
+	routes  routes
+	now     func() time.Time
+	listen  func(network, address string) (net.Listener, error)
+	limiter *limiter
+
+	metrics  *metrics.Registry
+	requests *metrics.Vec
+	sealedG  *metrics.Vec
+	bindings *metrics.Vec
+
+	keyFile *keys.KeyFile
+	public  *ecdsa.PublicKey
+	kid     string
+
+	mu       sync.RWMutex
+	key      *ecdsa.PrivateKey // nil while sealed
+	cert     tls.Certificate
+	unsealed chan struct{}
+
+	addrMu  sync.Mutex
+	apiAddr net.Addr
+	opsAddr net.Addr
+	ready   chan struct{}
+}
+
+// New loads the signing key and opens the journal. With an encrypted key the
+// instance starts sealed.
+func New(cfg Config, opts Options) (*Authority, error) {
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	rs, _ := cfg.routes()
+	a := &Authority{
+		cfg:      cfg,
+		log:      opts.Logger,
+		net:      opts.Network,
+		routes:   rs,
+		now:      opts.Now,
+		listen:   opts.Listen,
+		limiter:  newLimiter(time.Minute),
+		unsealed: make(chan struct{}),
+		ready:    make(chan struct{}),
+	}
+	if a.log == nil {
+		a.log = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	}
+	a.audit = a.log.With("log_type", "audit")
+	if a.now == nil {
+		a.now = time.Now
+	}
+	if a.listen == nil {
+		a.listen = net.Listen
+	}
+	if a.net == nil {
+		a.net = &SystemNetwork{TailnetPrefixes: rs.overlay, Timeout: cfg.Callbacks.Timeout}
+	}
+
+	data, err := os.ReadFile(cfg.SigningKey)
+	if err != nil {
+		return nil, fmt.Errorf("signing key: %w", err)
+	}
+	a.keyFile, err = keys.ParseKeyFile(data)
+	if err != nil {
+		return nil, fmt.Errorf("signing key %s: %w", cfg.SigningKey, err)
+	}
+	a.public = a.keyFile.Public
+	a.kid = keys.Thumbprint(a.public)
+
+	reg, err := journal.NewRegistry(cfg.Registry)
+	if err != nil {
+		return nil, err
+	}
+	a.store, err = journal.Open(cfg.Journal, cfg.Instance, cfg.TrustDomain, reg)
+	if err != nil {
+		return nil, err
+	}
+
+	a.metrics = metrics.NewRegistry()
+	a.requests = a.metrics.Counter("machine_identity_requests_total",
+		"Token requests by result.", "result",
+		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity)
+	a.sealedG = a.metrics.Gauge("machine_identity_authority_sealed",
+		"1 while the signing key is still encrypted and the instance issues nothing.")
+	a.bindings = a.metrics.Counter("machine_identity_binding_events_total",
+		"Binding events submitted to the write API by outcome.", "outcome", "accepted", "rejected")
+
+	if a.keyFile.Encrypted() {
+		a.sealedG.Set("", 1)
+	} else {
+		if err := a.setKey(a.keyFile.Key); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
+}
+
+// Close releases the journal.
+func (a *Authority) Close() error { return a.store.Close() }
+
+// Kid returns the key ID of this instance.
+func (a *Authority) Kid() string { return a.kid }
+
+// PublicKey returns the instance's public key.
+func (a *Authority) PublicKey() *ecdsa.PublicKey { return a.public }
+
+// Sealed reports whether the signing key is still encrypted.
+func (a *Authority) Sealed() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.key == nil
+}
+
+// Store gives tests and tooling access to the journal.
+func (a *Authority) Store() *journal.Store { return a.store }
+
+// Metrics returns the metrics registry.
+func (a *Authority) Metrics() *metrics.Registry { return a.metrics }
+
+// RequestCount returns machine_identity_requests_total for a result.
+func (a *Authority) RequestCount(result string) float64 { return a.requests.Get(result) }
+
+func (a *Authority) setKey(k *ecdsa.PrivateKey) error {
+	cert, err := tlspin.Certificate(k)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.key != nil {
+		return nil
+	}
+	a.key, a.cert = k, cert
+	a.sealedG.Set("", 0)
+	close(a.unsealed)
+	return nil
+}
+
+func (a *Authority) signingKey() (*ecdsa.PrivateKey, tls.Certificate) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.key, a.cert
+}
+
+// Unseal decrypts the signing key with a passphrase.
+func (a *Authority) Unseal(passphrase []byte) error {
+	if !a.Sealed() {
+		return nil
+	}
+	k, err := a.keyFile.Decrypt(passphrase)
+	if err != nil {
+		return err
+	}
+	if err := a.setKey(k); err != nil {
+		return err
+	}
+	a.log.Info("unsealed", "kid", a.kid)
+	return nil
+}
+
+// Ready is closed once the API listener accepts connections.
+func (a *Authority) Ready() <-chan struct{} { return a.ready }
+
+// APIAddr returns the bound API address once Ready is closed.
+func (a *Authority) APIAddr() string {
+	a.addrMu.Lock()
+	defer a.addrMu.Unlock()
+	if a.apiAddr == nil {
+		return ""
+	}
+	return a.apiAddr.String()
+}
+
+// OpsAddr returns the bound ops address, or "" if not (yet) listening.
+func (a *Authority) OpsAddr() string {
+	a.addrMu.Lock()
+	defer a.addrMu.Unlock()
+	if a.opsAddr == nil {
+		return ""
+	}
+	return a.opsAddr.String()
+}
+
+// Run serves until ctx ends. A sealed instance serves only the ops endpoint
+// and the unseal socket; the API listener opens after unsealing.
+func (a *Authority) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errc := make(chan error, 3)
+	var servers []*http.Server
+
+	if a.cfg.OpsListen != "-" {
+		ln, err := a.listen("tcp", a.cfg.OpsListen)
+		if err != nil {
+			return fmt.Errorf("ops listener: %w", err)
+		}
+		a.addrMu.Lock()
+		a.opsAddr = ln.Addr()
+		a.addrMu.Unlock()
+		srv := &http.Server{Handler: a.opsHandler(), ReadHeaderTimeout: 10 * time.Second}
+		servers = append(servers, srv)
+		go func() { errc <- serve(srv, ln) }()
+	}
+
+	a.log.Info("starting", "instance", a.cfg.Instance, "kid", a.kid,
+		"fingerprint", keys.Fingerprint(a.public), "sealed", a.Sealed())
+
+	if a.Sealed() {
+		stop, err := a.serveUnsealSocket(ctx)
+		if err != nil {
+			return err
+		}
+		a.log.Warn("sealed: run \"ergosum unseal\" on this host to start issuing", "socket", a.cfg.UnsealSocket)
+		select {
+		case <-a.unsealed:
+			stop()
+		case <-ctx.Done():
+			stop()
+			shutdown(servers)
+			return nil
+		case err := <-errc:
+			stop()
+			return err
+		}
+	}
+
+	_, cert := a.signingKey()
+	ln, err := a.listen("tcp", a.cfg.Listen)
+	if err != nil {
+		shutdown(servers)
+		return fmt.Errorf("api listener: %w", err)
+	}
+	a.addrMu.Lock()
+	a.apiAddr = ln.Addr()
+	a.addrMu.Unlock()
+	api := &http.Server{
+		Handler:           a.apiHandler(),
+		TLSConfig:         tlspin.ServerConfig(cert, nil),
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       time.Minute,
+	}
+	servers = append(servers, api)
+	go func() { errc <- serve(api, tls.NewListener(ln, api.TLSConfig)) }()
+	close(a.ready)
+	a.log.Info("issuing", "listen", ln.Addr().String())
+
+	select {
+	case <-ctx.Done():
+		shutdown(servers)
+		return nil
+	case err := <-errc:
+		shutdown(servers)
+		return err
+	}
+}
+
+func serve(srv *http.Server, ln net.Listener) error {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func shutdown(servers []*http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, s := range servers {
+		_ = s.Shutdown(ctx)
+	}
+}
+
+func (a *Authority) apiHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+protocol.PathToken, a.handleToken)
+	mux.HandleFunc("POST "+protocol.PathBindings, a.handleBindingWrite)
+	mux.HandleFunc("GET "+protocol.PathBindings+"/{identity}", a.handleBindingRead)
+	mux.HandleFunc("GET "+protocol.PathKeys, a.handleKeys)
+	mux.HandleFunc("GET "+protocol.PathKeysPEM, a.handleKeysPEM)
+	return mux
+}
+
+func (a *Authority) opsHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", a.metrics.Handler())
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if a.Sealed() {
+			http.Error(w, "sealed", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("GET "+protocol.PathKeys, a.handleKeys)
+	mux.HandleFunc("GET "+protocol.PathKeysPEM, a.handleKeysPEM)
+	return mux
+}
+
+func (a *Authority) handleKeys(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"keys": []keys.JWK{keys.PublicJWK(a.public)}})
+}
+
+func (a *Authority) handleKeysPEM(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	_, _ = w.Write(keys.MarshalPublicPEM(a.public))
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (a *Authority) writeError(w http.ResponseWriter, status int, code, detail string) {
+	writeJSON(w, status, protocol.ErrorResponse{V: protocol.Version, Error: code, Detail: detail, ServerTime: a.now().UTC()})
+}
+
+// limiter allows one event per key and interval; it rate-limits warnings
+// and observations for unsolicited requests.
+type limiter struct {
+	mu    sync.Mutex
+	every time.Duration
+	last  map[string]time.Time
+}
+
+func newLimiter(every time.Duration) *limiter {
+	return &limiter{every: every, last: map[string]time.Time{}}
+}
+
+func (l *limiter) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t, ok := l.last[key]; ok && now.Sub(t) < l.every {
+		return false
+	}
+	if len(l.last) > 10000 {
+		for k, t := range l.last {
+			if now.Sub(t) >= l.every {
+				delete(l.last, k)
+			}
+		}
+	}
+	l.last[key] = now
+	return true
+}
