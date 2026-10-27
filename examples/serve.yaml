@@ -22,13 +22,13 @@ unseal_socket: /var/lib/ergosum/unseal.sock
 
 # Token requests and binding writes (TLS with the instance key). Bind it to
 # the overlay address if the instance should only be reachable there.
-listen: ":7431"
+listen: ":7432"
 # Metrics, health and public keys over plain HTTP.
-ops_listen: "127.0.0.1:7433"
+ops_listen: "127.0.0.1:7434"
 
 callbacks:
   # Daemon callback port, unless a binding target names its own port.
-  port: 7432
+  port: 7433
   timeout: 5s
   tailnet:
     # Overlay address ranges; tailnet callbacks must land inside them.

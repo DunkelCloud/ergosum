@@ -31,7 +31,7 @@ COPY --from=builder /out/ /
 
 USER 65532:65532
 VOLUME ["/var/lib/ergosum"]
-EXPOSE 7431 7433
+EXPOSE 7432 7434
 
 ENTRYPOINT ["/usr/bin/ergosum"]
 CMD ["serve", "--config", "/etc/ergosum/serve.yaml"]

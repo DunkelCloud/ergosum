@@ -34,10 +34,10 @@ type Config struct {
 	// Journal is the SQLite file. Default: /var/lib/ergosum/journal.db.
 	Journal string `yaml:"journal"`
 	// Listen is the TLS listener for token requests and binding writes.
-	// Default: :7431.
+	// Default: :7432.
 	Listen string `yaml:"listen"`
 	// OpsListen serves /metrics, /healthz and the public keys over plain
-	// HTTP. Default: 127.0.0.1:7433. Empty string "-" disables it.
+	// HTTP. Default: 127.0.0.1:7434. Empty string "-" disables it.
 	OpsListen string `yaml:"ops_listen"`
 	// UnsealSocket is the local Unix socket for "ergosum unseal". It lives
 	// in the state directory, so that it needs no runtime directory of its
@@ -51,7 +51,7 @@ type Config struct {
 
 // CallbackConfig configures the callback client.
 type CallbackConfig struct {
-	// Port is the daemon callback port when a target names none. Default: 7432.
+	// Port is the daemon callback port when a target names none. Default: 7433.
 	Port int `yaml:"port"`
 	// Timeout per callback. Default: 5s.
 	Timeout time.Duration `yaml:"timeout"`

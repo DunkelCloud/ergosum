@@ -89,10 +89,10 @@ func TestValidation(t *testing.T) {
 		}
 	}
 	good := jt.Set(td, "host1.example.com", 1, fp,
-		journal.Check{Type: "ip", Target: "[2001:db8::10]:7432"},
+		journal.Check{Type: "ip", Target: "[2001:db8::10]:7433"},
 		journal.Check{Type: "ip", Target: "203.0.113.7:7440"},
 		journal.Check{Type: "net", Target: "2001:db8:1::/64"},
-		journal.Check{Type: "tailnet", Target: "host1.tailnet.example.com:7432"})
+		journal.Check{Type: "tailnet", Target: "host1.tailnet.example.com:7433"})
 	if err := good.Validate(); err != nil {
 		t.Fatal(err)
 	}

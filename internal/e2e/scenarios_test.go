@@ -47,7 +47,7 @@ func netCheck(prefix string) journal.Check {
 	return journal.Check{Type: protocol.CheckNet, Target: prefix}
 }
 
-func at(host string) string { return host + ":7432" }
+func at(host string) string { return host + ":7433" }
 
 // TestIssuance: a machine at its bound places receives a token whose claims
 // follow the JWT-SVID layout, for an ip binding and for a net binding.

@@ -74,13 +74,15 @@ Chosen option 1.
 
 | Connection | Server | Client | Server pins | Client pins |
 | --- | --- | --- | --- | --- |
-| Token request | authority, port 7431 | daemon | – | authority keys from the daemon config |
-| Callback | daemon, port 7432 | authority | authority keys from the daemon config | the bound daemon key |
-| Ops (metrics, health, public keys, journal state hash) | authority, port 7433, plain HTTP | operator, scraper | – | – |
+| Token request | authority, port 7432 | daemon | – | authority keys from the daemon config |
+| Callback | daemon, port 7433 | authority | authority keys from the daemon config | the bound daemon key |
+| Ops (metrics, health, public keys, journal state hash) | authority, port 7434, plain HTTP | operator, scraper | – | – |
 
 All ports are configurable. The callback port of a target may be set per
 binding (`192.0.2.10:7440`); otherwise the authority uses its configured
-default. The callback port is not IANA-registered.
+default. The defaults lie in the range 7432–7436, which the IANA registry
+lists as unassigned (as of October 2026); they are not registered for
+ergosum.
 
 The daemon opens its callback listener only while it has a request in
 flight and closes it afterwards.
@@ -139,7 +141,7 @@ JSON (authenticated by the pinned TLS client key):
   "type": "callback",
   "request_id": "<from the request>",
   "nonce": "<43 chars base64url, 256 bit random>",
-  "target": "ip:192.0.2.10:7432",
+  "target": "ip:192.0.2.10:7433",
   "authority": "<kid of the calling instance>"
 }
 ```

@@ -33,7 +33,7 @@ enrolled again with a new key, and a backup must not carry the identity key.
    (`examples/ergosumd.yaml`).
 2. `ergosumd fingerprint` creates the key on first use and prints the
    fingerprint for the binding.
-3. Allow TCP 7432 (or the configured callback port) from the authorities'
+3. Allow TCP 7433 (or the configured callback port) from the authorities'
    source addresses only. The listener is open only while a request is in
    flight.
 4. Start the service. The daemon requests a token, writes it to
@@ -113,7 +113,7 @@ on a host of its own or on a shared host.
 
 ### Metrics and audit
 
-`/metrics` on the ops listener (default `127.0.0.1:7433`):
+`/metrics` on the ops listener (default `127.0.0.1:7434`):
 
 | Metric | Meaning |
 | --- | --- |

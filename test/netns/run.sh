@@ -59,8 +59,8 @@ issuer: https://ergosum.example.com
 signing_key: $W/signing.key
 journal: $W/authority/journal.db
 unseal_socket: $W/authority/unseal.sock
-listen: ":7431"
-ops_listen: "127.0.0.1:7433"
+listen: ":7432"
+ops_listen: "127.0.0.1:7434"
 callbacks:
   networks:
     - cidr: 198.51.100.0/24
@@ -75,11 +75,11 @@ EOF
 in_ns authority "$BIN/ergosum" serve --config "$W/serve.yaml" --log-format text > "$W/authority.log" 2>&1 &
 PIDS+=($!)
 
-ops() { in_ns authority curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:7433$1" || true; }
+ops() { in_ns authority curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:7434$1" || true; }
 for _ in $(seq 50); do [ "$(ops /healthz)" = 503 ] && break; sleep 0.2; done
 [ "$(ops /healthz)" = 503 ] || fail "authority not up and sealed"
-in_ns authority curl -s http://127.0.0.1:7433/metrics | grep -q '^machine_identity_authority_sealed 1' || fail "sealed metric"
-if in_ns host1 curl -sk --max-time 2 https://198.51.100.2:7431/v1/keys >/dev/null; then fail "API reachable while sealed"; fi
+in_ns authority curl -s http://127.0.0.1:7434/metrics | grep -q '^machine_identity_authority_sealed 1' || fail "sealed metric"
+if in_ns host1 curl -sk --max-time 2 https://198.51.100.2:7432/v1/keys >/dev/null; then fail "API reachable while sealed"; fi
 
 log "unseal"
 echo "wrong" | in_ns authority "$BIN/ergosum" unseal -socket "$W/authority/unseal.sock" && fail "wrong passphrase accepted"
@@ -103,7 +103,7 @@ EOF
 }
 
 log "enroll host1"
-daemon_config host1 https://198.51.100.2:7431 '[]'
+daemon_config host1 https://198.51.100.2:7432 '[]'
 HOST1_FP=$(in_ns host1 "$BIN/ergosumd" fingerprint --config "$W/host1/ergosumd.yaml")
 printf 'ergosum binding v1\nkind binding.set\ntrust-domain example.com\nidentity host1.example.com\nepoch 1\nkey %s\ncheck net 198.51.100.0/24\n' "$HOST1_FP" > "$W/event.txt"
 ssh-keygen -q -Y sign -f "$W/alice" -n ergosum-binding "$W/event.txt"
@@ -112,7 +112,7 @@ jq -n --arg key "$HOST1_FP" --rawfile sig "$W/event.txt.sig" '{
 	epoch: 1, key: $key, checks: [{type: "net", target: "198.51.100.0/24"}], signatures: [$sig]
 }' > "$W/event.json"
 code=$(in_ns host1 curl -sk -o "$W/bind.out" -w '%{http_code}' -H 'Content-Type: application/json' \
-	--data @"$W/event.json" https://198.51.100.2:7431/v1/bindings)
+	--data @"$W/event.json" https://198.51.100.2:7432/v1/bindings)
 [ "$code" = 201 ] || { cat "$W/bind.out"; fail "binding write returned $code"; }
 
 log "host1 obtains a token"
@@ -136,7 +136,7 @@ cp -a "$W/host1/state" "$W/clone-state"
 for variant in auto lying; do
 	addrs='[]'
 	[ "$variant" = lying ] && addrs='["198.51.100.20"]'
-	daemon_config "clone-$variant" https://203.0.113.2:7431 "$addrs"
+	daemon_config "clone-$variant" https://203.0.113.2:7432 "$addrs"
 	cp "$W/clone-state/identity.key" "$W/clone-$variant/state/"
 	in_ns clone timeout 8 "$BIN/ergosumd" run --config "$W/clone-$variant/ergosumd.yaml" --log-format text > "$W/clone-$variant.log" 2>&1 || true
 	[ -e "$W/clone-$variant/run/token" ] && fail "clone ($variant) received a token"
@@ -144,7 +144,7 @@ for variant in auto lying; do
 done
 
 log "metrics"
-metrics=$(in_ns authority curl -s http://127.0.0.1:7433/metrics)
+metrics=$(in_ns authority curl -s http://127.0.0.1:7434/metrics)
 echo "$metrics" | grep '^machine_identity_requests_total'
 echo "$metrics" | grep -q 'result="issued"} [1-9]' || fail "no issuance counted"
 echo "$metrics" | grep -q 'result="wrong_location"} [2-9]' || fail "clone attempts not counted as wrong_location"

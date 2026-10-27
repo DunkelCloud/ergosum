@@ -43,9 +43,9 @@ const (
 
 // Default ports. All of them are configurable.
 const (
-	DefaultAuthorityPort = 7431 // token requests and binding writes (TLS)
-	DefaultCallbackPort  = 7432 // daemon callback listener (mutual TLS)
-	DefaultOpsPort       = 7433 // authority metrics, health, public keys (HTTP)
+	DefaultAuthorityPort = 7432 // token requests and binding writes (TLS)
+	DefaultCallbackPort  = 7433 // daemon callback listener (mutual TLS)
+	DefaultOpsPort       = 7434 // authority metrics, health, public keys (HTTP)
 )
 
 // Envelope carries a signed payload. Payload is the base64url encoding of

@@ -28,7 +28,7 @@ type Config struct {
 	TokenGroup string `yaml:"token_group"`
 	// MetricsFile is a node_exporter textfile; empty disables it.
 	MetricsFile string `yaml:"metrics_file"`
-	// CallbackListen is the callback listener address. Default: :7432.
+	// CallbackListen is the callback listener address. Default: :7433.
 	CallbackListen string `yaml:"callback_listen"`
 	// Addresses are the underlay addresses reported in requests. Empty
 	// means: all global unicast addresses outside the overlay.
