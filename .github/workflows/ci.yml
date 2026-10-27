@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history so gitleaks can scan past commits
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+      - name: Scan git history for secrets
+        run: ./gitleaks git --no-banner --redact --verbose .
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned; bump deliberately together with any cleanup it requires.
+          version: v2.12.2
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build static binaries
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          LDFLAGS="-s -w -X github.com/DunkelCloud/ergosum/internal/version.Version=${GITHUB_REF_NAME} -X github.com/DunkelCloud/ergosum/internal/version.Commit=${GITHUB_SHA}"
+          go build -trimpath -ldflags "${LDFLAGS}" -o dist/ergosumd ./cmd/ergosumd
+          go build -trimpath -ldflags "${LDFLAGS}" -o dist/ergosum ./cmd/ergosum
+      - name: Check that the binaries are static
+        run: |
+          for b in dist/*; do
+            file "$b"
+            file "$b" | grep -q 'statically linked'
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ergosum-linux-${{ matrix.goarch }}
+          path: dist/
+          retention-days: 14
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      # The builder stage runs on the native platform and Go cross-compiles,
+      # so no emulation is needed for the arm64 image.
+      - name: Build image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Load amd64 image for a smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ergosum:ci
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+      - name: Smoke test (non-root, read-only root filesystem)
+        run: |
+          docker run --rm --read-only ergosum:ci version
+          test "$(docker image inspect ergosum:ci --format '{{.Config.User}}')" = "65532:65532"

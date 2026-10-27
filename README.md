@@ -1,0 +1,41 @@
+# ergosum
+
+*cogito, ergo sum* — a machine answers the callback at its place, therefore it is who it claims to be.
+
+ergosum gives every machine its own short-lived identity. A small daemon on
+each machine holds a key pair and requests an identity token from an
+authority. The authority looks the identity up in a signed binding journal,
+verifies the request signature and calls the machine back at the places the
+binding names: its overlay name, a fixed underlay address, or an address
+inside a permitted network. Only when every callback confirms does the
+authority sign a short-lived JWT (ES256, JWT-SVID layout, audience `vault`).
+HashiCorp Vault (or OpenBao) verifies the token with its built-in JWT auth
+method, and Vault Agent hands out every further credential.
+
+A copied disk image, a stolen backup or a copied key does not receive a token
+outside the networks it was bound to, and a relay through the real machine is
+detected: the real machine answers a callback for a request it never made with
+a signed "no open request".
+
+## Status
+
+Early development. Interfaces and formats are described in
+[`docs/adr/`](docs/adr) and may still change.
+
+## Components
+
+| Binary     | Runs on            | Purpose |
+|------------|--------------------|---------|
+| `ergosumd` | every machine      | key pair, token requests, callback listener, token file |
+| `ergosum`  | authority instances | `serve` (authority), `unseal`, `keygen` |
+
+Both are static Go binaries without cgo for `linux/amd64` and `linux/arm64`.
+The authority also ships as an OCI image that runs as a non-root user on a
+read-only root filesystem.
+
+## Building
+
+```sh
+CGO_ENABLED=0 go build -o dist/ ./cmd/...
+go test ./...
+```

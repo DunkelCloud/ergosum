@@ -1,0 +1,55 @@
+version: "2"
+run:
+  go: "1.26"
+linters:
+  enable:
+    - bodyclose
+    - dupword
+    - errorlint
+    - exhaustive
+    - gocritic
+    - gosec
+    - misspell
+    - noctx
+    - prealloc
+    - revive
+    - unconvert
+    - unparam
+  disable:
+    - depguard
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+      enabled-tags:
+        - diagnostic
+        - style
+    gosec:
+      excludes:
+        - G104
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+            - disableStutteringCheck
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - errcheck
+          - gocritic
+          - gosec
+          - noctx
+        path: _test\.go
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable:
+    - gofmt
+    - goimports
