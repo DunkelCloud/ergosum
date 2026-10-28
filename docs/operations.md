@@ -24,10 +24,9 @@ Service definitions: `deploy/systemd/` and `deploy/openrc/` (Alpine,
 `supervise-daemon`). Both binaries run in the foreground and log JSON lines
 to stdout.
 
-Exclude `/var/lib/ergosum/` and `/var/lib/tailscale/` from backups on
-machines: a restored machine is enrolled again with a new key, and a backup
-must carry neither the identity key nor the overlay node key (see
-[Backups](#backups)).
+Whether `/var/lib/ergosum/` and `/var/lib/tailscale/` go into a machine's
+backups is a trade-off between a working restore and what a stolen backup
+carries (see [Backups](#backups)).
 
 ## Daemon
 
@@ -358,8 +357,12 @@ Enrollment of a machine:
 4. Store the machine's backup settings in Vault and, while the role names
    its identities, add the identity there (see [Vault](#vault)).
 
-After a restore or migration the machine gets a new key: delete the
-daemon's state directory, create a new key and bind it at the next epoch.
+A machine restored at the same place together with its state directory
+keeps its key and its binding and receives tokens again. Restored without
+it, the machine needs a new key: delete what is left of the state
+directory, create a new key and bind it at the next epoch. A move to
+another place always needs a binding with the new place's checks at the
+next epoch.
 
 Decommissioning:
 
@@ -482,11 +485,30 @@ A backup job then runs
 
 ### Backups
 
-Leave the daemon's state and the overlay node key out of machine backups:
+Two directories hold a machine's identity: `/var/lib/ergosum` (the identity
+key) and `/var/lib/tailscale` (the overlay node key). Whether they belong in
+the machine's backups is a trade-off:
+
+- **Included:** a restore brings the machine back working, with its key,
+  its binding and its overlay node, and no administrator has to sign a new
+  binding. A stolen backup then carries both keys. A copy restored
+  elsewhere still fails the callbacks to the place the binding names (`ip`,
+  `net`); a copy restored inside the bound network, or on a released
+  address that was handed to someone else, passes them. `tailnet` alone
+  does not stop such a copy. Protect the backup repository like the keys
+  it holds.
+- **Excluded:** a stolen backup carries neither key, and a copy of it fails
+  everywhere. Every restore then needs a new key, a binding at the next
+  epoch and a new overlay node.
+
+To exclude both:
 
 ```sh
 restic backup --one-file-system --exclude /var/lib/ergosum --exclude /var/lib/tailscale /
 ```
+
+A `CACHEDIR.TAG` in `/var/lib/ergosum` also keeps the key out of backups
+made with `--exclude-caches`.
 
 `/run` is a tmpfs, so the identity token and the rendered settings are not
 part of a backup with `--one-file-system`.
