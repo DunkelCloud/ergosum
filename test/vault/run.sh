@@ -202,16 +202,16 @@ grep -q '^No changes.' "$W/plan.out" || fail "second plan is not empty"
 v read -format=json auth/machine/role/host | jq -e --arg s "spiffe://example.com/host/$H1" '.data |
 	.bound_audiences == ["vault"] and .user_claim == "sub" and .bound_claims.sub == [$s] and
 	.claim_mappings == {host: "host"} and .token_ttl == 20 and .token_max_ttl == 20 and
-	.token_policies == ["machine-backup"]' >/dev/null || fail "unexpected role"
+	.token_policies == ["host-secrets"]' >/dev/null || fail "unexpected role"
 after=$(v auth list -format=json | jq -S 'with_entries(select(.key != "machine/") | .value |= {type, accessor, description})'; v policy read existing; v policy read taken)
 [ "$before" = "$after" ] || fail "existing configuration changed"
 
 log "backup settings in Vault, restic repository"
-v kv put "secret/backup/$H1/config" repository="$W/repo" >/dev/null
+v kv put "secret/host/$H1/backup/config" repository="$W/repo" >/dev/null
 # A quote and a space in the password exercise the template's shell quoting.
-v kv put "secret/backup/$H1/credentials" restic_password="it's secret" \
+v kv put "secret/host/$H1/backup/credentials" restic_password="it's secret" \
 	access_key_id=AKIDEXAMPLE secret_access_key=example-secret-key >/dev/null
-v kv put "secret/backup/$H2/credentials" restic_password=other \
+v kv put "secret/host/$H2/backup/credentials" restic_password=other \
 	access_key_id=AKIDOTHER secret_access_key=other-secret-key >/dev/null
 RESTIC_REPOSITORY=$W/repo RESTIC_PASSWORD="it's secret" restic init -q
 
@@ -244,8 +244,8 @@ token_once via-a "$H1" 7432 a
 T1=$(login "$W/via-a.jwt") || { cat "$W/login.err"; fail "host1 refused"; }
 as_host1() { in_ns host1 env VAULT_TOKEN="$T1" "$VAULT_BIN" "$@"; }
 as_host1 token lookup -format=json | jq -e --arg h "$H1" '.data.meta.host == $h' >/dev/null || fail "no host in token metadata"
-as_host1 kv get -field=repository "secret/backup/$H1/config" >/dev/null || fail "host1 cannot read its config"
-as_host1 kv get "secret/backup/$H2/credentials" >/dev/null 2>&1 && fail "host1 read host2's credentials"
+as_host1 kv get -field=repository "secret/host/$H1/backup/config" >/dev/null || fail "host1 cannot read its config"
+as_host1 kv get "secret/host/$H2/backup/credentials" >/dev/null 2>&1 && fail "host1 read host2's credentials"
 as_host1 kv get secret/existing/x >/dev/null 2>&1 && fail "host1 read secret/existing"
 echo "isolation ok"
 
@@ -307,7 +307,7 @@ echo "key change ok"
 log "rollback"
 rollback -yes
 v auth list -format=json | jq -e 'has("machine/") | not' >/dev/null || fail "mount still there"
-v policy list -format=json | jq -e 'index("machine-backup") == null' >/dev/null || fail "policy still there"
+v policy list -format=json | jq -e 'index("host-secrets") == null' >/dev/null || fail "policy still there"
 after=$(v auth list -format=json | jq -S 'with_entries(.value |= {type, accessor, description})'; v policy read existing; v policy read taken)
 [ "$before" = "$after" ] || fail "rollback changed existing configuration"
 for t in "$T1" "$T2"; do

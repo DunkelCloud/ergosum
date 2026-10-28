@@ -24,15 +24,17 @@
 #                        (exactly one of -identity and -all-identities)
 #   -path PATH           auth mount                     (default: machine)
 #   -role NAME           role                           (default: host)
-#   -policy NAME         policy                         (default: machine-backup)
+#   -policy NAME         policy                         (default: host-secrets)
 #   -audience AUD        token audience                 (default: vault)
 #   -ttl DURATION        Vault token TTL and max TTL    (default: 1h)
 #   -kv MOUNT            KV version 2 mount             (default: secret)
-#   -prefix PATH         path below the KV mount        (default: backup)
+#   -prefix PATH         path below the KV mount        (default: host)
 #   -yes                 do not ask before changing anything
 #
-# A machine reads <kv>/<prefix>/<identity>/* and nothing else; keep the
-# credentials of other roles (restore, maintenance) outside that path.
+# A machine reads <kv>/<prefix>/<identity>/* and nothing else, one subpath per
+# application, e.g. <kv>/host/<identity>/backup/. Keep what it must not hold
+# (restore and maintenance credentials) outside that path; grant secrets that
+# several machines share through identity groups instead.
 #
 # Needs the vault CLI with VAULT_ADDR and VAULT_TOKEN (VAULT=bao for OpenBao),
 # jq and diff.
@@ -51,7 +53,7 @@ cmd=$1
 shift
 case $cmd in plan | apply | rollback) ;; -h | -help | --help) usage ;; *) die "unknown command $cmd" ;; esac
 
-path=machine role=host policy=machine-backup audience=vault ttl=1h kv=secret prefix=backup
+path=machine role=host policy=host-secrets audience=vault ttl=1h kv=secret prefix=host
 issuer="" domain="" all="" yes=""
 keyfiles=() identities=()
 while [ $# -gt 0 ]; do

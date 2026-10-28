@@ -377,8 +377,8 @@ checkpoints.
 | Object | Content |
 | --- | --- |
 | auth mount `machine` | JWT auth method; `jwt_validation_pubkeys` holds the public key of every authority instance, `bound_issuer` the shared `issuer` |
-| role `host` | `bound_audiences` `vault`, `user_claim` `sub`, `bound_claims` on `sub` with the named identities (`-identity`, once per machine) or every identity of the trust domain (`-all-identities`), the `host` claim mapped into the alias metadata, Vault token TTL and max TTL 1 h, policy `machine-backup` |
-| policy `machine-backup` | read on `secret/data/backup/<host>/*`, `<host>` taken from the alias metadata of the login |
+| role `host` | `bound_audiences` `vault`, `user_claim` `sub`, `bound_claims` on `sub` with the named identities (`-identity`, once per machine) or every identity of the trust domain (`-all-identities`), the `host` claim mapped into the alias metadata, Vault token TTL and max TTL 1 h, policy `host-secrets` |
+| policy `host-secrets` | read on `secret/data/host/<host>/*`, `<host>` taken from the alias metadata of the login |
 
 It creates or updates these objects and nothing else. An auth mount or a
 policy of the same name that it did not create stops it. `plan` shows the
@@ -399,9 +399,9 @@ whole set: a key or identity left out is removed.
 
 Vault accepts an identity token until its `exp` plus 60 s of clock skew; the
 role sets `expiration_leeway` to -1 so that nothing is added on top. The
-Vault token lives
-for an hour and cannot be renewed beyond that; then Vault Agent logs in
-again with the identity token that is in the file at that time.
+Vault token lives for an hour and cannot be renewed beyond that; then Vault
+Agent logs in again with the identity token that is in the file at that
+time.
 
 The way back:
 
@@ -411,24 +411,36 @@ deploy/vault/machine-auth.sh rollback
 
 It disables the mount, which revokes every Vault token issued through it,
 and deletes the policy. It deletes neither the identity entities that logins
-created nor the secrets below `secret/backup/`.
+created nor the secrets below `secret/host/`.
 
-### Backup settings
+### Secrets
 
-Per machine, in the KV version 2 mount `secret` (`-kv`, `-prefix`):
+Each machine has its own tree in the KV version 2 mount `secret` (`-kv`),
+below `host/<identity>/` (`-prefix`), with one subpath per application. For
+backups:
 
 | Path | Keys |
 | --- | --- |
-| `secret/backup/<identity>/config` | `repository`, the restic repository, e.g. `s3:https://s3.example.com/backup/host1` |
-| `secret/backup/<identity>/credentials` | `restic_password`, `access_key_id`, `secret_access_key` |
+| `secret/host/<identity>/backup/config` | `repository`, the restic repository, e.g. `s3:https://s3.example.com/backup/host1` |
+| `secret/host/<identity>/backup/credentials` | `restic_password`, `access_key_id`, `secret_access_key` |
 
-A machine reads everything below `secret/backup/<identity>/`. Keep
+A machine reads everything below `secret/host/<identity>/`. Keep
 credentials it must not hold, such as those to restore or to prune its
-backups, outside that path.
+backups, outside that tree.
 
-The example template reads from `secret/data/backup/`. With another mount
-or prefix (`-kv`, `-prefix`), change the paths in the template to match;
-the policy grants nothing else.
+Secrets that several machines share, such as the credentials of a service
+they all call, belong in one place outside the machine trees, for example
+`secret/app/<application>/`, rather than in a copy per machine. Grant them
+through a Vault identity group: a policy that reads the shared path, and
+the machines' entities as members. A machine's token carries the group's
+policies in addition to `host-secrets`. An entity appears with the first
+login; to add a machine to a group before that, create its entity and an
+alias named after its SPIFFE ID on the `machine` mount, and the first login
+uses it.
+
+The example template reads from `secret/data/host/<identity>/backup/`.
+With another mount or prefix (`-kv`, `-prefix`), change the paths in the
+template to match; the policy grants nothing else.
 
 ### Vault Agent
 
