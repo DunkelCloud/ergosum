@@ -77,6 +77,7 @@ Chosen option 1.
 | --- | --- | --- | --- | --- |
 | Token request | authority, port 7432, overlay address | daemon | – | authority keys from the daemon config |
 | Callback | daemon, port 7433 | authority | authority keys from the daemon config | the bound daemon key |
+| Replication (journal push and pull, ADR 0003) | authority, port 7435, overlay address | peer authority | the configured peers' keys | the peer's key |
 | Ops (metrics, health, public keys, journal state hash) | authority, port 7434, plain HTTP | operator, scraper | – | – |
 
 All ports are configurable. The callback port of a target may be set per
@@ -85,10 +86,14 @@ default. The defaults lie in the range 7432–7436, which the IANA registry
 lists as unassigned (as of October 2026); they are not registered for
 ergosum.
 
-The token request listener has no default address: the configuration must
-name one, normally the instance's overlay address. Binding all interfaces
-needs an explicit `listen_all_interfaces`, so that a public host does not
-expose the API by accident.
+The token request and replication listeners have no default address: the
+configuration must name one, normally the instance's overlay address.
+Binding all interfaces needs an explicit `listen_all_interfaces`, so that a
+public host does not expose the API by accident.
+
+Operator commands (unseal, journal checkpoint, compaction, sync and export)
+reach an instance only through a local Unix socket (mode 0600), never over
+the network.
 
 The daemon opens its callback listener only while it has a request in
 flight and closes it afterwards.
