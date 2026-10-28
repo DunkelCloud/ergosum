@@ -426,6 +426,10 @@ A machine reads everything below `secret/backup/<identity>/`. Keep
 credentials it must not hold, such as those to restore or to prune its
 backups, outside that path.
 
+The example template reads from `secret/data/backup/`. With another mount
+or prefix (`-kv`, `-prefix`), change the paths in the template to match;
+the policy grants nothing else.
+
 ### Vault Agent
 
 `examples/vault-agent/agent.hcl` logs in with auto-auth method `jwt`,
