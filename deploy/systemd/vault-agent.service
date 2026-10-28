@@ -25,7 +25,9 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=strict
-ProtectHome=yes
+# tmpfs, not yes: the vault user of the HashiCorp packages has its home below
+# /home, and the CLI stops when ~/.vault is unreadable rather than missing.
+ProtectHome=tmpfs
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
