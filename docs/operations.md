@@ -24,8 +24,9 @@ Service definitions: `deploy/systemd/` and `deploy/openrc/` (Alpine,
 `supervise-daemon`). Both binaries run in the foreground and log JSON lines
 to stdout.
 
-Exclude `/var/lib/ergosum/` from backups on machines: a restored machine is
-enrolled again with a new key, and a backup must not carry the identity key.
+Whether `/var/lib/ergosum/` and `/var/lib/tailscale/` go into a machine's
+backups is a trade-off between a working restore and what a stolen backup
+carries (see [Backups](#backups)).
 
 ## Daemon
 
@@ -353,10 +354,15 @@ Enrollment of a machine:
    bootstrap secret.
 3. Start `ergosumd`; check that `/run/ergosum/token` appears and that the
    authority's audit log shows `issued` with every check.
-4. Grant the identity what it needs in Vault (policies on the entity alias).
+4. Store the machine's backup settings in Vault and, while the role names
+   its identities, add the identity there (see [Vault](#vault)).
 
-After a restore or migration the machine gets a new key: delete the
-daemon's state directory, create a new key and bind it at the next epoch.
+A machine restored at the same place together with its state directory
+keeps its key and its binding and receives tokens again. Restored without
+it, the machine needs a new key: delete what is left of the state
+directory, create a new key and bind it at the next epoch. A move to
+another place always needs a binding with the new place's checks at the
+next epoch.
 
 Decommissioning:
 
@@ -366,7 +372,8 @@ Decommissioning:
 2. Wait until every instance has the revocation: the same state hash
    everywhere, and `GET /v1/bindings/<identity>` answers `binding.revoked`.
 3. Revoke the Vault tokens of the machine's entity
-   (`vault token revoke` by accessor, or disable the entity).
+   (`vault token revoke` by accessor, or disable the entity), and remove
+   the identity from the role if the role names its identities.
 4. Stop `ergosumd` and delete its state directory, so that no copy of the
    key remains on the disk.
 5. Only now release the machine's addresses and overlay node. A released
@@ -384,18 +391,145 @@ checkpoints. Coverage counts as diverging when an instance has not reached,
 within 30 minutes, what the most advanced instance had; a peer added
 without a sync can stay behind that way for good.
 
-## Token verification in Vault
+## Vault
+
+### Setup
+
+`deploy/vault/machine-auth.sh` configures Vault (or OpenBao, with
+`VAULT=bao`) and owns three objects:
+
+| Object | Content |
+| --- | --- |
+| auth mount `machine` | JWT auth method; `jwt_validation_pubkeys` holds the public key of every authority instance, `bound_issuer` the shared `issuer` |
+| role `host` | `bound_audiences` `vault`, `user_claim` `sub`, `bound_claims` on `sub` with the named identities (`-identity`, once per machine) or every identity of the trust domain (`-all-identities`), the `host` claim mapped into the alias metadata, Vault token TTL and max TTL 1 h, policy `host-secrets` |
+| policy `host-secrets` | read on `secret/data/host/<host>/*`, `<host>` taken from the alias metadata of the login |
+
+It creates or updates these objects and nothing else. An auth mount or a
+policy of the same name that it did not create stops it. `plan` shows the
+difference to what is there; `apply` shows it, asks, and writes only what
+differs:
 
 ```sh
-vault auth enable -path=machine jwt
-vault write auth/machine/config \
-  jwt_validation_pubkeys=@authority-a.pem,@authority-b.pem \
-  bound_issuer=https://ergosum.example.com
-vault write auth/machine/role/host role_type=jwt \
-  bound_audiences=vault user_claim=sub \
-  bound_claims_type=glob bound_claims='{"sub":"spiffe://example.com/host/*"}' \
-  claim_mappings='{"host":"host"}' token_ttl=1h token_max_ttl=1h
+export VAULT_ADDR=https://vault.example.com:8200 VAULT_TOKEN=...
+deploy/vault/machine-auth.sh plan -issuer https://ergosum.example.com \
+  -trust-domain example.com -key authority-a.pem -key authority-b.pem \
+  -identity host1.example.com -identity host2.example.com
+deploy/vault/machine-auth.sh apply ...        # the same options
 ```
 
-Vault Agent uses auto-auth method `jwt` with `path=/run/ergosum/token` and
-`remove_jwt_after_reading=false`.
+The public keys are the PEM blocks printed by `ergosum keygen`, or
+`GET /v1/keys.pem` on each instance's ops listener. Every run states the
+whole set: a key or identity left out is removed.
+
+Vault accepts an identity token until its `exp` plus 60 s of clock skew; the
+role sets `expiration_leeway` to -1 so that nothing is added on top. The
+Vault token lives for an hour and cannot be renewed beyond that; then Vault
+Agent logs in again with the identity token that is in the file at that
+time.
+
+The way back:
+
+```sh
+deploy/vault/machine-auth.sh rollback
+```
+
+It disables the mount, which revokes every Vault token issued through it,
+and deletes the policy. It deletes neither the identity entities that logins
+created nor the secrets below `secret/host/`.
+
+### Secrets
+
+Each machine has its own tree in the KV version 2 mount `secret` (`-kv`),
+below `host/<identity>/` (`-prefix`), with one subpath per application. For
+backups:
+
+| Path | Keys |
+| --- | --- |
+| `secret/host/<identity>/backup/config` | `repository`, the restic repository, e.g. `s3:https://s3.example.com/backup/host1` |
+| `secret/host/<identity>/backup/credentials` | `restic_password`, `access_key_id`, `secret_access_key` |
+
+A machine reads everything below `secret/host/<identity>/`. Keep
+credentials it must not hold, such as those to restore or to prune its
+backups, outside that tree.
+
+Secrets that several machines share, such as the credentials of a service
+they all call, belong in one place outside the machine trees, for example
+`secret/app/<application>/`, rather than in a copy per machine. Grant them
+through a Vault identity group: a policy that reads the shared path, and
+the machines' entities as members. A machine's token carries the group's
+policies in addition to `host-secrets`. An entity appears with the first
+login; to add a machine to a group before that, create its entity and an
+alias named after its SPIFFE ID on the `machine` mount, and the first login
+uses it.
+
+The example template reads from `secret/data/host/<identity>/backup/`.
+With another mount or prefix (`-kv`, `-prefix`), change the paths in the
+template to match; the policy grants nothing else.
+
+### Vault Agent
+
+`examples/vault-agent/agent.hcl` logs in with auto-auth method `jwt`,
+`path=/run/ergosum/token` and `remove_jwt_after_reading=false`: the daemon
+replaces the file, and the agent reads it again for every login. It renders
+`examples/vault-agent/backup.env.ctmpl` to `/run/vault-agent/backup.env`
+(mode 0600, in memory only). The template takes the identity from the Vault
+token, so it is the same on every machine. Service definitions:
+`deploy/systemd/vault-agent.service` and `deploy/openrc/vault-agent`; the
+agent's user must be a member of `ergosum-token`.
+
+A backup job then runs
+
+```sh
+. /run/vault-agent/backup.env && restic backup ...
+```
+
+### Backups
+
+Two directories hold a machine's identity: `/var/lib/ergosum` (the identity
+key) and `/var/lib/tailscale` (the overlay node key). Whether they belong in
+the machine's backups is a trade-off:
+
+- **Included:** a restore brings the machine back working, with its key,
+  its binding and its overlay node, and no administrator has to sign a new
+  binding. A stolen backup then carries both keys. A copy restored
+  elsewhere still fails the callbacks to the place the binding names (`ip`,
+  `net`); a copy restored inside the bound network, or on a released
+  address that was handed to someone else, passes them. `tailnet` alone
+  does not stop such a copy. Protect the backup repository like the keys
+  it holds.
+- **Excluded:** a stolen backup carries neither key, and a copy of it fails
+  everywhere. Every restore then needs a new key, a binding at the next
+  epoch and a new overlay node.
+
+To exclude both:
+
+```sh
+restic backup --one-file-system --exclude /var/lib/ergosum --exclude /var/lib/tailscale /
+```
+
+A `CACHEDIR.TAG` in `/var/lib/ergosum` also keeps the key out of backups
+made with `--exclude-caches`.
+
+`/run` is a tmpfs, so the identity token and the rendered settings are not
+part of a backup with `--one-file-system`.
+
+### Changing an authority's key
+
+An instance keeps its key for the life of its name (ADR 0003): the key signs
+its tokens, journal events and TLS, and peers and daemons pin it. A new key
+is a new instance:
+
+1. Create the new instance with `ergosum keygen` and a new `instance` name,
+   and bring it into replication (see [Adding an instance](#adding-an-instance)).
+2. Add its public key to Vault next to the old one: `machine-auth.sh apply`
+   with both `-key` options.
+3. Put the new instance into the daemons' `authorities` and restart them;
+   their tokens now come from the new instance.
+4. Remove the old instance from the daemons' `authorities`, from the other
+   instances (see [Removing an instance](#removing-an-instance)) and from
+   Vault with `machine-auth.sh apply` without its `-key`. Vault refuses its
+   tokens from then on; Vault tokens obtained with them run out within the
+   token TTL.
+
+Step 2 comes before step 3: a token from a key Vault does not know yet
+fails at login.
