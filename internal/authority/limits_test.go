@@ -58,7 +58,7 @@ func TestValidateListen(t *testing.T) {
 	}
 	for _, c := range cases {
 		cfg := Config{Listen: c.listen, ListenAllInterfaces: c.all}
-		if err := cfg.validateListen(); (err == nil) != c.ok {
+		if err := cfg.validateListen("listen", cfg.Listen, 7432); (err == nil) != c.ok {
 			t.Errorf("listen %q (all interfaces %v): err = %v, want ok = %v", c.listen, c.all, err, c.ok)
 		}
 	}

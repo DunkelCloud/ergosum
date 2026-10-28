@@ -104,8 +104,12 @@ type env struct {
 	key    *ecdsa.PrivateKey
 	url    string
 	socket string
+	cfg    authority.Config
+	opts   envOptions
 	cancel context.CancelFunc
 	done   chan error
+	// running is set between start and stop.
+	running bool
 }
 
 type envOptions struct {
@@ -116,6 +120,15 @@ type envOptions struct {
 	instance   string
 	net        *simNet
 	admins     *jt.Admins
+
+	// Replication: the instance key (generated if nil), the peers, the
+	// replication listener ("" for none), the links that carry it, and
+	// compaction.
+	key        *ecdsa.PrivateKey
+	peers      []authority.PeerConfig
+	replListen string
+	links      *links
+	compaction authority.CompactionConfig
 }
 
 func quietLogger(t *testing.T) *slog.Logger {
@@ -137,6 +150,15 @@ func freePort(t *testing.T) string {
 
 func newEnv(t *testing.T, o envOptions) *env {
 	t.Helper()
+	e := prepareEnv(t, o)
+	e.start()
+	return e
+}
+
+// prepareEnv writes the key and builds the configuration of an instance
+// without starting it.
+func prepareEnv(t *testing.T, o envOptions) *env {
+	t.Helper()
 	if o.threshold == 0 {
 		o.threshold = 1
 	}
@@ -153,11 +175,15 @@ func newEnv(t *testing.T, o envOptions) *env {
 		o.admins = jt.NewAdmins(t, "alice", "bob", "carol")
 	}
 	dir := t.TempDir()
-	key, err := keys.Generate()
-	if err != nil {
-		t.Fatal(err)
+	key := o.key
+	if key == nil {
+		var err error
+		if key, err = keys.Generate(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var pemBytes []byte
+	var err error
 	if o.passphrase != "" {
 		pemBytes, err = keys.EncryptPEM(key, []byte(o.passphrase))
 	} else {
@@ -172,39 +198,59 @@ func newEnv(t *testing.T, o envOptions) *env {
 	}
 	apiAddr := freePort(t)
 	cfg := authority.Config{
-		Instance:     o.instance,
-		TrustDomain:  trustDomain,
-		Issuer:       "https://ergosum.example.com",
-		TokenTTL:     o.ttl,
-		SigningKey:   keyPath,
-		Journal:      filepath.Join(dir, "journal.db"),
-		Listen:       apiAddr,
-		OpsListen:    "127.0.0.1:0",
-		UnsealSocket: filepath.Join(dir, "unseal.sock"),
-		Registry:     o.admins.Registry(o.threshold),
+		Instance:      o.instance,
+		TrustDomain:   trustDomain,
+		Issuer:        "https://ergosum.example.com",
+		TokenTTL:      o.ttl,
+		SigningKey:    keyPath,
+		Journal:       filepath.Join(dir, "journal.db"),
+		Listen:        apiAddr,
+		OpsListen:     "127.0.0.1:0",
+		ControlSocket: filepath.Join(dir, "control.sock"),
+		Registry:      o.admins.Registry(o.threshold),
+		Replication:   authority.ReplicationConfig{Listen: o.replListen, Peers: o.peers},
+		Compaction:    o.compaction,
 	}
 	cfg.Callbacks.Timeout = 3 * time.Second
 	for _, n := range o.networks {
 		cfg.Callbacks.Networks = append(cfg.Callbacks.Networks, authority.NetworkRoute{CIDR: n})
 	}
-	a, err := authority.New(cfg, authority.Options{Logger: quietLogger(t), Network: o.net})
+	e := &env{t: t, net: o.net, admins: o.admins, key: key, url: "https://" + apiAddr, socket: cfg.ControlSocket, cfg: cfg, opts: o}
+	t.Cleanup(e.stop)
+	return e
+}
+
+// start runs the instance; stop ends it. A stopped instance can be started
+// again with its journal.
+func (e *env) start() {
+	e.t.Helper()
+	opts := authority.Options{Logger: quietLogger(e.t), Network: e.net,
+		RetryMin: 10 * time.Millisecond, RetryMax: 100 * time.Millisecond, ReplicationIdle: 50 * time.Millisecond}
+	if e.opts.links != nil {
+		opts.DialPeer = e.opts.links.dialer(e.cfg.Instance)
+	}
+	a, err := authority.New(e.cfg, opts)
 	if err != nil {
-		t.Fatal(err)
+		e.t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	e := &env{t: t, net: o.net, admins: o.admins, auth: a, key: key, url: "https://" + apiAddr, socket: cfg.UnsealSocket, cancel: cancel, done: make(chan error, 1)}
+	e.auth, e.cancel, e.done, e.running = a, cancel, make(chan error, 1), true
 	go func() { e.done <- a.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		<-e.done
-		a.Close()
-	})
-	if o.passphrase == "" {
+	if e.opts.passphrase == "" {
 		e.waitReady()
 	} else {
 		e.waitOps()
 	}
-	return e
+}
+
+func (e *env) stop() {
+	if !e.running {
+		return
+	}
+	e.running = false
+	e.cancel()
+	<-e.done
+	e.auth.Close()
 }
 
 func (e *env) waitReady() {

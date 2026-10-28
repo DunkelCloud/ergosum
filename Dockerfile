@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath \
       -X github.com/DunkelCloud/ergosum/internal/version.Commit=${COMMIT}" \
     -o /out/usr/bin/ergosum ./cmd/ergosum
 
-# The state directory (journal, unseal socket) belongs to the unprivileged
+# The state directory (journal, control socket) belongs to the unprivileged
 # user, so that a named volume mounted there inherits the ownership.
 RUN mkdir -p /out/var/lib/ergosum /out/etc/ergosum \
  && chown 65532:65532 /out/var/lib/ergosum \
@@ -31,7 +31,7 @@ COPY --from=builder /out/ /
 
 USER 65532:65532
 VOLUME ["/var/lib/ergosum"]
-EXPOSE 7432 7434
+EXPOSE 7432 7434 7435
 
 ENTRYPOINT ["/usr/bin/ergosum"]
 CMD ["serve", "--config", "/etc/ergosum/serve.yaml"]

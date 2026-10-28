@@ -453,7 +453,9 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 	sum := sha256.Sum256(payload)
 	if _, err := a.store.AppendObservation(context.WithoutCancel(ctx), obs.Kind, obs.Identity, hex.EncodeToString(sum[:]), body); err != nil {
 		a.log.Error("journal write failed", "err", err)
+		return
 	}
+	a.repl.rep.Notify()
 }
 
 func checkSummary(cs []CheckOutcome) []string {

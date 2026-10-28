@@ -49,6 +49,8 @@ func (a *Authority) handleBindingWrite(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusCreated
 	if rec.Duplicate {
 		status = http.StatusOK
+	} else {
+		a.repl.rep.Notify()
 	}
 	writeJSON(w, status, rec)
 }

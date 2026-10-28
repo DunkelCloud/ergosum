@@ -17,21 +17,34 @@ import (
 	"golang.org/x/term"
 
 	"github.com/DunkelCloud/ergosum/internal/authority"
+	"github.com/DunkelCloud/ergosum/internal/journal"
 	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/version"
 )
 
 const (
 	defaultConfig = "/etc/ergosum/serve.yaml"
-	defaultSocket = "/var/lib/ergosum/unseal.sock"
+	defaultSocket = "/var/lib/ergosum/control.sock"
 )
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
-  ergosum serve [-config %s] [-log-format json|text]
-  ergosum unseal [-socket %s]
+  ergosum serve [-config %[1]s] [-log-format json|text]
+  ergosum unseal [-socket %[2]s]
   ergosum keygen -out FILE [-encrypt]
   ergosum version
+
+Journal of the local instance (through its control socket):
+  ergosum journal state      [-socket %[2]s]
+  ergosum journal checkpoint [-socket %[2]s]
+  ergosum journal compact    [-socket %[2]s]
+  ergosum journal sync -from PEER [-from PEER...] [-socket %[2]s]
+  ergosum journal export [-out FILE] [-archive] [-socket %[2]s]
+
+Binding changes, signed with ssh-keygen (see "ergosum bind -h"):
+  ergosum bind -identity NAME -key SHA256:... -check TYPE:TARGET... [-sign-key KEY] [-submit]
+  ergosum revoke -identity NAME [-sign-key KEY] [-submit]
+  ergosum sign [-sign-key KEY] [-submit] EVENT.json [MORE.json...]
 `, defaultConfig, defaultSocket)
 }
 
@@ -48,6 +61,14 @@ func main() {
 		err = unseal(os.Args[2:])
 	case "keygen":
 		err = keygen(os.Args[2:])
+	case "journal":
+		err = journalCmd(os.Args[2:])
+	case "bind":
+		err = bindOrRevoke(journal.KindBindingSet, os.Args[2:])
+	case "revoke":
+		err = bindOrRevoke(journal.KindBindingRevoked, os.Args[2:])
+	case "sign":
+		err = sign(os.Args[2:])
 	case "version":
 		fmt.Println("ergosum", version.String())
 	case "help", "-h", "--help":
@@ -91,7 +112,7 @@ func serve(args []string) error {
 // with access to the socket can do this.
 func unseal(args []string) error {
 	fs := flag.NewFlagSet("unseal", flag.ExitOnError)
-	socket := fs.String("socket", defaultSocket, "unseal socket of the running instance")
+	socket := fs.String("socket", defaultSocket, "control socket of the running instance")
 	_ = fs.Parse(args)
 	pass, err := readPassphrase("Passphrase: ", false)
 	if err != nil {

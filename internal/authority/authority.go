@@ -47,11 +47,17 @@ type Options struct {
 	Now     func() time.Time
 	// Listen creates listeners; default net.Listen.
 	Listen func(network, address string) (net.Listener, error)
+	// DialPeer connects to peers for replication; default net.Dialer.
+	DialPeer func(ctx context.Context, network, address string) (net.Conn, error)
+	// RetryMin, RetryMax and ReplicationIdle tune the pushers (see
+	// replication.Config); zero takes the defaults.
+	RetryMin, RetryMax, ReplicationIdle time.Duration
 }
 
 // Authority is one authority instance.
 type Authority struct {
 	cfg        Config
+	opts       Options
 	log        *slog.Logger
 	audit      *slog.Logger
 	store      *journal.Store
@@ -67,6 +73,9 @@ type Authority struct {
 	requests *metrics.Vec
 	sealedG  *metrics.Vec
 	bindings *metrics.Vec
+	jm       *journalMetrics
+
+	repl *replicationState
 
 	keyFile *keys.KeyFile
 	public  *ecdsa.PublicKey
@@ -77,10 +86,11 @@ type Authority struct {
 	cert     tls.Certificate
 	unsealed chan struct{}
 
-	addrMu  sync.Mutex
-	apiAddr net.Addr
-	opsAddr net.Addr
-	ready   chan struct{}
+	addrMu   sync.Mutex
+	apiAddr  net.Addr
+	opsAddr  net.Addr
+	replAddr net.Addr
+	ready    chan struct{}
 }
 
 // New loads the signing key and opens the journal. With an encrypted key the
@@ -91,8 +101,10 @@ func New(cfg Config, opts Options) (*Authority, error) {
 		return nil, err
 	}
 	rs, _ := cfg.routes()
+	ps, _ := cfg.peers()
 	a := &Authority{
 		cfg:        cfg,
+		opts:       opts,
 		log:        opts.Logger,
 		net:        opts.Network,
 		routes:     rs,
@@ -149,10 +161,16 @@ func New(cfg Config, opts Options) (*Authority, error) {
 	a.bindings = a.metrics.Counter("machine_identity_binding_events_total",
 		"Binding events submitted to the write API by outcome.", "outcome", "accepted", "rejected")
 
+	if err := a.setupReplication(ps); err != nil {
+		_ = a.store.Close()
+		return nil, err
+	}
+
 	if a.keyFile.Encrypted() {
 		a.sealedG.Set("", 1)
 	} else {
 		if err := a.setKey(a.keyFile.Key); err != nil {
+			_ = a.store.Close()
 			return nil, err
 		}
 	}
@@ -246,12 +264,19 @@ func (a *Authority) OpsAddr() string {
 }
 
 // Run serves until ctx ends. A sealed instance serves only the ops endpoint
-// and the unseal socket; the API listener opens after unsealing.
+// and the control socket; the API and replication listeners, the pushers
+// and journal maintenance start after unsealing.
 func (a *Authority) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errc := make(chan error, 3)
+	errc := make(chan error, 4)
 	var servers []*http.Server
+	var bg sync.WaitGroup
+	stopAll := func() {
+		cancel()
+		shutdown(servers)
+		bg.Wait()
+	}
 
 	if a.cfg.OpsListen != "-" {
 		ln, err := a.listen("tcp", a.cfg.OpsListen)
@@ -269,21 +294,21 @@ func (a *Authority) Run(ctx context.Context) error {
 	a.log.Info("starting", "instance", a.cfg.Instance, "kid", a.kid,
 		"fingerprint", keys.Fingerprint(a.public), "sealed", a.Sealed())
 
+	stopControl, err := a.serveControlSocket(ctx)
+	if err != nil {
+		shutdown(servers)
+		return err
+	}
+	defer stopControl()
+
 	if a.Sealed() {
-		stop, err := a.serveUnsealSocket(ctx)
-		if err != nil {
-			return err
-		}
-		a.log.Warn("sealed: run \"ergosum unseal\" on this host to start issuing", "socket", a.cfg.UnsealSocket)
+		a.log.Warn("sealed: run \"ergosum unseal\" on this host to start issuing", "socket", a.cfg.ControlSocket)
 		select {
 		case <-a.unsealed:
-			stop()
 		case <-ctx.Done():
-			stop()
 			shutdown(servers)
 			return nil
 		case err := <-errc:
-			stop()
 			shutdown(servers)
 			return err
 		}
@@ -307,15 +332,35 @@ func (a *Authority) Run(ctx context.Context) error {
 	}
 	servers = append(servers, api)
 	go func() { errc <- serve(api, tls.NewListener(ln, api.TLSConfig)) }()
+
+	if a.cfg.Replication.Listen != "" {
+		srv, rln, err := a.serveReplication(ctx, cert)
+		if err != nil {
+			shutdown(servers)
+			return err
+		}
+		servers = append(servers, srv)
+		go func() { errc <- serve(srv, rln) }()
+	}
+	bg.Add(2)
+	go func() {
+		defer bg.Done()
+		a.repl.rep.Run(ctx)
+	}()
+	go func() {
+		defer bg.Done()
+		a.maintain(ctx)
+	}()
+
 	close(a.ready)
-	a.log.Info("issuing", "listen", ln.Addr().String())
+	a.log.Info("issuing", "listen", ln.Addr().String(), "replication", a.ReplicationAddr())
 
 	select {
 	case <-ctx.Done():
-		shutdown(servers)
+		stopAll()
 		return nil
 	case err := <-errc:
-		shutdown(servers)
+		stopAll()
 		return err
 	}
 }
@@ -357,6 +402,14 @@ func (a *Authority) opsHandler() http.Handler {
 	})
 	mux.HandleFunc("GET "+protocol.PathKeys, a.handleKeys)
 	mux.HandleFunc("GET "+protocol.PathKeysPEM, a.handleKeysPEM)
+	mux.HandleFunc("GET "+protocol.PathJournalState, func(w http.ResponseWriter, r *http.Request) {
+		st, err := a.JournalState(r.Context())
+		if err != nil {
+			a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "")
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+	})
 	return mux
 }
 

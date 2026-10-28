@@ -4,6 +4,7 @@
 package keys
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -192,6 +193,19 @@ func MarshalPrivatePEM(key *ecdsa.PrivateKey) ([]byte, error) {
 // expects in jwt_validation_pubkeys.
 func MarshalPublicPEM(pub *ecdsa.PublicKey) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: SPKI(pub)})
+}
+
+// ParsePublicPEM parses a P-256 public key in PEM ("PUBLIC KEY"), as
+// written by MarshalPublicPEM.
+func ParsePublicPEM(data []byte) (*ecdsa.PublicKey, error) {
+	block, rest := pem.Decode(data)
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return nil, errors.New("keys: no PEM public key")
+	}
+	if len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("keys: trailing data after the PEM public key")
+	}
+	return ParseSPKI(block.Bytes)
 }
 
 func parsePKCS8(der []byte) (*ecdsa.PrivateKey, error) {
