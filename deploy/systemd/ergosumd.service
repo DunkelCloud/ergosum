@@ -1,0 +1,55 @@
+[Unit]
+Description=ergosum machine identity daemon
+Documentation=https://github.com/DunkelCloud/ergosum
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ergosum
+Group=ergosum
+# The token file is group-owned by ergosum-token (mode 0640); Vault Agent's
+# user is a member of that group.
+SupplementaryGroups=ergosum-token
+ExecStart=/usr/bin/ergosumd run --config /etc/ergosum/ergosumd.yaml
+Restart=on-failure
+RestartSec=5s
+
+StateDirectory=ergosum
+StateDirectoryMode=0700
+RuntimeDirectory=ergosum
+RuntimeDirectoryMode=0755
+# Keep the token while the daemon restarts; Vault Agent keeps reading it.
+RuntimeDirectoryPreserve=yes
+UMask=0027
+
+# If metrics_file points into the node_exporter textfile directory:
+#ReadWritePaths=/var/lib/node_exporter/textfile_collector
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# The daemon changes the group of its token file and the Go runtime adjusts
+# resource limits at start, so @chown and @resources stay allowed.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

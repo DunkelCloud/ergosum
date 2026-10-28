@@ -45,6 +45,8 @@ linters:
           - gocritic
           - gosec
           - noctx
+          - prealloc
+          - unparam
         path: _test\.go
 issues:
   max-issues-per-linter: 0

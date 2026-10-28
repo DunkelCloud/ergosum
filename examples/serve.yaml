@@ -1,0 +1,63 @@
+# Authority instance ("ergosum serve"). All addresses are documentation
+# examples (RFC 5737, RFC 3849); replace them with your own.
+
+# Origin of this instance's journal events; unique per instance.
+instance: authority-a
+
+# SPIFFE trust domain: tokens carry sub = spiffe://<trust_domain>/host/<identity>.
+trust_domain: example.com
+
+# Shared by all instances; Vault checks it with bound_issuer.
+issuer: https://ergosum.example.com
+audience: vault
+token_ttl: 30m
+clock_skew: 2m
+
+# Created with "ergosum keygen -out /etc/ergosum/signing.key [-encrypt]".
+# An encrypted key keeps the instance sealed after every start until
+# "ergosum unseal" is run on this host.
+signing_key: /etc/ergosum/signing.key
+journal: /var/lib/ergosum/journal.db
+unseal_socket: /var/lib/ergosum/unseal.sock
+
+# Token requests and binding writes (TLS with the instance key). Required:
+# the instance's overlay address. Binding all interfaces (":7432") needs
+# listen_all_interfaces: true.
+listen: "100.64.0.10:7432"
+# Metrics, health and public keys over plain HTTP.
+ops_listen: "127.0.0.1:7434"
+
+callbacks:
+  # Daemon callback port, unless a binding target names its own port.
+  port: 7433
+  timeout: 5s
+  tailnet:
+    # Overlay address ranges; tailnet callbacks must land inside them.
+    prefixes: ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+  ip:
+    # Public source address and interface for ip callbacks. On a shared host
+    # this keeps the overlay or an exit node from rerouting the callback.
+    source: 203.0.113.2
+    # interface: eth0
+  # Networks attached directly to this instance. A net check runs only for
+  # prefixes inside one of them; other instances answer "not responsible".
+  networks:
+    - cidr: 198.51.100.0/24
+      source: 198.51.100.2
+      # interface: eth1
+
+# Admin public key registry: the trust root for binding events.
+registry:
+  # Example keys whose private halves were discarded; use your own. Security
+  # keys (sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com)
+  # work as well and must assert user presence.
+  admins:
+    alice: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGhhE9xBmqGlXGkvrNVR5964nFH6sZdjiiqqIbWHYB0U alice@example.com"
+    bob: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDQol2F1yMz4JOv2wBtXVnG8226P3Z4XjLZKihXRAb9z bob@example.com"
+  approvals:
+    binding.set:
+      threshold: 2
+      keys: [alice, bob]
+    binding.revoked:
+      threshold: 1
+      keys: [alice, bob]

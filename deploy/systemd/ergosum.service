@@ -1,0 +1,54 @@
+[Unit]
+Description=ergosum authority
+Documentation=https://github.com/DunkelCloud/ergosum
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ergosum
+Group=ergosum
+ExecStart=/usr/bin/ergosum serve --config /etc/ergosum/serve.yaml
+# With a passphrase-encrypted signing key a restarted instance comes up
+# sealed and issues nothing until "ergosum unseal" is run on this host.
+Restart=on-failure
+RestartSec=5s
+
+# Journal and unseal socket. No runtime directory: on a shared host the
+# daemon owns /run/ergosum.
+StateDirectory=ergosum
+StateDirectoryMode=0700
+UMask=0077
+
+# callbacks.*.interface pins callbacks to an interface (SO_BINDTODEVICE),
+# which needs CAP_NET_RAW on most kernels:
+#AmbientCapabilities=CAP_NET_RAW
+#CapabilityBoundingSet=CAP_NET_RAW
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# The Go runtime adjusts resource limits at start, so @resources stays
+# allowed (it is part of @system-service).
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
