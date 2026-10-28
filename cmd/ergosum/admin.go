@@ -182,8 +182,11 @@ func sign(args []string) error {
 			return err
 		}
 	}
+	// Without -out the result goes back to the first file, unless the call
+	// only submits one event unchanged: then there is nothing to write, and
+	// the file may sit where it cannot be written.
 	out := af.out
-	if out == "" {
+	if out == "" && (fs.NArg() > 1 || af.signKey != "" || !af.submit) {
 		out = fs.Arg(0)
 	}
 	ctx, cancel := adminContext()
@@ -220,11 +223,13 @@ func signWriteSubmit(ctx context.Context, af *adminFlags, client *admin.Client, 
 			fmt.Fprintf(os.Stderr, "signed by %s\n", fp)
 		}
 	}
-	if err := admin.WriteEvent(out, e); err != nil {
-		return err
-	}
-	if out != "-" {
-		fmt.Fprintf(os.Stderr, "event written to %s (%d signatures)\n", out, len(e.Signatures))
+	if out != "" {
+		if err := admin.WriteEvent(out, e); err != nil {
+			return err
+		}
+		if out != "-" {
+			fmt.Fprintf(os.Stderr, "event written to %s (%d signatures)\n", out, len(e.Signatures))
+		}
 	}
 	if !af.submit {
 		return nil
