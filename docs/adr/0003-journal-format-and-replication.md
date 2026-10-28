@@ -1,6 +1,6 @@
 # ADR 0003: Binding journal format and replication
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-10-27
 - Related: [ADR 0001](0001-protocol.md), [ADR 0002](0002-token-format.md)
 

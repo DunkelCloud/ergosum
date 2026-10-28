@@ -1,6 +1,6 @@
 # ADR 0001: Request and callback protocol
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-10-27
 - Related: [ADR 0002](0002-token-format.md), [ADR 0003](0003-journal-format-and-replication.md)
 
