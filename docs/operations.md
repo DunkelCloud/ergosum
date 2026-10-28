@@ -280,6 +280,11 @@ protection class:
   the same reviewed deployment; until all instances run the new registry,
   instances with the old one reject events signed only by new keys, and
   replication from the others stops at such an event (see Replication).
+- Before an administrator key leaves the registry, have the remaining
+  administrators approve again, at the next epoch, every binding that only
+  that key approved, and let compaction remove the older events (retention
+  for `bindings`). Ingest verifies history against the current registry; an
+  event approved only with a removed key stops a sync.
 
 ## Writing a binding
 

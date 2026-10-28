@@ -493,6 +493,12 @@ leader, no quorum.
 - A rebuilt instance must sync before it accepts writes: an event it
   records before would reuse a sequence number its peers know, and they
   reject it as a conflict.
+- Ingest verifies against the current registry, also history and the
+  bindings inside checkpoints. Once an administrator key leaves the
+  registry, every binding event approved only with it fails verification,
+  and a sync of a journal that still holds one stops there. Such bindings
+  must be approved again by the remaining administrators, and the old
+  events compacted away, before the key is removed.
 - History beyond its retention exists only in the archive, if one is
   configured.
 - A rebuilt instance relies on its sync peer not to omit binding events
