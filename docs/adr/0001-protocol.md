@@ -118,6 +118,7 @@ for one never verifies for another:
 | `ergosum/v1/callback-response` | daemon key | callback response |
 | `ergosum/v1/observation` | instance key | journal observation (ADR 0003) |
 | `ergosum/v1/checkpoint` | instance key | journal checkpoint (ADR 0003) |
+| `ergosum/v1/event` | instance key | position of a journal event, `[origin, seq, kind, hash]` (ADR 0003); a bare signature, not an envelope |
 
 ### Messages
 

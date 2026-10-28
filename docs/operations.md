@@ -89,6 +89,12 @@ way in; it is not reachable over the network. A sealed instance does not
 restart into service on its own; another instance keeps issuing meanwhile.
 `machine_identity_authority_sealed` is 1 while sealed — alert on it.
 
+Upgrading from the first release: the setting `unseal_socket` is now
+`control_socket`, and `instance` must consist of lowercase letters, digits,
+`-` and `.` (at most 63 characters). A journal is pinned to its instance
+name, so an instance whose name breaks that rule starts over under a new
+name, with a sync from its peers.
+
 ### Listener
 
 `listen` is required and names the address the API binds to, normally the
@@ -179,14 +185,22 @@ replication:
       key: |                       # its public key, from "ergosum keygen"
         -----BEGIN PUBLIC KEY-----
         ...
+  max_page_mib: 32                 # largest page sent and accepted; the same everywhere
 ```
 
 Allow TCP 7435 between the instances only. A peer without `url` is known
 (its events are accepted when another instance forwards them) but receives
 no pushes from here, and compaction does not wait for it. Name every
-instance on every instance: its key verifies its observations and
-checkpoints wherever they arrive. An instance keeps its key for the life of
-its name; a new key is a new instance name.
+instance on every instance: its key verifies the position of every event it
+recorded, its observations and its checkpoints wherever they arrive. An
+instance keeps its key for the life of its name; a new key is a new
+instance name.
+
+Pages are cut to `max_page_mib`, but a checkpoint travels whole and needs
+about 1.6 KB per identity. A page that is too large is refused with `413`
+and logged on the sender ("page larger than max_body"); raise the value on
+every instance before a checkpoint reaches it (32 MiB hold about 20 000
+identities).
 
 `GET /v1/journal/state` on the ops listener reports the state hash, the
 coverage and compaction frontier per origin, and the outbox of every peer.
@@ -196,7 +210,9 @@ An event that fails verification at ingest is rejected with an audit line
 at level `error` (`"alert"`), `machine_identity_journal_rejected_total`
 counts it, and replication from that peer stops there until the cause is
 fixed: usually a registry that differs between the instances, otherwise a
-forged event. The sender keeps the event and retries.
+forged event. The sender keeps the event and retries. A failure that says
+nothing about the event, such as a database error, is answered with `503`
+and retried without an alarm; a lasting one shows as a stuck outbox.
 
 ### Adding an instance
 
@@ -218,7 +234,10 @@ forged event. The sender keeps the event and retries.
 
 A rebuilt instance keeps its name and key and follows the same steps; it
 must sync before it accepts writes, or its new events would reuse sequence
-numbers its peers know.
+numbers its peers know. Only a sync takes over the coverage of the
+checkpoint a peer's journal starts with, its own sequence counter included;
+pushes never do. Sync from peers you trust: a compromised peer could claim
+a coverage that makes the instance skip other instances' observations.
 
 ### Removing an instance
 
@@ -361,7 +380,9 @@ Decommissioning:
 `deploy/prometheus/ergosum-alerts.yml` holds a proposal of alerting rules
 for these metrics: proven key duplicates and replays, sealed instances,
 rejected journal events, stuck outboxes, diverging coverage and stale
-checkpoints.
+checkpoints. Coverage counts as diverging when an instance has not reached,
+within 30 minutes, what the most advanced instance had; a peer added
+without a sync can stay behind that way for good.
 
 ## Token verification in Vault
 

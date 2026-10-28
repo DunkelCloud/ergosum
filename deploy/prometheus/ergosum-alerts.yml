@@ -39,10 +39,12 @@ groups:
         annotations:
           summary: "{{ $labels.instance }}: {{ $labels.peer }} has not acknowledged events for {{ $value | humanizeDuration }}"
 
-      # Instances disagree on how far they have an origin's events.
+      # An instance lags behind an origin for good: it has not reached the
+      # coverage the most advanced instance had 30 minutes earlier. Ordinary
+      # replication lag stays well below that.
       - alert: ErgosumJournalCoverageDiverges
-        expr: max by (origin) (machine_identity_journal_coverage) - min by (origin) (machine_identity_journal_coverage) > 0
-        for: 1h
+        expr: max by (origin) (machine_identity_journal_coverage offset 30m) - min by (origin) (machine_identity_journal_coverage) > 0
+        for: 30m
         labels:
           severity: warning
         annotations:

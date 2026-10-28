@@ -88,6 +88,9 @@ replication:
         MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFkxhJMwH+WbvoKV1FSty848J48JD
         KvE9zhKhzYFUT2Gjk9vPFJL9SysFVFiQfJIo0R2ipkXwX2y53Gbww77UWQ==
         -----END PUBLIC KEY-----
+  # Largest page sent to and accepted from a peer, in MiB; the same on every
+  # instance. A checkpoint (about 1.6 KB per identity) must fit into one.
+  max_page_mib: 32
 
 # Checkpoints and compaction. An event is deleted only when the latest own
 # checkpoint that every peer has acknowledged covers it, every peer has
