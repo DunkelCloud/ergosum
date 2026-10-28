@@ -398,7 +398,8 @@ The public keys are the PEM blocks printed by `ergosum keygen`, or
 whole set: a key or identity left out is removed.
 
 Vault accepts an identity token until its `exp` plus 60 s of clock skew; the
-role turns off Vault's additional expiration leeway. The Vault token lives
+role sets `expiration_leeway` to -1 so that nothing is added on top. The
+Vault token lives
 for an hour and cannot be renewed beyond that; then Vault Agent logs in
 again with the identity token that is in the file at that time.
 

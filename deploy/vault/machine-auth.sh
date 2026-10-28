@@ -185,8 +185,8 @@ kv_version=$("$VAULT" secrets list -format=json | jq -r --arg m "$kv/" '
 
 pubkeys=$(for p in "${pems[@]}"; do jq -Rs 'rtrimstr("\n")' <<<"$p"; done | jq -s .)
 desired_config=$(jq -n -S --arg iss "$issuer" --argjson keys "$pubkeys" '{bound_issuer: $iss, jwt_validation_pubkeys: $keys}')
-# Vault accepts a token until "exp" plus clock_skew_leeway (60 s); the extra
-# expiration_leeway of 150 s is turned off.
+# Vault accepts a token until "exp" plus clock_skew_leeway (60 s);
+# expiration_leeway is turned off so that nothing is added on top.
 desired_role=$(jq -n -S --arg aud "$audience" --arg type "$claims_type" --argjson claims "$claims" \
 	--argjson ttl "$ttl_s" --arg policy "$policy" '{
 	role_type: "jwt",
