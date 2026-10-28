@@ -42,10 +42,11 @@ read-only root filesystem.
 
 ## Documentation
 
-- [Operations](docs/operations.md): installation, modes of operation, unsealing, metrics, audit
+- [Operations](docs/operations.md): installation, modes of operation, unsealing, metrics, audit, Vault
 - [Architecture decisions](docs/adr/): protocol, token format, journal and replication
-- Example configuration: [`examples/`](examples); service definitions for
-  systemd and OpenRC: [`deploy/`](deploy)
+- Example configuration: [`examples/`](examples), including Vault Agent;
+  service definitions for systemd and OpenRC: [`deploy/`](deploy)
+- Vault setup and rollback: [`deploy/vault/machine-auth.sh`](deploy/vault/machine-auth.sh)
 
 ## Building
 

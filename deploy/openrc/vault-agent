@@ -1,0 +1,35 @@
+#!/sbin/openrc-run
+# Vault Agent with the ergosum identity token (OpenRC, supervise-daemon).
+
+name="vault-agent"
+description="Vault Agent with the ergosum identity token"
+
+: "${VAULT_AGENT_CONFIG:=/etc/vault-agent/agent.hcl}"
+
+supervisor="supervise-daemon"
+command="/usr/bin/vault"
+command_args="agent -config=${VAULT_AGENT_CONFIG}"
+# The user must be a member of ergosum-token to read /run/ergosum/token.
+command_user="vault:vault"
+umask="077"
+output_logger="logger -t vault-agent -p daemon.info"
+error_logger="logger -t vault-agent -p daemon.err"
+respawn_delay=5
+respawn_max=0
+extra_started_commands="reload"
+
+depend() {
+	need net
+	after ergosumd
+}
+
+start_pre() {
+	# Rendered files live in memory only: /run/vault-agent/backup.env.
+	checkpath --directory --owner vault:vault --mode 0700 /run/vault-agent
+}
+
+reload() {
+	ebegin "Reloading ${name}"
+	supervise-daemon "${RC_SVCNAME}" --signal HUP
+	eend $?
+}

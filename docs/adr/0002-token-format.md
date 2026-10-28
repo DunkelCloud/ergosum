@@ -77,8 +77,10 @@ outcomes go to the audit log and the journal, not into the token.
 - Vault is configured with the PEM keys of all instances
   (`jwt_validation_pubkeys`) and `bound_issuer`. A role binds `aud`, maps
   `sub` as user claim and `host` into alias metadata.
-- Key rotation: add the new public key to Vault, switch the instance, remove
-  the old key.
+- Key change: the instance key also signs journal events and is pinned by
+  peers and daemons, so a new key is a new instance (ADR 0003). Add the new
+  instance's public key to Vault, move the daemons to the new instance, then
+  remove the old instance and its key from Vault.
 
 ### Token file
 

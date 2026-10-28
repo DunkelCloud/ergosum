@@ -1,0 +1,47 @@
+[Unit]
+Description=Vault Agent with the ergosum identity token
+Documentation=https://github.com/DunkelCloud/ergosum
+After=network-online.target ergosumd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vault
+Group=vault
+# Reads /run/ergosum/token (mode 0640, group ergosum-token).
+SupplementaryGroups=ergosum-token
+ExecStart=/usr/bin/vault agent -config=/etc/vault-agent/agent.hcl
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5s
+
+# Rendered files live in memory only: /run/vault-agent/backup.env.
+RuntimeDirectory=vault-agent
+RuntimeDirectoryMode=0700
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
