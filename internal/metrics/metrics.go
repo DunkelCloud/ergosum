@@ -19,6 +19,7 @@ import (
 type Registry struct {
 	mu       sync.Mutex
 	families []*Vec
+	collect  []func()
 }
 
 // Vec is a metric family with at most one label.
@@ -59,6 +60,19 @@ func (r *Registry) Gauge(name, help string) *Vec {
 	return r.add(name, help, "gauge", "", nil)
 }
 
+// GaugeVec registers a gauge with one label.
+func (r *Registry) GaugeVec(name, help, label string) *Vec {
+	return r.add(name, help, "gauge", label, nil)
+}
+
+// OnCollect registers a function that updates gauges before every
+// exposition.
+func (r *Registry) OnCollect(f func()) {
+	r.mu.Lock()
+	r.collect = append(r.collect, f)
+	r.mu.Unlock()
+}
+
 // Inc adds 1 for the label value (use "" for unlabeled metrics).
 func (v *Vec) Inc(label string) { v.Add(label, 1) }
 
@@ -85,6 +99,12 @@ func (v *Vec) Get(label string) float64 {
 
 // Write writes the text exposition format.
 func (r *Registry) Write(w io.Writer) error {
+	r.mu.Lock()
+	collect := append([]func(){}, r.collect...)
+	r.mu.Unlock()
+	for _, f := range collect {
+		f()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var b bytes.Buffer

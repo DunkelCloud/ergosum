@@ -3,10 +3,14 @@ package journal_test
 import (
 	"context"
 	"crypto/dsa" //nolint:staticcheck // DSA is used only to assert that it is rejected
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,22 +19,42 @@ import (
 	"github.com/DunkelCloud/ergosum/internal/journal"
 	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
 	"github.com/DunkelCloud/ergosum/internal/keys"
+	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
 
 const td = "example.com"
 
 func newStore(t *testing.T, admins *jt.Admins, threshold int) *journal.Store {
 	t.Helper()
+	return openInstance(t, admins, threshold, "instance-a", newKey(t))
+}
+
+// openInstance opens a journal for an instance and gives it its key.
+func openInstance(t *testing.T, admins *jt.Admins, threshold int, name string, key *ecdsa.PrivateKey) *journal.Store {
+	t.Helper()
 	reg, err := journal.NewRegistry(admins.Registry(threshold))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := journal.Open(filepath.Join(t.TempDir(), "journal.db"), "instance-a", td, reg)
+	s, err := journal.Open(filepath.Join(t.TempDir(), "journal.db"), name, td, reg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
+	if err := s.SetSigner(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	s.SetInstanceKeys(map[string]*ecdsa.PublicKey{name: &key.PublicKey})
 	return s
+}
+
+func newKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	k, err := keys.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }
 
 func fingerprint(t *testing.T) string {
@@ -280,11 +304,21 @@ func TestAppendOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")); err != nil {
+	ev := admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")
+	if _, err := s.AppendBinding(ctx, ev); !errors.Is(err, journal.ErrNoSigner) {
+		t.Fatalf("own event without the instance key: %v", err)
+	}
+	if err := s.SetSigner(ctx, newKey(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendBinding(ctx, ev); err != nil {
 		t.Fatal(err)
 	}
 	if err := journal.TamperForTest(s); err == nil {
 		t.Fatal("UPDATE on the journal succeeded")
+	}
+	if err := journal.ResignForTest(s); err == nil {
+		t.Fatal("an event was signed a second time")
 	}
 	s.Close()
 	// Reopening with another trust domain or instance name is refused; the
@@ -370,4 +404,120 @@ func certLine(t *testing.T, signer ssh.Signer) string {
 		t.Fatal(err)
 	}
 	return string(ssh.MarshalAuthorizedKey(cert))
+}
+
+// TestMigrationFromV1: a journal of schema version 1 is migrated on open
+// without changing its events; positions, the sequence counter and the
+// coverage follow from them.
+func TestMigrationFromV1(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice")
+	reg, _ := journal.NewRegistry(admins.Registry(1))
+	path := filepath.Join(t.TempDir(), "journal.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")
+	body, _ := json.Marshal(ev)
+	h, _ := ev.Hash()
+	stmts := []string{
+		`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		journal.SchemaV1,
+		`INSERT INTO meta (key, value) VALUES ('schema_version', '1'), ('trust_domain', 'example.com'), ('instance', 'instance-a')`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for seq, kind := range []string{"binding.set", "observation.issued", "observation.issued"} {
+		b, hh := body, h
+		if kind != "binding.set" {
+			b, hh = []byte(`{"payload":"e30","signature":""}`), strings.Repeat(strconv.Itoa(seq), 64)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO events (origin, seq, kind, identity, epoch, hash, body, recorded_at) VALUES ('instance-a', ?, ?, 'host1.example.com', 0, ?, ?, '2026-10-27T00:00:00Z')`,
+			seq+1, kind, hh, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO bindings (identity, kind, epoch, key, checks, hash, origin, seq) VALUES ('host1.example.com', 'binding.set', 1, ?, ?, ?, 'instance-a', 1)`,
+		ev.Key, `[{"type":"tailnet","target":"host1.tailnet.example.com"}]`, h); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err := journal.Open(path, "instance-a", td, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	st, err := s.State(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Events != 3 || st.NextSeq != 4 || st.Coverage["instance-a"] != 3 || st.Bindings != 1 {
+		t.Fatalf("migrated state: %+v", st)
+	}
+	_, events, last, err := s.Read(ctx, 0, 10)
+	if err != nil || len(events) != 3 || last != 3 || events[0].Seq != 1 || events[2].Pos != 3 {
+		t.Fatalf("positions after migration: %+v, %d, %v", events, last, err)
+	}
+	// The events of version 1 are signed once the key is there.
+	key := newKey(t)
+	if err := s.SetSigner(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	_, events, _, _ = s.Read(ctx, 0, 10)
+	for _, e := range events {
+		if !keys.Verify(&key.PublicKey, protocol.ContextEvent, e.SigningInput(), e.Sig) {
+			t.Fatalf("migrated event %d not signed", e.Seq)
+		}
+	}
+	// The projection carries the winning event, ready for a checkpoint.
+	if _, err := s.WriteCheckpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.TamperForTest(s); err == nil {
+		t.Fatal("history rewritten after the migration")
+	}
+}
+
+// TestDeleteTriggerAndSequence: nothing above the compaction frontier can
+// be deleted, and sequence numbers are never reused, also when the newest
+// event is gone.
+func TestDeleteTriggerAndSequence(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice")
+	s := newStore(t, admins, 1)
+	for i := uint64(1); i <= 3; i++ {
+		if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", i, fingerprint(t), tailnet), "alice")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := journal.DeleteForTest(s, "instance-a", 1); err == nil {
+		t.Fatal("deleted without a frontier")
+	}
+	if err := journal.SetFrontierForTest(s, "instance-a", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.DeleteForTest(s, "instance-a", 3); err == nil {
+		t.Fatal("deleted above the frontier")
+	}
+	if err := journal.SetFrontierForTest(s, "instance-a", 1); err == nil {
+		t.Fatal("lowered the frontier")
+	}
+	if err := journal.SetFrontierForTest(s, "instance-a", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.DeleteForTest(s, "instance-a", 3); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.AppendBinding(ctx, admins.Sign(t, jt.Revoke(td, "host1.example.com", 4), "alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Seq != 4 {
+		t.Fatalf("sequence number %d after deleting the newest event, want 4", r.Seq)
+	}
 }

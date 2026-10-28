@@ -30,6 +30,10 @@ const (
 	ContextRequest          = "ergosum/v1/token-request"
 	ContextCallbackResponse = "ergosum/v1/callback-response"
 	ContextObservation      = "ergosum/v1/observation"
+	ContextCheckpoint       = "ergosum/v1/checkpoint"
+	// ContextEvent signs the position of a journal event: the JSON array
+	// [origin, seq, kind, hash].
+	ContextEvent = "ergosum/v1/event"
 )
 
 // HTTP paths.
@@ -39,6 +43,9 @@ const (
 	PathBindings = "/v1/bindings"
 	PathKeys     = "/v1/keys"
 	PathKeysPEM  = "/v1/keys.pem"
+	// PathJournalState is served on the ops listener: state hash,
+	// coverage, compaction frontier and outboxes.
+	PathJournalState = "/v1/journal/state"
 )
 
 // Default ports. All of them are configurable.
@@ -46,6 +53,9 @@ const (
 	DefaultAuthorityPort = 7432 // token requests and binding writes (TLS)
 	DefaultCallbackPort  = 7433 // daemon callback listener (mutual TLS)
 	DefaultOpsPort       = 7434 // authority metrics, health, public keys (HTTP)
+	// DefaultReplicationPort is the authority's journal replication
+	// listener (mutual TLS between instances).
+	DefaultReplicationPort = 7435
 )
 
 // DefaultOverlayPrefixes are the address ranges Tailscale assigns. Daemon

@@ -58,7 +58,7 @@ trust_domain: example.com
 issuer: https://ergosum.example.com
 signing_key: $W/signing.key
 journal: $W/authority/journal.db
-unseal_socket: $W/authority/unseal.sock
+control_socket: $W/authority/control.sock
 listen: ":7432"
 listen_all_interfaces: true  # reached on both test networks
 ops_listen: "127.0.0.1:7434"
@@ -83,8 +83,8 @@ in_ns authority curl -s http://127.0.0.1:7434/metrics | grep -q '^machine_identi
 if in_ns host1 curl -sk --max-time 2 https://198.51.100.2:7432/v1/keys >/dev/null; then fail "API reachable while sealed"; fi
 
 log "unseal"
-echo "wrong" | in_ns authority "$BIN/ergosum" unseal -socket "$W/authority/unseal.sock" && fail "wrong passphrase accepted"
-echo "$PASS" | in_ns authority "$BIN/ergosum" unseal -socket "$W/authority/unseal.sock"
+echo "wrong" | in_ns authority "$BIN/ergosum" unseal -socket "$W/authority/control.sock" && fail "wrong passphrase accepted"
+echo "$PASS" | in_ns authority "$BIN/ergosum" unseal -socket "$W/authority/control.sock"
 for _ in $(seq 50); do [ "$(ops /healthz)" = 200 ] && break; sleep 0.2; done
 [ "$(ops /healthz)" = 200 ] || fail "not unsealed"
 

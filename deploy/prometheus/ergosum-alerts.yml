@@ -1,0 +1,58 @@
+# Proposed Prometheus alerting rules for ergosum. Adjust thresholds and
+# labels to your setup before activating them.
+groups:
+  - name: ergosum
+    rules:
+      # A machine key exists twice: the bound key answered a callback with
+      # "no open request", or a second holder reused a request ID.
+      - alert: ErgosumKeyDuplicate
+        expr: increase(machine_identity_requests_total{result=~"key_duplicate|replay"}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }}: machine key used twice ({{ $labels.result }})"
+          description: "See the authority's audit log (alert field) for the identity and the evidence."
+
+      - alert: ErgosumAuthoritySealed
+        expr: machine_identity_authority_sealed == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}: authority is sealed and issues nothing"
+          description: "Run \"ergosum unseal\" on the host."
+
+      # Ingest rejected an event; replication from that peer stops there.
+      - alert: ErgosumJournalEventRejected
+        expr: increase(machine_identity_journal_rejected_total[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }}: journal event from {{ $labels.peer }} rejected"
+          description: "Usually a registry that differs between instances, otherwise a forged event. See the audit log."
+
+      - alert: ErgosumJournalOutboxStuck
+        expr: machine_identity_journal_outbox_oldest_age_seconds > 900
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}: {{ $labels.peer }} has not acknowledged events for {{ $value | humanizeDuration }}"
+
+      # An instance lags behind an origin for good: it has not reached the
+      # coverage the most advanced instance had 30 minutes earlier. Ordinary
+      # replication lag stays well below that.
+      - alert: ErgosumJournalCoverageDiverges
+        expr: max by (origin) (machine_identity_journal_coverage offset 30m) - min by (origin) (machine_identity_journal_coverage) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "journal coverage of {{ $labels.origin }} differs between instances"
+
+      - alert: ErgosumJournalCheckpointStale
+        expr: machine_identity_journal_checkpoint_age_seconds > 2 * 86400
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}: no own checkpoint for {{ $value | humanizeDuration }}"

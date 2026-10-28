@@ -7,7 +7,7 @@ All addresses below are documentation examples (RFC 5737, RFC 3849).
 | Path | Owner, mode | Content |
 | --- | --- | --- |
 | `/etc/ergosum/` | root, 0755 | `ergosumd.yaml`, `serve.yaml`, `signing.key` (0640, group `ergosum`) |
-| `/var/lib/ergosum/` | `ergosum`, 0700 | daemon: `identity.key` (0600); authority: `journal.db`, `unseal.sock` |
+| `/var/lib/ergosum/` | `ergosum`, 0700 | daemon: `identity.key` (0600); authority: `journal.db`, `control.sock`, optionally `archive/` |
 | `/run/ergosum/token` | `ergosum`:`ergosum-token`, 0640 | identity token, read by Vault Agent |
 
 Create the user and groups with `deploy/sysusers.d/ergosum.conf`
@@ -84,10 +84,16 @@ operator runs, on the same host,
 ergosum unseal                       # reads the passphrase from the terminal or stdin
 ```
 
-The unseal socket (`/var/lib/ergosum/unseal.sock`, mode 0600) is the only
+The control socket (`/var/lib/ergosum/control.sock`, mode 0600) is the only
 way in; it is not reachable over the network. A sealed instance does not
 restart into service on its own; another instance keeps issuing meanwhile.
 `machine_identity_authority_sealed` is 1 while sealed — alert on it.
+
+Upgrading from the first release: the setting `unseal_socket` is now
+`control_socket`, and `instance` must consist of lowercase letters, digits,
+`-` and `.` (at most 63 characters). A journal is pinned to its instance
+name, so an instance whose name breaks that rule starts over under a new
+name, with a sync from its peers.
 
 ### Listener
 
@@ -141,6 +147,13 @@ on a host of its own or on a shared host.
 | `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `foreign_key`, `unknown_identity` |
 | `machine_identity_authority_sealed` | 1 while sealed |
 | `machine_identity_binding_events_total{outcome}` | write API: `accepted`, `rejected` |
+| `machine_identity_journal_outbox_events{peer}` | events a peer has not acknowledged |
+| `machine_identity_journal_outbox_oldest_age_seconds{peer}` | age of the oldest of them; 0 if none |
+| `machine_identity_journal_rejected_total{peer}` | events from a peer that ingest rejected |
+| `machine_identity_journal_coverage{origin}` | sequence number up to which every event of an origin is here |
+| `machine_identity_journal_compaction_frontier{origin}` | sequence number up to which events of an origin may be deleted |
+| `machine_identity_journal_checkpoint_age_seconds` | age of the latest own checkpoint; -1 before the first |
+| `machine_identity_journal_compacted_events_total` | events deleted by compaction |
 
 `key_duplicate` is proof that a machine key exists twice and deserves a
 critical alert. `replay` means that someone with the machine key reused a
@@ -156,28 +169,220 @@ Requests that do not verify against a bound key (`foreign_key`,
 writes can come from anyone: they are never journaled, and their log lines
 are limited to 60 per minute in total. The metrics count all of them.
 
-## Writing a binding
+## Replication
 
-A binding event is signed by administrators over its canonical text (see
-ADR 0003) with `ssh-keygen`:
+Every instance holds the whole journal and replicates it to the others over
+mutual TLS with the instance keys (ADR 0003). There is no leader: a binding
+written at any instance reaches all others, and an instance that was down
+receives what it missed from its peers' outboxes.
+
+```yaml
+replication:
+  listen: "100.64.0.10:7435"       # overlay address; required with peers that have a url
+  peers:                           # every other instance
+    - name: authority-b            # its "instance"
+      url: https://100.64.0.11:7435
+      key: |                       # its public key, from "ergosum keygen"
+        -----BEGIN PUBLIC KEY-----
+        ...
+  max_page_mib: 32                 # largest page sent and accepted; the same everywhere
+```
+
+Allow TCP 7435 between the instances only. A peer without `url` is known
+(its events are accepted when another instance forwards them) but receives
+no pushes from here, and compaction does not wait for it. Name every
+instance on every instance: its key verifies the position of every event it
+recorded, its observations and its checkpoints wherever they arrive. An
+instance keeps its key for the life of its name; a new key is a new
+instance name.
+
+Pages are cut to `max_page_mib`, but a checkpoint travels whole and needs
+about 1.6 KB per identity. A page that is too large is refused with `413`
+and logged on the sender ("page larger than max_body"); raise the value on
+every instance before a checkpoint reaches it (32 MiB hold about 20 000
+identities).
+
+`GET /v1/journal/state` on the ops listener reports the state hash, the
+coverage and compaction frontier per origin, and the outbox of every peer.
+Instances with the same binding events have the same state hash.
+
+An event that fails verification at ingest is rejected with an audit line
+at level `error` (`"alert"`), `machine_identity_journal_rejected_total`
+counts it, and replication from that peer stops there until the cause is
+fixed: usually a registry that differs between the instances, otherwise a
+forged event. The sender keeps the event and retries. A failure that says
+nothing about the event, such as a database error, is answered with `503`
+and retried without an alarm; a lasting one shows as a stuck outbox.
+
+### Adding an instance
+
+1. `ergosum keygen` on the new instance; write its configuration with all
+   other instances as peers.
+2. Add the new instance to `replication.peers` of every existing instance,
+   without `url` until it is running, and restart them.
+3. Start the new instance (and unseal it), then pull the journal before
+   anything is written to it:
+
+   ```sh
+   ergosum journal sync -from authority-a -from authority-b
+   ```
+
+   Several peers give the union of what they hold, so one peer cannot
+   withhold a binding event.
+4. Add the `url` on the other instances, so that they push to it, and
+   restart them.
+
+A rebuilt instance keeps its name and key and follows the same steps; it
+must sync before it accepts writes, or its new events would reuse sequence
+numbers its peers know. Only a sync takes over the coverage of the
+checkpoint a peer's journal starts with, its own sequence counter included;
+pushes never do. Sync from peers you trust: a compromised peer could claim
+a coverage that makes the instance skip other instances' observations.
+
+### Removing an instance
+
+Remove it from `replication.peers` on every other instance. Compaction
+waits for every peer with a `url`; a peer that is gone for good keeps the
+journal growing until it is removed.
+
+## Checkpoints, compaction and export
+
+Every instance writes a checkpoint, signed with its key, of the projection
+(every winning binding event with its administrators' signatures) and its
+coverage: daily if the journal changed, and on `ergosum journal checkpoint`.
+An event is deleted only when the latest own checkpoint that every peer has
+acknowledged covers it, every peer has acknowledged the event itself, and
+the retention of its kind has passed; a trigger in the database refuses to
+delete anything above that frontier.
+
+```yaml
+compaction:
+  checkpoint_interval: 24h
+  interval: 1h              # how often a checkpoint is considered and compaction runs
+  retention:
+    observations: 2160h     # 90 days; 0 keeps them
+    key_duplicate: 0s       # evidence of a copied key: kept
+    bindings: 0s            # binding history: kept; the winners live on in the checkpoint
+  archive: /var/lib/ergosum/archive   # optional
+```
+
+With an archive, compaction first writes the events not yet archived to a
+new file there (JSON lines), and deletes only archived events. Commands on
+the local instance:
 
 ```sh
-cat > event.txt <<'EOF'
-ergosum binding v1
-kind binding.set
-trust-domain example.com
-identity host1.example.com
-epoch 1
-key SHA256:<fingerprint from ergosumd fingerprint>
-check ip 192.0.2.10
-check tailnet host1.tailnet.example.com
-EOF
+ergosum journal state                  # state hash, coverage, frontier, outboxes
+ergosum journal checkpoint
+ergosum journal compact                # archive, raise the frontier, delete
+ergosum journal export -out FILE       # the whole journal as JSON lines
+ergosum journal export -archive        # what is not yet archived, into the archive
+```
+
+An export needs no trust in where it is kept: observations and checkpoints
+are signed by their instance, binding events by administrators, and gaps in
+the sequence numbers of an origin show. Keep a current export with the
+recovery material of the deployment.
+
+## Trust root: administrator keys and the registry
+
+The registry names the administrator keys and, per event kind, how many of
+them must sign. Whoever controls enough administrator keys, or the registry
+of an instance, can bind any identity to any key. Treat both as the highest
+protection class:
+
+- Keep administrator keys on security keys (`sk-ssh-ed25519`,
+  `sk-ecdsa-sha2-nistp256`), which also prove presence for each signature,
+  or at least passphrase-protected and never on an authority host.
+- Set `approvals` to 2 or more for `binding.set` where two administrators
+  are available.
+- The registry is static configuration. Change it on every instance through
+  the same reviewed deployment; until all instances run the new registry,
+  instances with the old one reject events signed only by new keys, and
+  replication from the others stops at such an event (see Replication).
+- Before an administrator key leaves the registry, have the remaining
+  administrators approve again, at the next epoch, every binding that only
+  that key approved, and let compaction remove the older events (retention
+  for `bindings`). Ingest verifies history against the current registry; an
+  event approved only with a removed key stops a sync.
+
+## Writing a binding
+
+`ergosum bind`, `ergosum revoke` and `ergosum sign` read the current epoch
+from an authority, show the canonical text, sign it with `ssh-keygen -Y sign`
+and merge the signatures of several administrators. A configuration saves
+the flags:
+
+```yaml
+# ~/.config/ergosum/admin.yaml (or $ERGOSUM_ADMIN_CONFIG)
+trust_domain: example.com
+authorities:                     # tried in order
+  - url: https://100.64.0.10:7432
+    key: SHA256:...              # instance fingerprint, from "ergosum keygen"
+```
+
+```sh
+# Administrator 1: build the event at the next epoch and sign it.
+ergosum bind -identity host1.example.com -key SHA256:<from ergosumd fingerprint>   -check tailnet:host1.tailnet.example.com -check ip:192.0.2.10   -sign-key ~/.ssh/id_ed25519_sk -out host1.json
+# Administrator 2, on another machine: check the text, sign, submit.
+ergosum sign -sign-key ~/.ssh/id_ed25519 -submit host1.json
+# Copies signed separately can be merged: ergosum sign -submit a.json b.json
+ergosum revoke -identity host1.example.com -sign-key ~/.ssh/id_ed25519 -out revoke.json
+```
+
+`-sign-key` takes a private key file, a security key handle, or a public key
+whose private key is in `ssh-agent`. The tool asks before it signs (`-yes`
+skips the question) and checks every signature before it writes the file.
+Without the tool, sign the canonical text (ADR 0003) directly:
+
+```sh
 ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n ergosum-binding event.txt   # each admin
 ```
 
-The JSON form with all signatures goes to `POST /v1/bindings` on any
+and post the JSON form with all signatures to `POST /v1/bindings` on any
 instance. Admin keys are ed25519, ECDSA, RSA with at least 2048 bits, or
 security keys; `ssh-dss` keys and certificates are refused.
+
+## Enrollment and decommissioning
+
+Enrollment of a machine:
+
+1. Install `ergosumd` and its configuration; `sudo -u ergosum ergosumd
+   fingerprint` creates the key and prints the fingerprint.
+2. Administrators bind the identity to that fingerprint with the checks of
+   its place (`ergosum bind`, `ergosum sign -submit`). The machine needs no
+   bootstrap secret.
+3. Start `ergosumd`; check that `/run/ergosum/token` appears and that the
+   authority's audit log shows `issued` with every check.
+4. Grant the identity what it needs in Vault (policies on the entity alias).
+
+After a restore or migration the machine gets a new key: delete the
+daemon's state directory, create a new key and bind it at the next epoch.
+
+Decommissioning:
+
+1. `ergosum revoke` with the approvals the registry demands. Every instance
+   stops issuing as soon as the revocation reaches it; a token already
+   issued stays valid until it expires.
+2. Wait until every instance has the revocation: the same state hash
+   everywhere, and `GET /v1/bindings/<identity>` answers `binding.revoked`.
+3. Revoke the Vault tokens of the machine's entity
+   (`vault token revoke` by accessor, or disable the entity).
+4. Stop `ergosumd` and delete its state directory, so that no copy of the
+   key remains on the disk.
+5. Only now release the machine's addresses and overlay node. A released
+   public address can be handed to someone else; while a binding still
+   names it, that machine together with a stolen backup would pass the
+   checks.
+6. Remove the machine from monitoring and backups.
+
+## Alerts
+
+`deploy/prometheus/ergosum-alerts.yml` holds a proposal of alerting rules
+for these metrics: proven key duplicates and replays, sealed instances,
+rejected journal events, stuck outboxes, diverging coverage and stale
+checkpoints. Coverage counts as diverging when an instance has not reached,
+within 30 minutes, what the most advanced instance had; a peer added
+without a sync can stay behind that way for good.
 
 ## Token verification in Vault
 

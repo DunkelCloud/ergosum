@@ -18,8 +18,6 @@ shorten it without giving up the rule that no instance can invent a binding.
 
 This ADR fixes how bindings are recorded and approved, how the current state
 is derived, how instances replicate the journal, and how it is shortened.
-Replication and compaction are built in a later step; their format is fixed
-here so that the stored data does not change when they arrive.
 
 ## Decision drivers
 
@@ -70,6 +68,10 @@ Chosen option 1.
 
 Only binding events change the projection, on their own or inside a
 checkpoint. Observations are records.
+
+Besides, the instance that records an event signs its position: origin,
+sequence number, kind and hash (see Replication, Event signatures). That
+signature says where the event was recorded; it grants nothing.
 
 ### Binding event
 
@@ -252,16 +254,18 @@ winner of their identity: without them, an older, validly signed
 `binding.set` could be replayed and would win again.
 
 **Writing.** Every instance writes a checkpoint on a schedule (default:
-daily) and on `ergosum journal checkpoint`. It needs the unsealed instance
-key, as issuing does.
+daily, if the journal changed since the last one) and on `ergosum journal
+checkpoint`. It needs the unsealed instance key, as issuing does.
 
 **Ingest.** A foreign checkpoint is verified against the instance key of its
-origin, and each of its binding events as above; if one fails, the whole
-checkpoint is rejected and raised as an alarm, as for a stale registry. Then
-its binding events are applied under the ordering rule. The projection is
-the winner of a set, so this is a union: an instance that missed a binding
-event gets it with the next checkpoint of any peer. A foreign checkpoint
-never causes a deletion.
+origin (signature, `kid`, `instance` equal to the origin, trust domain), and
+each of its binding events as above; the bindings must name every identity
+at most once, and the state hash must match them. If anything fails, the
+whole checkpoint is rejected and raised as an alarm, as for a stale
+registry. Then its binding events are applied under the ordering rule. The
+projection is the winner of a set, so this is a union: an instance that
+missed a binding event gets it with the next checkpoint of any peer. A
+foreign checkpoint never causes a deletion.
 
 **Compaction.** An instance deletes an event only if
 
@@ -286,11 +290,22 @@ plus the remaining binding events, under the ordering rule.
 An event that ingest rejects stops the coverage of its origin there. The
 instance raises an alarm and does not compact that origin past the gap.
 
-**Archive.** `ergosum journal export` writes events as JSON lines
-(`origin`, `seq`, `kind`, `hash`, `body`) to the configured archive
-directory. The archive needs no trust in whoever stores it: observations and
-checkpoints are signed by their instance, binding events by administrators,
-and gaps in the sequence numbers of an origin are visible.
+Compaction runs on the checkpoint schedule and on `ergosum journal compact`:
+it exports to the archive if one is configured, raises the frontier to the
+newest own checkpoint every peer has acknowledged, and deletes what the
+frontier, the peers' cursors and the retention allow.
+
+**Archive and export.** Events are written as JSON lines (`origin`, `seq`,
+`kind`, `hash`, `body`, the body as the stored JSON, and `sig`, the position
+signature). Before compaction, and on `ergosum journal export -archive`, the
+instance writes the events not yet archived to a new file in the configured
+archive directory; only archived events may then be deleted. `ergosum
+journal export` streams the whole journal, for example to a recovery copy;
+it reads the journal in batches, so a slow reader does not hold up
+issuance. An export needs no trust in whoever stores it: every position is
+signed by its origin, observations and checkpoints by their instance,
+binding events by administrators, and gaps in the sequence numbers of an
+origin are visible.
 
 Rejected alternatives:
 
@@ -310,79 +325,166 @@ One SQLite database per instance (pure Go driver, no cgo), WAL mode,
 
 ```sql
 events   (origin TEXT, seq INTEGER, kind TEXT, identity TEXT, epoch INTEGER,
-          hash TEXT, body BLOB, recorded_at TEXT, PRIMARY KEY (origin, seq))
-bindings (identity TEXT PRIMARY KEY, kind, epoch, key, checks, hash, origin, seq)
-meta     (key TEXT PRIMARY KEY, value TEXT)   -- schema_version, trust_domain, instance, next_seq
-coverage   (origin TEXT PRIMARY KEY, seq INTEGER)  -- ingested without gaps
-compaction (origin TEXT PRIMARY KEY, seq INTEGER)  -- may be deleted up to here
+          hash TEXT, body BLOB, recorded_at TEXT, pos INTEGER UNIQUE, sig BLOB,
+          PRIMARY KEY (origin, seq))
+bindings (identity TEXT PRIMARY KEY, kind, epoch, key, checks, hash, origin, seq, body)
+meta     (key TEXT PRIMARY KEY, value TEXT)   -- schema_version, trust_domain, instance,
+                                              -- next_seq, next_pos, compacted_pos,
+                                              -- frontier_pos, exported_pos
+coverage    (origin TEXT PRIMARY KEY, seq INTEGER)  -- ingested without gaps
+compaction  (origin TEXT PRIMARY KEY, seq INTEGER)  -- may be deleted up to here
+peer_cursor (peer TEXT PRIMARY KEY, pos INTEGER)    -- acknowledged by a peer up to here
 ```
 
 - `origin` is the instance that first recorded the event, `seq` its local
   sequence number. `(origin, seq)` identifies an event across instances.
+- `pos` is the local insertion order, the order in which the instance
+  forwards events; the next one is kept in `meta`, so positions are never
+  reused either.
 - Sequence numbers are never reused. The next one is kept in `meta`, not
   derived from the remaining rows, which compaction may have removed.
-- Triggers abort every `UPDATE` on `events`, and every `DELETE` of an event
-  above the `compaction` frontier, so not even a bug in compaction can delete
-  an uncovered event. The frontier is the coverage of the latest own
-  checkpoint that every peer has acknowledged.
-- Binding event hashes are unique.
+- Triggers abort every `UPDATE` on `events` except setting a missing `sig`
+  once, and every `DELETE` of an event above the `compaction` frontier, so
+  not even a bug in compaction can delete an uncovered event. The frontier is the coverage of the latest own
+  checkpoint that every peer has acknowledged; it only rises, which another
+  trigger enforces. `frontier_pos` is that checkpoint's position,
+  `compacted_pos` the highest position compaction has deleted, and
+  `exported_pos` the highest position written to the archive.
+- `coverage` of an origin is the highest sequence number up to which every
+  event of that origin has been stored or acknowledged; it advances over
+  events stored contiguously.
+- A binding event hash is unique per origin. The same event can be stored
+  under several origins when it was written at several instances; it is one
+  event for the ordering rule.
 - `bindings` is the projection, updated in the same transaction as the
-  event; it can be recomputed at any time from the latest own checkpoint and
-  `events`.
+  event, with the body of the winning event for the next checkpoint; it can
+  be recomputed at any time from the stored checkpoints and binding events.
 - The journal is pinned to its trust domain and to its instance name on
   creation; a renamed instance would otherwise start a second origin in the
   same file.
 - Schema version 1 has no checkpoints and forbids every `DELETE`. Version 2
-  adds `next_seq`, `coverage`, `compaction` and the conditional trigger; an
-  instance migrates on start without touching existing events. A checkpoint
-  is stored with an empty `identity` and epoch 0.
+  adds the positions, the position signatures, the counters in `meta`,
+  `coverage`, `compaction`, `peer_cursor`, the body in `bindings` and the
+  conditional triggers; an instance migrates on start without changing the
+  content of existing events, and signs their positions once its key is
+  unsealed. A checkpoint is stored with an empty `identity` and epoch 0.
+- Times are stored as RFC 3339 in UTC with nine fractional digits, so that
+  they compare correctly as text.
 
 ### Replication
 
 Push with an on-disk outbox, idempotent ingest, pull for catch-up. No
 leader, no quorum.
 
-- **Peers** are configured per instance with URL and key fingerprint, and
-  the instance key of every peer, which also verifies that peer's
-  observations.
-- **Transport**: mutual TLS with the instance keys, pinned as in ADR 0001.
-  No bearer tokens.
+- **Peers** are configured per instance: every other instance of the trust
+  domain with its name and public instance key, which pins its TLS key and
+  verifies the positions of its events, its observations and its
+  checkpoints, also when a third instance forwards them. A peer with a URL receives pushes, and compaction waits for
+  its acknowledgments; a peer without URL is only known.
+- **Transport**: a listener of its own (port 7435, ADR 0001) with mutual TLS
+  and the instance keys, pinned as in ADR 0001; it accepts only configured
+  peers. No bearer tokens.
 - **Outbox**: per peer, a cursor over the local insertion order of `events`
-  (`peer_cursor(peer, last_acked)`). Every stored event, own or received, is
-  pushed to every peer that has not acknowledged it, so events also travel
-  through a third instance. The outbox lives on disk because the events do.
-  Compaction waits for these cursors.
-- **Push**: `POST /v1/journal/ingest` with a batch of events in insertion
-  order (`origin`, `seq`, `kind`, `identity`, `epoch`, `hash`, `body`). The
-  peer answers with the last position it accepted; the cursor advances.
-- **Ingest** verifies every event before storing it: binding events against
-  the local registry and trust domain, exactly as the write API does;
-  observations against the instance key of their origin; checkpoints as
-  described above. Events are idempotent by `(origin, seq)`; the same
-  `(origin, seq)` with another hash is rejected and raised as an alarm. A
-  binding event whose hash is already stored under another origin is
-  acknowledged without storing it again. Observations and checkpoints at or
-  below the instance's coverage are acknowledged without storing them, so a
-  peer cannot push deleted events back; binding events are ingested as
-  always.
-- **Sync**: `GET /v1/journal/events?after=<position>` pages through a
-  peer's journal; `ergosum journal sync --from <peer>` pulls it with the
-  same verification. A new or rebuilt instance starts with a sync and then
-  receives pushes. If `after` lies below the peer's compaction frontier, the
-  page starts with the checkpoint that compaction relied on, followed by the
-  remaining events; the receiver ingests the checkpoint and raises its
-  coverage to the checkpoint's where that is higher. With several `--from`,
-  the instance takes the union of what the peers deliver.
-- **Metrics**: outbox depth and age of the oldest unacknowledged event per
-  peer; coverage and compaction frontier per origin; age of the latest own
-  checkpoint. The ops listener (ADR 0001) also reports the state hash, so
-  monitoring can compare instances once replication has settled.
+  (`peer_cursor`). Every stored event, own or received, is pushed to every
+  peer that has not acknowledged it, so events also travel through a third
+  instance. The outbox lives on disk because the events do. Compaction waits
+  for these cursors.
+- **Page**: push and pull carry the same JSON page:
+
+  ```json
+  {
+    "v": 1,
+    "instance": "authority-a",
+    "start": {"pos": 1180, "origin": "authority-a", "seq": 1207, "kind": "checkpoint", "hash": "...", "body": "...", "sig": "..."},
+    "events": [{"pos": 1181, "origin": "authority-b", "seq": 954, "kind": "observation.issued", "hash": "...", "body": "<base64>", "sig": "<base64>"}],
+    "last": 1181,
+    "more": false
+  }
+  ```
+
+  `pos` is the sender's position, `last` the position the page reaches,
+  `start` present only as described under Sync. Receivers ignore unknown
+  members. A page holds at most 256 events and stays within
+  `replication.max_page_mib` (default 32 MiB), which every instance also
+  enforces on what it receives; a single event, in practice a checkpoint,
+  must fit into one page.
+- **Event signatures**: `sig` is the origin's signature with its instance
+  key (ADR 0001, context `ergosum/v1/event`) over the JSON array
+  `[origin, seq, kind, hash]`; the hash covers the body. Ingest checks it
+  with the configured key of the origin before anything else. Binding
+  events carry it too, although the administrators' signatures alone
+  decide whether they hold: without it, a peer could store a valid binding
+  event under another instance's `(origin, seq)`, and the genuine event at
+  that position would conflict at every instance and cut that instance off
+  from replication in both directions. Sequence numbers and coverage above
+  2^53 are rejected, so that no counter derived from them can overflow.
+- **Push**: `POST /v1/journal/ingest` with a page. The peer answers
+  `{"v": 1, "accepted": <position>}`, with `200` if it took the whole page
+  and `422` and an `error` if it stopped at a rejected event; the cursor
+  advances to `accepted`, never beyond the page. `413` refuses a page over
+  the limit. `503` means ingest failed for a reason other than the event,
+  such as the database or a canceled request: nothing more is acknowledged,
+  no alarm is raised, and the sender retries with backoff. A `200` that does
+  not accept the whole page counts as a failure as well.
+- **Ingest** handles a page in order and verifies every event before
+  storing it: its position signature, then binding events against the local
+  registry and trust domain, exactly as the write API does; observations
+  against the instance key of their origin; checkpoints as described above.
+  Events are idempotent by `(origin, seq)`; the same `(origin, seq)` with
+  another hash is rejected.
+  Observations and checkpoints at or below the instance's coverage are
+  acknowledged without storing them, so a peer cannot push deleted events
+  back; binding events there are stored unless their hash is already
+  known, so that no coverage claim can keep a valid binding event out.
+  Above the coverage every verified event is stored, also a binding event
+  stored under another origin before, so that forwarded streams have no
+  gaps. Events of the instance's own origin that it no longer holds are
+  acknowledged if compaction removed them; a rebuilt instance stores the
+  others and continues its sequence numbers after them.
+- **Rejection**: only an event that fails verification is rejected. Ingest
+  stops at the first rejected event and acknowledges
+  only what came before it, so the coverage of that origin stops there. The
+  rejected event is never acknowledged: the sender keeps it in its outbox
+  and retries with backoff, and compaction keeps it on the sender. The
+  receiver raises an alarm (audit line at error level, metric per peer); the
+  growing outbox shows on the sender.
+- **Sync**: `GET /v1/journal/events?after=<position>&limit=<n>` pages
+  through a peer's journal; `ergosum journal sync --from <peer>` makes the
+  local instance pull it and ingest it with the same verification. A new or
+  rebuilt instance starts with a sync and then receives pushes. If `after`
+  lies below the peer's compaction frontier, every page up to the deleted
+  positions starts with the checkpoint that compaction relied on, followed
+  by the events that survived; the receiver ingests the checkpoint and
+  raises its coverage to the checkpoint's where that is higher, its own
+  sequence counter included. A pushed page starts the same way when the
+  peer's cursor lies below the frontier, which happens only for a peer added
+  after a compaction; the receiver then stores the checkpoint but does not
+  take over its coverage. Only a sync, which an operator starts against a
+  peer of their choice, does: a pushed claim could otherwise make the
+  instance skip a third instance's observations or raise its sequence
+  counter. Only the sender's own checkpoint can start a page. With several
+  `--from`, the instance takes the union of what the peers deliver.
+- **Metrics**: `machine_identity_journal_outbox_events` and
+  `machine_identity_journal_outbox_oldest_age_seconds` per peer;
+  `machine_identity_journal_coverage` and
+  `machine_identity_journal_compaction_frontier` per origin;
+  `machine_identity_journal_checkpoint_age_seconds`;
+  `machine_identity_journal_rejected_total` per peer;
+  `machine_identity_journal_compacted_events_total`. The ops listener also
+  reports the state hash, coverage, frontier and outboxes
+  (`GET /v1/journal/state`), so monitoring can compare instances once
+  replication has settled.
 - **Package boundary**: the replication package knows only `(origin, seq,
-  kind, hash, body)`, a store interface and a verifier callback. Coverage,
-  the compaction frontier and the checkpoint-first sync page belong to the
-  package; writing, verifying and applying a checkpoint are callbacks. It
-  does not import ergosum's event types and can be moved to a library of its
-  own.
+  kind, hash, body, sig)`, a store interface and callbacks: verifying an
+  event (its `sig` included; an error marked invalid rejects it, any other
+  is temporary), the kinds that are always ingested, the checkpoint kind and
+  its coverage, the HTTP client per peer and the authentication of incoming
+  requests. Coverage, the compaction frontier, the checkpoint-first page,
+  the outbox, the bytes an origin signs, the limits on sequence numbers and
+  page size, and the HTTP endpoints belong to the package; signing,
+  writing, verifying and applying a checkpoint and deleting events stay
+  with the journal. It depends on the standard library only and can be
+  moved to a library of its own.
 
 ## Consequences
 
@@ -390,7 +492,7 @@ leader, no quorum.
 
 - Bindings need administrator signatures everywhere; a compromised instance
   can refuse service and report false observations, but cannot bind or
-  revoke.
+  revoke, and cannot take another instance's place in the journal.
 - Every instance holds the complete state and the history since its last
   compaction; any copy rebuilds the others.
 - The ordering rule makes convergence a property of the data, not of the
@@ -414,12 +516,35 @@ leader, no quorum.
   afterwards.
 - Compaction waits for every configured peer. A peer that is gone for good
   must be removed from the configuration, or the journal keeps growing.
+- One rejected event stops replication from that peer until the cause is
+  fixed (a stale registry here, a forged event there); later events wait
+  behind it, also those of other origins the peer forwards.
+- A peer that an instance syncs from can, through the coverage of its
+  checkpoint, make that instance skip other origins' observations up to the
+  claimed coverage and raise its own sequence counter (up to 2^53). Binding
+  events are always ingested, so this cannot keep a binding out; a pushed
+  checkpoint's coverage does not count.
+- Observations and checkpoints verify with the configured key of their
+  origin. An instance keeps its key for the life of its name; a new key is a
+  new instance name.
+- A rebuilt instance must sync before it accepts writes: an event it
+  records before would reuse a sequence number its peers know, and they
+  reject it as a conflict.
+- Ingest verifies against the current registry, also history and the
+  bindings inside checkpoints. Once an administrator key leaves the
+  registry, every binding event approved only with it fails verification,
+  and a sync of a journal that still holds one stops there. Such bindings
+  must be approved again by the remaining administrators, and the old
+  events compacted away, before the key is removed.
 - History beyond its retention exists only in the archive, if one is
   configured.
 - A rebuilt instance relies on its sync peer not to omit binding events
   until the next checkpoint of an honest peer arrives. Syncing from several
   peers narrows that to the case where all of them omit the same event.
 - A checkpoint repeats every binding with its signatures, roughly a kilobyte
-  per identity; only the latest checkpoint of each origin is kept.
+  per identity and about 1.6 KB on the wire; only the latest checkpoint of
+  each origin is kept. It must fit into one page: at the default of 32 MiB,
+  that is about 20 000 identities, beyond which `max_page_mib` must grow on
+  every instance.
 - The canonical text and the SSHSIG namespace are a compatibility promise:
   changing either needs a new canonical version line.

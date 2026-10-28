@@ -27,11 +27,14 @@ Early development. Interfaces and formats are described in
 | Binary     | Runs on            | Purpose |
 |------------|--------------------|---------|
 | `ergosumd` | every machine      | key pair, token requests, callback listener, token file |
-| `ergosum`  | authority instances | `serve` (authority), `unseal`, `keygen` |
+| `ergosum`  | authority instances, administrators | `serve` (authority), `unseal`, `keygen`, `journal`; `bind`, `sign`, `revoke` |
 
 Bindings are approved by administrators with SSH signatures
 (`ssh-keygen -Y sign`); a registry on every authority instance sets how many
-distinct administrators must sign each kind of change.
+distinct administrators must sign each kind of change. The authority
+instances replicate their binding journal among each other without a leader,
+verify every event before they store it, and shorten it through signed
+checkpoints.
 
 Both are static Go binaries without cgo for `linux/amd64` and `linux/arm64`.
 The authority also ships as an OCI image that runs as a non-root user on a

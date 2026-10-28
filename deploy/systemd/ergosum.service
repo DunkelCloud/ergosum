@@ -14,8 +14,9 @@ ExecStart=/usr/bin/ergosum serve --config /etc/ergosum/serve.yaml
 Restart=on-failure
 RestartSec=5s
 
-# Journal and unseal socket. No runtime directory: on a shared host the
-# daemon owns /run/ergosum.
+# Journal, control socket and, if configured below it, the archive. No
+# runtime directory: on a shared host the daemon owns /run/ergosum. An
+# archive elsewhere needs ReadWritePaths=.
 StateDirectory=ergosum
 StateDirectoryMode=0700
 UMask=0077

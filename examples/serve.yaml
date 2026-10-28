@@ -18,7 +18,8 @@ clock_skew: 2m
 # "ergosum unseal" is run on this host.
 signing_key: /etc/ergosum/signing.key
 journal: /var/lib/ergosum/journal.db
-unseal_socket: /var/lib/ergosum/unseal.sock
+# Local socket for "ergosum unseal" and "ergosum journal" (mode 0600).
+control_socket: /var/lib/ergosum/control.sock
 
 # Token requests and binding writes (TLS with the instance key). Required:
 # the instance's overlay address. Binding all interfaces (":7432") needs
@@ -61,3 +62,46 @@ registry:
     binding.revoked:
       threshold: 1
       keys: [alice, bob]
+
+# Journal replication with the other instances (mutual TLS with the
+# instance keys, port 7435). Every instance lists all others: their keys
+# verify the observations and checkpoints that reach this instance, also
+# through a third one.
+replication:
+  listen: "100.64.0.10:7435"
+  peers:
+    - name: authority-b
+      url: https://100.64.0.11:7435
+      # Public key as printed by "ergosum keygen" on that instance; the
+      # fingerprint is optional and must match the key.
+      fingerprint: SHA256:vswV23fZQ7IenAozm5haCGS9fD4JU7/wN1Hw2jxB3mc
+      key: |
+        -----BEGIN PUBLIC KEY-----
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaZjaJWphXwUxBJc8PqqwIeKZaxuL
+        bbQp94Nl0sHkl8VEUr8Luu9ddfSg8noe/RblLEjy0EiDssHIrktAEuBgbg==
+        -----END PUBLIC KEY-----
+    # Without url: known, but reached only through the other peers. It gets
+    # no pushes from here, and compaction does not wait for it.
+    - name: authority-c
+      key: |
+        -----BEGIN PUBLIC KEY-----
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFkxhJMwH+WbvoKV1FSty848J48JD
+        KvE9zhKhzYFUT2Gjk9vPFJL9SysFVFiQfJIo0R2ipkXwX2y53Gbww77UWQ==
+        -----END PUBLIC KEY-----
+  # Largest page sent to and accepted from a peer, in MiB; the same on every
+  # instance. A checkpoint (about 1.6 KB per identity) must fit into one.
+  max_page_mib: 32
+
+# Checkpoints and compaction. An event is deleted only when the latest own
+# checkpoint that every peer has acknowledged covers it, every peer has
+# acknowledged the event, and its retention has passed.
+compaction:
+  checkpoint_interval: 24h
+  interval: 1h
+  retention:
+    observations: 2160h   # 90 days; key_duplicate and bindings are kept
+    # key_duplicate: 0s   # 0 keeps them
+    # bindings: 0s
+  # Export events here (JSON lines) before they are deleted. Under systemd
+  # a directory outside /var/lib/ergosum needs ReadWritePaths=.
+  # archive: /var/lib/ergosum/archive

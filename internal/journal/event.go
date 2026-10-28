@@ -24,6 +24,7 @@ const (
 	KindBindingSet     = "binding.set"
 	KindBindingRevoked = "binding.revoked"
 	KindObservation    = "observation" // prefix; full kinds are observation.<result>
+	KindCheckpoint     = "checkpoint"
 )
 
 // Namespace is the SSHSIG namespace of admin signatures over binding events.
