@@ -1,6 +1,6 @@
 # ADR 0002: Identity token format
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-10-27
 - Related: [ADR 0001](0001-protocol.md)
 
