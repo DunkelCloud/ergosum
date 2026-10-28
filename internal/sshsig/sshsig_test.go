@@ -1,6 +1,7 @@
 package sshsig
 
 import (
+	"crypto/dsa" //nolint:staticcheck // DSA is used only to assert that it is rejected
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -67,6 +68,27 @@ func TestVerifyRejectsGarbage(t *testing.T) {
 		if _, err := Verify([]byte(in), "n", []byte("m")); err == nil {
 			t.Fatalf("accepted %q", in)
 		}
+	}
+}
+
+func TestVerifyRejectsDSA(t *testing.T) {
+	var priv dsa.PrivateKey                                                                      //nolint:staticcheck // see the import
+	if err := dsa.GenerateParameters(&priv.Parameters, rand.Reader, dsa.L1024N160); err != nil { //nolint:staticcheck // see the import
+		t.Fatal(err)
+	}
+	if err := dsa.GenerateKey(&priv, rand.Reader); err != nil { //nolint:staticcheck // see the import
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(&priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := Sign(s, "n", []byte("m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(sig, "n", []byte("m")); !errors.Is(err, ErrWeakAlgorithm) {
+		t.Fatalf("DSA signature: %v", err)
 	}
 }
 

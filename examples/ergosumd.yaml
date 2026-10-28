@@ -15,7 +15,8 @@ metrics_file: /var/lib/node_exporter/textfile_collector/ergosum.prom
 callback_listen: ":7433"
 
 # Underlay addresses reported for net checks. Empty: all global unicast
-# addresses outside the overlay.
+# addresses outside the overlay, physical-looking interfaces first, at most
+# 16 (the daemon warns when it has to leave some out; name them here then).
 addresses: []
 # Overlay ranges left out of the detected addresses. Empty: the Tailscale
 # ranges 100.64.0.0/10 and fd7a:115c:a1e0::/48.

@@ -1,11 +1,42 @@
 package daemon
 
 import (
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/jwt"
+	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
+
+func TestPickAddresses(t *testing.T) {
+	var cands []ifaceAddr
+	for i := 0; i < 20; i++ {
+		cands = append(cands, ifaceAddr{addr: fmt.Sprintf("172.18.%d.1", i), iface: "br-" + strconv.Itoa(i), index: 1 + i})
+	}
+	cands = append(cands,
+		ifaceAddr{addr: "198.51.100.20", iface: "eth0", index: 30},
+		ifaceAddr{addr: "2001:db8::20", iface: "eth0", index: 30},
+		ifaceAddr{addr: "198.51.100.20", iface: "eth0.100", index: 31}, // the same address again
+	)
+	out, truncated := pickAddresses(cands)
+	if !truncated || len(out) != protocol.MaxAddresses {
+		t.Fatalf("%d addresses, truncated=%v", len(out), truncated)
+	}
+	if out[0] != "198.51.100.20" || out[1] != "2001:db8::20" {
+		t.Fatalf("physical interface not first: %v", out[:2])
+	}
+	for _, a := range out[2:] {
+		if a == "198.51.100.20" {
+			t.Fatal("duplicate address reported")
+		}
+	}
+	short := []ifaceAddr{{addr: "192.0.2.1", iface: "eth0", index: 2}, {addr: "172.17.0.1", iface: "docker0", index: 1}}
+	if out, truncated := pickAddresses(short); truncated || len(out) != 2 || out[0] != "192.0.2.1" {
+		t.Fatalf("short list: %v %v", out, truncated)
+	}
+}
 
 func TestRenewDelay(t *testing.T) {
 	iat := time.Unix(1_800_000_000, 0)

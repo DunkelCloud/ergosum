@@ -463,8 +463,11 @@ func TestRenewalRunsAllChecks(t *testing.T) {
 	if c1.ID == c2.ID {
 		t.Fatal("renewal returned the same token")
 	}
+	// Renewal is scheduled 5 s ± 1 s after iat; the request itself, the loop
+	// and second-granularity iat values add up to about two more seconds on
+	// a loaded runner.
 	elapsed := time.Duration(c2.IssuedAt-c1.IssuedAt) * time.Second
-	if elapsed < 3*time.Second || elapsed > 7*time.Second {
+	if elapsed < 3*time.Second || elapsed > 9*time.Second {
 		t.Fatalf("renewed after %s, want about half of 10s", elapsed)
 	}
 	issued := e.auth.RequestCount(authority.ResultIssued)

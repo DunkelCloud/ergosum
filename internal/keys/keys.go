@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 )
 
@@ -47,6 +48,11 @@ func FingerprintSPKI(spki []byte) string {
 	sum := sha256.Sum256(spki)
 	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
 }
+
+var fingerprintRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
+
+// ValidFingerprint reports whether s has the shape of a Fingerprint.
+func ValidFingerprint(s string) bool { return fingerprintRe.MatchString(s) }
 
 // ParseSPKI parses a DER SubjectPublicKeyInfo and requires a P-256 key.
 func ParseSPKI(der []byte) (*ecdsa.PublicKey, error) {

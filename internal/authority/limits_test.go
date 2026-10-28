@@ -3,7 +3,41 @@ package authority
 import (
 	"testing"
 	"time"
+
+	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
 )
+
+func validConfig(t *testing.T) Config {
+	t.Helper()
+	cfg := Config{
+		Instance: "authority-a", TrustDomain: "example.com", Issuer: "https://ergosum.example.com",
+		SigningKey: "signing.key", Listen: "100.64.0.10:7432", Registry: jt.NewAdmins(t, "alice").Registry(1),
+	}
+	cfg.SetDefaults()
+	return cfg
+}
+
+func TestValidateRanges(t *testing.T) {
+	good := validConfig(t)
+	if err := good.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	bad := map[string]func(*Config){
+		"negative clock_skew":       func(c *Config) { c.ClockSkew = -2 * time.Minute },
+		"huge clock_skew":           func(c *Config) { c.ClockSkew = 2 * time.Hour },
+		"callback port too high":    func(c *Config) { c.Callbacks.Port = 70000 },
+		"negative callback port":    func(c *Config) { c.Callbacks.Port = -1 },
+		"negative callback timeout": func(c *Config) { c.Callbacks.Timeout = -time.Second },
+		"token_ttl too short":       func(c *Config) { c.TokenTTL = time.Second },
+	}
+	for name, mutate := range bad {
+		c := validConfig(t)
+		mutate(&c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
 
 func TestValidateListen(t *testing.T) {
 	cases := []struct {

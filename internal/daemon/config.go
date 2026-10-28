@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
 
@@ -89,8 +89,6 @@ func (c *Config) SetDefaults() {
 	}
 }
 
-var fingerprintRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
-
 // Validate checks the configuration.
 func (c *Config) Validate() error {
 	var errs []error
@@ -105,7 +103,7 @@ func (c *Config) Validate() error {
 		if err != nil || u.Scheme != "https" || u.Host == "" {
 			errs = append(errs, fmt.Errorf("authorities[%d]: url must be https://host:port", i))
 		}
-		if !fingerprintRe.MatchString(a.Key) {
+		if !keys.ValidFingerprint(a.Key) {
 			errs = append(errs, fmt.Errorf("authorities[%d]: key must be a SHA256 fingerprint", i))
 		}
 	}

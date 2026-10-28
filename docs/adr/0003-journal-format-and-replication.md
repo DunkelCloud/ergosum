@@ -128,8 +128,10 @@ deployment is worthless in another that trusts the same administrator keys.
 
 - Signature format: SSHSIG as produced by `ssh-keygen -Y sign`, namespace
   **`ergosum-binding`**, hash `sha512` or `sha256`. RSA signatures with
-  SHA-1 are rejected. Signatures from security keys (`sk-ssh-ed25519`,
-  `sk-ecdsa-sha2-nistp256`) must assert user presence.
+  SHA-1 and DSA keys are rejected; RSA admin keys need at least 2048 bits,
+  and certificates are not accepted as admin keys. Signatures from security
+  keys (`sk-ssh-ed25519`, `sk-ecdsa-sha2-nistp256`) must assert user
+  presence.
 - Signatures are made separately (any order, any machine) over the canonical
   text and merged into one event before it is written. Instances never hold
   half-approved events.
@@ -151,7 +153,8 @@ deployment is worthless in another that trusts the same administrator keys.
   canonical text and comes from a key allowed for its kind, no key signs
   twice, and the number of distinct signers reaches the threshold. A
   signature over another epoch (or any other content) does not verify and
-  rejects the event.
+  rejects the event. An event with more signatures than the kind has allowed
+  keys is refused before any of them is verified.
 
 ### Epochs and the ordering rule
 
@@ -197,6 +200,7 @@ key that the identity's binding names. Refusals of requests that do not
 verify that way (`unknown_identity`, `foreign_key`) can be caused by anyone
 with any number of names; they count in the metric and reach the audit log
 within an overall limit (60 lines per minute), but never the journal.
+Rejected binding writes share that limit.
 `wrong_location` and `replay` can be repeated at will by a holder of the key
 and are journaled once per identity and minute; `issued` and
 `key_duplicate` always.
@@ -308,7 +312,7 @@ One SQLite database per instance (pure Go driver, no cgo), WAL mode,
 events   (origin TEXT, seq INTEGER, kind TEXT, identity TEXT, epoch INTEGER,
           hash TEXT, body BLOB, recorded_at TEXT, PRIMARY KEY (origin, seq))
 bindings (identity TEXT PRIMARY KEY, kind, epoch, key, checks, hash, origin, seq)
-meta     (key TEXT PRIMARY KEY, value TEXT)   -- schema_version, trust_domain, next_seq
+meta     (key TEXT PRIMARY KEY, value TEXT)   -- schema_version, trust_domain, instance, next_seq
 coverage   (origin TEXT PRIMARY KEY, seq INTEGER)  -- ingested without gaps
 compaction (origin TEXT PRIMARY KEY, seq INTEGER)  -- may be deleted up to here
 ```
@@ -325,7 +329,9 @@ compaction (origin TEXT PRIMARY KEY, seq INTEGER)  -- may be deleted up to here
 - `bindings` is the projection, updated in the same transaction as the
   event; it can be recomputed at any time from the latest own checkpoint and
   `events`.
-- The journal is pinned to its trust domain on creation.
+- The journal is pinned to its trust domain and to its instance name on
+  creation; a renamed instance would otherwise start a second origin in the
+  same file.
 - Schema version 1 has no checkpoints and forbids every `DELETE`. Version 2
   adds `next_seq`, `coverage`, `compaction` and the conditional trigger; an
   instance migrates on start without touching existing events. A checkpoint

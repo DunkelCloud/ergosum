@@ -80,7 +80,7 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	// Reading the body to its end lets the server notice when the requester
 	// goes away, which cancels r.Context() (see the end of the callbacks).
-	data, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	data, err := readBody(w, r, 64<<10)
 	var env protocol.Envelope
 	if err != nil || json.Unmarshal(data, &env) != nil {
 		a.writeError(w, http.StatusBadRequest, protocol.ErrBadRequest, "malformed envelope")
@@ -183,7 +183,7 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 	token, claims, err := a.issue(key, b, outcomes)
 	if err != nil {
 		a.log.Error("signing token failed", "err", err)
-		a.writeError(w, http.StatusInternalServerError, protocol.ErrUnavailable, "")
+		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "")
 		return
 	}
 	obs.TokenID = claims.ID
@@ -395,7 +395,8 @@ func (a *Authority) deny(ctx context.Context, w http.ResponseWriter, result stri
 // journal. Foreign keys and unknown identities can be sent by anyone: they
 // count in the metric and reach the audit log within an overall limit, but
 // never the journal. Refusals that a key holder can repeat at will (wrong
-// location, replay) are journaled once per identity and minute.
+// location, replay) are journaled once per identity and minute. Proven key
+// duplicates and replays are logged as alerts.
 func (a *Authority) record(ctx context.Context, result string, obs Observation) {
 	a.requests.Inc(result)
 	obs.Kind = journal.KindObservation + "." + result
@@ -431,7 +432,12 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 	case ResultKeyDuplicate:
 		level = slog.LevelError
 		attrs = append(attrs, "alert", "key duplicate proven: the bound key answered that it has no open request")
-	case ResultWrongLocation, ResultReplay:
+	case ResultReplay:
+		// A replayed ID comes from a second holder of the key, typically a
+		// copy of a disk image: as serious as a proven duplicate.
+		level = slog.LevelError
+		attrs = append(attrs, "alert", "request ID replayed: a second holder of the bound key reused an ID the machine had sent")
+	case ResultWrongLocation:
 		level = slog.LevelWarn
 	}
 	a.audit.Log(ctx, level, "token request "+result, attrs...)

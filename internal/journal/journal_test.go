@@ -2,10 +2,15 @@ package journal_test
 
 import (
 	"context"
+	"crypto/dsa" //nolint:staticcheck // DSA is used only to assert that it is rejected
+	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/DunkelCloud/ergosum/internal/journal"
 	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
@@ -82,6 +87,10 @@ func TestValidation(t *testing.T) {
 		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "dns", Target: "host1.example.com"}),
 		jt.Set(td, "host1.example.com\nkind binding.revoked", 1, fp, tailnet), // line injection
 		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "tailnet", Target: "a.example.com\ncheck ip 192.0.2.1"}),
+		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "ip", Target: "2001:DB8::10"}),        // not canonical
+		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "ip", Target: "[2001:DB8::10]:7433"}), // not canonical
+		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "tailnet", Target: "100.64.0.5"}),     // an address, not a name
+		jt.Set("192.0.2.1", "host1.example.com", 1, fp, tailnet),                                         // trust domain is an address
 	}
 	for i, e := range bad {
 		if err := e.Validate(); !errors.Is(err, journal.ErrInvalidEvent) {
@@ -142,6 +151,12 @@ func TestApprovals(t *testing.T) {
 		e := admins.Sign(t, base(2), "alice")
 		e = admins.SignAs(t, e, base(1), "bob")
 		if _, err := s.AppendBinding(ctx, e); !errors.Is(err, journal.ErrInvalidSignature) {
+			t.Fatalf("got %v", err)
+		}
+	})
+	t.Run("more signatures than keys", func(t *testing.T) {
+		e := admins.Sign(t, base(1), "alice", "bob", "carol", "alice")
+		if _, err := s.AppendBinding(ctx, e); !errors.Is(err, journal.ErrTooManySignatures) {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -272,10 +287,19 @@ func TestAppendOnly(t *testing.T) {
 		t.Fatal("UPDATE on the journal succeeded")
 	}
 	s.Close()
-	// Reopening with another trust domain is refused.
+	// Reopening with another trust domain or instance name is refused; the
+	// original pair opens the journal again.
 	if _, err := journal.Open(path, "instance-a", "other.example.com", reg); err == nil {
 		t.Fatal("journal opened for another trust domain")
 	}
+	if _, err := journal.Open(path, "instance-b", td, reg); err == nil {
+		t.Fatal("journal opened for another instance")
+	}
+	s, err = journal.Open(path, "instance-a", td, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
 }
 
 func TestRegistryValidation(t *testing.T) {
@@ -291,4 +315,59 @@ func TestRegistryValidation(t *testing.T) {
 	if _, err := journal.NewRegistry(cfg); err == nil {
 		t.Fatal("unknown admin accepted")
 	}
+	// Weak keys and certificates are no trust root.
+	for name, line := range map[string]string{
+		"dsa":         dsaKeyLine(t),
+		"rsa-1024":    rsaKeyLine(t, 1024),
+		"certificate": certLine(t, admins.Signers["alice"]),
+	} {
+		cfg := admins.Registry(1)
+		cfg.Admins["weak"] = line
+		if _, err := journal.NewRegistry(cfg); err == nil {
+			t.Errorf("%s admin key accepted", name)
+		}
+	}
+	cfg = admins.Registry(1)
+	cfg.Admins["rsa"] = rsaKeyLine(t, 2048)
+	if _, err := journal.NewRegistry(cfg); err != nil {
+		t.Fatalf("2048-bit RSA admin key rejected: %v", err)
+	}
+}
+
+func dsaKeyLine(t *testing.T) string {
+	t.Helper()
+	var priv dsa.PrivateKey                                                                      //nolint:staticcheck // see the import
+	if err := dsa.GenerateParameters(&priv.Parameters, rand.Reader, dsa.L1024N160); err != nil { //nolint:staticcheck // see the import
+		t.Fatal(err)
+	}
+	if err := dsa.GenerateKey(&priv, rand.Reader); err != nil { //nolint:staticcheck // see the import
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(ssh.MarshalAuthorizedKey(pub))
+}
+
+func rsaKeyLine(t *testing.T, bits int) string {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, bits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := ssh.NewPublicKey(&k.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(ssh.MarshalAuthorizedKey(pub))
+}
+
+func certLine(t *testing.T, signer ssh.Signer) string {
+	t.Helper()
+	cert := &ssh.Certificate{Key: signer.PublicKey(), CertType: ssh.UserCert, ValidPrincipals: []string{"alice"}, ValidBefore: ssh.CertTimeInfinity}
+	if err := cert.SignCert(rand.Reader, signer); err != nil {
+		t.Fatal(err)
+	}
+	return string(ssh.MarshalAuthorizedKey(cert))
 }

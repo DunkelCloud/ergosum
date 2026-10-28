@@ -22,7 +22,9 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +56,7 @@ type Daemon struct {
 	preferred   int
 	tokenGID    int
 	overlay     []netip.Prefix
+	addrWarn    sync.Once // the address limit is reported once
 
 	metrics    *metrics.Registry
 	mExpiry    *metrics.Vec
@@ -326,16 +329,17 @@ func (d *Daemon) observeSkew(server, sent, received time.Time) {
 	d.mClockSkew.Set("", server.Sub(mid).Seconds())
 }
 
-// addresses returns the configured or detected underlay addresses.
+// addresses returns the configured or detected underlay addresses: global
+// unicast addresses outside the overlay, at most protocol.MaxAddresses.
 func (d *Daemon) addresses() []string {
 	if len(d.cfg.Addresses) > 0 {
 		return d.cfg.Addresses
 	}
-	var out []string
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
+	var cands []ifaceAddr
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
 			continue
@@ -357,13 +361,64 @@ func (d *Daemon) addresses() []string {
 			if !ip.IsGlobalUnicast() || protocol.InPrefixes(ip, d.overlay) {
 				continue
 			}
-			out = append(out, ip.String())
-			if len(out) == 16 {
-				return out
-			}
+			cands = append(cands, ifaceAddr{addr: ip.String(), iface: ifc.Name, index: ifc.Index})
 		}
 	}
+	out, truncated := pickAddresses(cands)
+	if truncated {
+		d.addrWarn.Do(func() {
+			d.log.Warn("more underlay addresses than a request can carry; set addresses: in the configuration if the bound network is missing",
+				"detected", len(cands), "reported", len(out))
+		})
+	}
 	return out
+}
+
+// ifaceAddr is a detected address with the interface it belongs to.
+type ifaceAddr struct {
+	addr  string
+	iface string
+	index int
+}
+
+// virtualInterfacePrefixes name interfaces of containers, hypervisor bridges
+// and tunnels. Their addresses are reported after the others, so that a host
+// full of bridges still names the address of its real network first.
+var virtualInterfacePrefixes = []string{"docker", "br-", "veth", "virbr", "podman", "cni", "flannel", "lxc", "lxd", "tailscale", "wg", "tun", "tap", "zt"}
+
+func virtualInterface(name string) bool {
+	for _, p := range virtualInterfacePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// pickAddresses orders the candidates (physical-looking interfaces first,
+// then by interface index), drops duplicates and cuts the list at the
+// protocol's limit. truncated reports whether addresses were left out.
+func pickAddresses(cands []ifaceAddr) (out []string, truncated bool) {
+	sort.SliceStable(cands, func(i, j int) bool {
+		vi, vj := virtualInterface(cands[i].iface), virtualInterface(cands[j].iface)
+		if vi != vj {
+			return !vi
+		}
+		return cands[i].index < cands[j].index
+	})
+	out = make([]string, 0, min(len(cands), protocol.MaxAddresses))
+	seen := map[string]bool{}
+	for _, c := range cands {
+		if seen[c.addr] {
+			continue
+		}
+		seen[c.addr] = true
+		if len(out) == protocol.MaxAddresses {
+			return out, true
+		}
+		out = append(out, c.addr)
+	}
+	return out, false
 }
 
 // acquireListener opens the callback listener for the first user; it stays
@@ -453,8 +508,17 @@ func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 // The group is set before the rename, so a reader never sees the new token
 // with the wrong group, and a failed chown leaves the old file in place.
 func (d *Daemon) writeToken(token string) error {
-	if err := os.MkdirAll(filepath.Dir(d.cfg.TokenFile), 0o755); err != nil { //nolint:gosec // the token file itself is 0640
-		return err
+	dir := filepath.Dir(d.cfg.TokenFile)
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		// Normally the service manager provides the directory (systemd
+		// RuntimeDirectory, OpenRC checkpath). When the daemon has to create
+		// it, the umask must not close it to the token group's members.
+		if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // the token file itself is 0640
+			return err
+		}
+		if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // traversal only; the token file is 0640
+			return err
+		}
 	}
 	return keys.WriteFileAtomicGroup(d.cfg.TokenFile, []byte(token), 0o640, d.tokenGID)
 }

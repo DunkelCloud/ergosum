@@ -61,7 +61,8 @@ type Store struct {
 }
 
 // Open opens (and creates) the journal at path. origin names this instance
-// in the journal; trustDomain must match every binding event.
+// in the journal; trustDomain must match every binding event. Both are
+// pinned on creation and must match on every later open.
 func Open(path, origin, trustDomain string, registry *Registry) (*Store, error) {
 	if origin == "" {
 		return nil, errors.New("journal: empty origin")
@@ -84,7 +85,7 @@ func Open(path, origin, trustDomain string, registry *Registry) (*Store, error) 
 	err = db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&v)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		if _, err := db.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('schema_version', ?), ('trust_domain', ?)`, schemaVersion, trustDomain); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('schema_version', ?), ('trust_domain', ?), ('instance', ?)`, schemaVersion, trustDomain, origin); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
@@ -100,8 +101,31 @@ func Open(path, origin, trustDomain string, registry *Registry) (*Store, error) 
 			_ = db.Close()
 			return nil, fmt.Errorf("journal: belongs to trust domain %q, configured %q", td, trustDomain)
 		}
+		if err := pinInstance(ctx, db, origin); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	return &Store{db: db, origin: origin, trustDomain: trustDomain, registry: registry, now: time.Now}, nil
+}
+
+// pinInstance records the instance name on first use and refuses another
+// one afterwards: (origin, seq) identifies events across instances, and a
+// renamed instance would start a second sequence in the same journal.
+func pinInstance(ctx context.Context, db *sql.DB, origin string) error {
+	var inst string
+	err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'instance'`).Scan(&inst)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// A journal written before the instance name was pinned.
+		_, err = db.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('instance', ?)`, origin)
+		return err
+	case err != nil:
+		return err
+	case inst != origin:
+		return fmt.Errorf("journal: belongs to instance %q, configured %q", inst, origin)
+	}
+	return nil
 }
 
 // Close closes the database.

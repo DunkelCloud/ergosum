@@ -2,6 +2,7 @@ package journal
 
 import (
 	"bytes"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"sort"
@@ -38,6 +39,10 @@ var (
 	ErrUnknownSigner    = errors.New("signer is not in the key set for this kind")
 	ErrDuplicateSigner  = errors.New("key signed more than once")
 	ErrBelowThreshold   = errors.New("not enough approvals")
+	// ErrTooManySignatures: more signatures than the kind has allowed keys.
+	// Such an event cannot be valid and is refused before any signature is
+	// verified.
+	ErrTooManySignatures = errors.New("more signatures than allowed keys")
 )
 
 // NewRegistry validates and loads a registry configuration.
@@ -47,6 +52,9 @@ func NewRegistry(cfg RegistryConfig) (*Registry, error) {
 	for name, line := range cfg.Admins {
 		pub, err := sshsig.ParseAuthorizedKey(line)
 		if err != nil {
+			return nil, fmt.Errorf("registry: admin %q: %w", name, err)
+		}
+		if err := checkAdminKey(pub); err != nil {
 			return nil, fmt.Errorf("registry: admin %q: %w", name, err)
 		}
 		fp := sshsig.Fingerprint(pub)
@@ -84,10 +92,32 @@ func NewRegistry(cfg RegistryConfig) (*Registry, error) {
 	return r, nil
 }
 
+// minRSABits is the smallest RSA modulus accepted for an admin key.
+const minRSABits = 2048
+
+// checkAdminKey refuses keys that are too weak to serve as a trust root, and
+// certificates, whose signatures would never match the plain key anyway.
+func checkAdminKey(pub ssh.PublicKey) error {
+	if _, ok := pub.(*ssh.Certificate); ok {
+		return errors.New("certificates are not accepted; use the plain public key")
+	}
+	if pub.Type() == sshsig.KeyAlgoDSA {
+		return errors.New("ssh-dss keys are not accepted")
+	}
+	if ck, ok := pub.(ssh.CryptoPublicKey); ok {
+		if k, ok := ck.CryptoPublicKey().(*rsa.PublicKey); ok && k.N.BitLen() < minRSABits {
+			return fmt.Errorf("RSA key has %d bits, at least %d are required", k.N.BitLen(), minRSABits)
+		}
+	}
+	return nil
+}
+
 // Verify checks that the event carries at least the threshold of valid
 // signatures from distinct keys of its kind's key set. Every signature must
 // verify over the event's canonical text and come from an allowed key; a
-// key may sign only once. It returns the names of the signers.
+// key may sign only once. An event with more signatures than the kind has
+// keys is refused before any of them is verified. It returns the names of
+// the signers.
 func (r *Registry) Verify(e *BindingEvent) ([]string, error) {
 	canonical, err := e.Canonical()
 	if err != nil {
@@ -96,6 +126,9 @@ func (r *Registry) Verify(e *BindingEvent) ([]string, error) {
 	ap, ok := r.approvals[e.Kind]
 	if !ok {
 		return nil, fmt.Errorf("%w: kind %s", ErrUnknownSigner, e.Kind)
+	}
+	if len(e.Signatures) > len(ap.Keys) {
+		return nil, fmt.Errorf("%w: %d signatures for %d keys of %s", ErrTooManySignatures, len(e.Signatures), len(ap.Keys), e.Kind)
 	}
 	seen := map[string]bool{}
 	var signers []string

@@ -11,11 +11,11 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
 
@@ -50,8 +50,6 @@ type BindingEvent struct {
 	Signatures  []string `json:"signatures"`
 }
 
-var fingerprintRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
-
 // ErrInvalidEvent wraps all validation errors of the event content.
 var ErrInvalidEvent = errors.New("invalid binding event")
 
@@ -75,7 +73,7 @@ func (e *BindingEvent) Validate() error {
 	}
 	switch e.Kind {
 	case KindBindingSet:
-		if !fingerprintRe.MatchString(e.Key) {
+		if !keys.ValidFingerprint(e.Key) {
 			return invalid("bad key fingerprint %q", e.Key)
 		}
 		if len(e.Checks) == 0 {
@@ -132,10 +130,11 @@ func validateCheck(c Check) error {
 }
 
 // SplitTarget splits "host" or "host:port" (IPv6 as "[addr]:port" or bare
-// "addr") into host and port; port is 0 when absent.
+// "addr") into host and port; port is 0 when absent. The host is returned as
+// written, so that validation can insist on the canonical form.
 func SplitTarget(t string) (host string, port int, err error) {
-	if a, perr := netip.ParseAddr(t); perr == nil {
-		return a.String(), 0, nil
+	if _, perr := netip.ParseAddr(t); perr == nil {
+		return t, 0, nil
 	}
 	if !strings.Contains(t, ":") {
 		return t, 0, nil

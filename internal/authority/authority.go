@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -283,6 +284,7 @@ func (a *Authority) Run(ctx context.Context) error {
 			return nil
 		case err := <-errc:
 			stop()
+			shutdown(servers)
 			return err
 		}
 	}
@@ -375,6 +377,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (a *Authority) writeError(w http.ResponseWriter, status int, code, detail string) {
 	writeJSON(w, status, protocol.ErrorResponse{V: protocol.Version, Error: code, Detail: detail, ServerTime: a.now().UTC()})
+}
+
+// bodyReadTimeout bounds how long a client may take to deliver a request
+// body, so that a trickled body cannot hold a connection for the whole
+// WriteTimeout. The deadline is cleared afterwards: the server's background
+// read must keep noticing a requester that goes away during the callbacks.
+const bodyReadTimeout = 15 * time.Second
+
+// readBody reads at most limit bytes of the request body under bodyReadTimeout.
+func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
+	data, err := io.ReadAll(io.LimitReader(r.Body, limit))
+	_ = rc.SetReadDeadline(time.Time{})
+	return data, err
 }
 
 // limiter allows one event per key and interval. Its keys come from

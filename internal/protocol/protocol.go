@@ -231,7 +231,9 @@ var (
 func ValidRequestID(s string) bool { return requestIDRe.MatchString(s) }
 
 // ValidDNSName reports whether s is a lower-case DNS name with at least two
-// labels, as used for identities and tailnet callback targets.
+// labels, as used for identities and tailnet callback targets. The last
+// label is never all-numeric (RFC 3696), which also keeps address literals
+// out: a name is resolved, an address is not.
 func ValidDNSName(s string) bool {
 	if s == "" || len(s) > 253 {
 		return false
@@ -245,7 +247,7 @@ func ValidDNSName(s string) bool {
 			return false
 		}
 	}
-	return true
+	return strings.ContainsFunc(parts[len(parts)-1], func(r rune) bool { return r < '0' || r > '9' })
 }
 
 // Check kinds.
@@ -267,9 +269,12 @@ func Target(check, prefix, host string, port int) string {
 	return check + ":" + hp
 }
 
+// MaxAddresses is the most underlay addresses a request may carry.
+const MaxAddresses = 16
+
 // ParseAddresses validates the underlay addresses of a request.
 func ParseAddresses(in []string) ([]netip.Addr, error) {
-	if len(in) > 16 {
+	if len(in) > MaxAddresses {
 		return nil, errors.New("too many addresses")
 	}
 	out := make([]netip.Addr, 0, len(in))

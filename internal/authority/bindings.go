@@ -1,9 +1,9 @@
 package authority
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/DunkelCloud/ergosum/internal/journal"
@@ -14,18 +14,27 @@ import (
 // and the threshold are the only authorization: the endpoint needs no
 // credential of its own.
 func (a *Authority) handleBindingWrite(w http.ResponseWriter, r *http.Request) {
+	data, err := readBody(w, r, 256<<10)
 	var e journal.BindingEvent
-	dec := json.NewDecoder(io.LimitReader(r.Body, 256<<10))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&e); err != nil {
+	if err == nil {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		err = dec.Decode(&e)
+	}
+	if err != nil {
 		a.writeError(w, http.StatusBadRequest, protocol.ErrBadRequest, "malformed binding event")
 		return
 	}
 	rec, err := a.store.AppendBinding(r.Context(), &e)
 	if err != nil {
 		a.bindings.Inc("rejected")
-		a.audit.Warn("binding event rejected", "event", "binding_write", "kind", e.Kind,
-			"identity", e.Identity, "epoch", e.Epoch, "remote", r.RemoteAddr, "reason", err.Error())
+		// Anyone who reaches the listener can cause a rejection, so its audit
+		// line shares the overall limit of unverified requests; the metric
+		// and the response carry the reason regardless.
+		if a.unverified.allow(a.now()) {
+			a.audit.Warn("binding event rejected", "event", "binding_write", "kind", e.Kind,
+				"identity", e.Identity, "epoch", e.Epoch, "remote", r.RemoteAddr, "reason", err.Error())
+		}
 		status, code := http.StatusUnprocessableEntity, protocol.ErrRejected
 		if errors.Is(err, journal.ErrLowerEpoch) || errors.Is(err, journal.ErrSuperseded) {
 			status, code = http.StatusConflict, protocol.ErrConflict

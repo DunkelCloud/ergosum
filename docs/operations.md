@@ -31,13 +31,20 @@ enrolled again with a new key, and a backup must not carry the identity key.
 
 1. Install `ergosumd`, write `/etc/ergosum/ergosumd.yaml`
    (`examples/ergosumd.yaml`).
-2. `ergosumd fingerprint` creates the key on first use and prints the
-   fingerprint for the binding.
+2. `sudo -u ergosum ergosumd fingerprint` creates the key on first use and
+   prints the fingerprint for the binding. Run it as the service user: a key
+   created by root belongs to root, and the service cannot read it.
 3. Allow TCP 7433 (or the configured callback port) from the authorities'
    source addresses only. The listener is open only while a request is in
    flight.
 4. Start the service. The daemon requests a token, writes it to
    `/run/ergosum/token`, and renews it from half its lifetime on.
+
+`addresses` may stay empty: the daemon reports its global unicast addresses
+outside the overlay, those of physical-looking interfaces first, at most 16.
+A host with many bridge or tunnel addresses logs a warning when it has to
+leave some out; name the addresses inside the bound networks in `addresses`
+then.
 
 Metrics (node_exporter textfile collector, `metrics_file`):
 
@@ -61,7 +68,13 @@ ergosum keygen -out /etc/ergosum/signing.key -encrypt   # passphrase-encrypted
 ```
 
 `keygen` prints the key ID, the fingerprint for the daemons' `authorities`
-list, and the PEM public key for the token verifier.
+list, and the PEM public key for the token verifier. It writes the file with
+mode 0600 for the user who runs it; hand it to the service user before the
+first start:
+
+```sh
+chgrp ergosum /etc/ergosum/signing.key && chmod 0640 /etc/ergosum/signing.key
+```
 
 With an encrypted key the instance starts **sealed** after every start: it
 serves only metrics, health and its public key, and issues nothing until an
@@ -132,15 +145,16 @@ on a host of its own or on a shared host.
 `key_duplicate` is proof that a machine key exists twice and deserves a
 critical alert. `replay` means that someone with the machine key reused a
 request ID the machine had sent, typically a copy from a disk image; treat
-it like `key_duplicate`. `wrong_location` is a warning.
+it like `key_duplicate`. Both are logged at level `error` with an `alert`
+field. `wrong_location` is a warning.
 
 Audit entries are JSON log lines with `"log_type":"audit"` on stdout — one
 per token request (result, identity, request ID, presented key, per-check
 outcome, token ID) and per binding write — ready for any log pipeline.
 Requests that do not verify against a bound key (`foreign_key`,
-`unknown_identity`, and timestamps outside the window) can come from anyone:
-they are never journaled, and their log lines are limited to 60 per minute
-in total. The metric counts all of them.
+`unknown_identity`, and timestamps outside the window) and rejected binding
+writes can come from anyone: they are never journaled, and their log lines
+are limited to 60 per minute in total. The metrics count all of them.
 
 ## Writing a binding
 
@@ -162,7 +176,8 @@ ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n ergosum-binding event.txt   # each ad
 ```
 
 The JSON form with all signatures goes to `POST /v1/bindings` on any
-instance.
+instance. Admin keys are ed25519, ECDSA, RSA with at least 2048 bits, or
+security keys; `ssh-dss` keys and certificates are refused.
 
 ## Token verification in Vault
 

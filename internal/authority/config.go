@@ -153,6 +153,15 @@ func (c *Config) Validate() error {
 	if c.TokenTTL < 10*time.Second || c.TokenTTL > 24*time.Hour {
 		errs = append(errs, fmt.Errorf("token_ttl %s out of range", c.TokenTTL))
 	}
+	if c.ClockSkew < time.Second || c.ClockSkew > time.Hour {
+		errs = append(errs, fmt.Errorf("clock_skew %s out of range (1s to 1h)", c.ClockSkew))
+	}
+	if c.Callbacks.Port < 1 || c.Callbacks.Port > 65535 {
+		errs = append(errs, fmt.Errorf("callbacks.port %d out of range", c.Callbacks.Port))
+	}
+	if c.Callbacks.Timeout < 100*time.Millisecond || c.Callbacks.Timeout > time.Minute {
+		errs = append(errs, fmt.Errorf("callbacks.timeout %s out of range (100ms to 1m)", c.Callbacks.Timeout))
+	}
 	if err := c.validateListen(); err != nil {
 		errs = append(errs, err)
 	}

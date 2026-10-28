@@ -24,6 +24,11 @@ const (
 	hashSHA256 = "sha256"
 )
 
+// KeyAlgoDSA is the ssh-dss key and signature type: 1024-bit DSA over
+// SHA-1, refused as a signer and as an admin key. Named here because the
+// ssh package has deprecated its own constant.
+const KeyAlgoDSA = "ssh-dss"
+
 // Errors returned by Verify.
 var (
 	ErrMalformed      = errors.New("sshsig: malformed signature")
@@ -103,6 +108,9 @@ func Verify(armored []byte, namespace string, message []byte) (ssh.PublicKey, er
 	}
 	if sig.Format == ssh.KeyAlgoRSA { // RSA with SHA-1
 		return nil, fmt.Errorf("%w: %s", ErrWeakAlgorithm, sig.Format)
+	}
+	if pub.Type() == KeyAlgoDSA || sig.Format == KeyAlgoDSA {
+		return nil, fmt.Errorf("%w: %s", ErrWeakAlgorithm, KeyAlgoDSA)
 	}
 	if err := pub.Verify(signedData(namespace, h, digest(h, message)), &sig); err != nil {
 		return nil, ErrBadSignature
