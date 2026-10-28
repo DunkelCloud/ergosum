@@ -31,6 +31,9 @@ const (
 	ContextCallbackResponse = "ergosum/v1/callback-response"
 	ContextObservation      = "ergosum/v1/observation"
 	ContextCheckpoint       = "ergosum/v1/checkpoint"
+	// ContextEvent signs the position of a journal event: the JSON array
+	// [origin, seq, kind, hash].
+	ContextEvent = "ergosum/v1/event"
 )
 
 // HTTP paths.

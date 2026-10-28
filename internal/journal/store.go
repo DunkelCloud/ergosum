@@ -13,6 +13,10 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no cgo
+
+	"github.com/DunkelCloud/ergosum/internal/keys"
+	"github.com/DunkelCloud/ergosum/internal/protocol"
+	"github.com/DunkelCloud/ergosum/internal/replication"
 )
 
 // schemaV1 is the schema of version 1, as written by the first release.
@@ -49,19 +53,23 @@ CREATE TABLE IF NOT EXISTS bindings (
 `
 
 // migrateV2 adds what replication and compaction need (ADR 0003, Storage):
-// the local insertion position of every event, the sequence counter in
-// meta, coverage, the compaction frontier with a delete trigger that
-// refuses every event above it, the peers' cursors, and the body of the
-// winning event in the projection. Existing events keep their content; in
-// version 1 only the instance's own events exist, so their positions follow
-// their row order and the coverage of the own origin is the highest
-// sequence number.
+// the local insertion position and the origin's signature of every event,
+// the sequence counter in meta, coverage, the compaction frontier with a
+// delete trigger that refuses every event above it, the peers' cursors,
+// and the body of the winning event in the projection. Existing events keep
+// their content; in version 1 only the instance's own events exist, so
+// their positions follow their row order, the coverage of the own origin is
+// the highest sequence number, and SetSigner signs them once the key is
+// available. The signature is the only column that may change, once.
 const migrateV2 = `
 ALTER TABLE events ADD COLUMN pos INTEGER;
+ALTER TABLE events ADD COLUMN sig BLOB;
 DROP TRIGGER events_no_update;
 UPDATE events SET pos = rowid;
-CREATE TRIGGER events_no_update BEFORE UPDATE ON events
+CREATE TRIGGER events_no_update BEFORE UPDATE OF origin, seq, kind, identity, epoch, hash, body, recorded_at, pos ON events
 	BEGIN SELECT RAISE(ABORT, 'journal is append-only'); END;
+CREATE TRIGGER events_sig_once BEFORE UPDATE OF sig ON events WHEN OLD.sig IS NOT NULL
+	BEGIN SELECT RAISE(ABORT, 'an event is signed once'); END;
 CREATE UNIQUE INDEX events_pos ON events (pos);
 CREATE INDEX events_kind ON events (kind, origin, seq);
 DROP INDEX events_binding_hash;
@@ -100,7 +108,14 @@ type Store struct {
 
 	keysMu sync.RWMutex
 	keys   map[string]*ecdsa.PublicKey // instance keys by origin
+	signer *ecdsa.PrivateKey           // own instance key, once unsealed
 }
+
+// timeFormat is RFC 3339 with a fixed number of fractional digits, so that
+// stored times compare correctly as text.
+const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+func formatTime(t time.Time) string { return t.UTC().Format(timeFormat) }
 
 // Open opens (and creates) the journal at path. origin names this instance
 // in the journal; trustDomain must match every binding event. Both are
@@ -195,17 +210,71 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Origin() string { return s.origin }
 
 // SetInstanceKeys sets the instance keys by origin, the own included, with
-// which observations and checkpoints are verified.
-func (s *Store) SetInstanceKeys(keys map[string]*ecdsa.PublicKey) {
+// which event positions, observations and checkpoints are verified.
+func (s *Store) SetInstanceKeys(byOrigin map[string]*ecdsa.PublicKey) {
 	s.keysMu.Lock()
 	defer s.keysMu.Unlock()
-	s.keys = keys
+	s.keys = byOrigin
 }
 
 func (s *Store) instanceKey(origin string) *ecdsa.PublicKey {
 	s.keysMu.RLock()
 	defer s.keysMu.RUnlock()
 	return s.keys[origin]
+}
+
+// ErrNoSigner is returned for own events while the instance key is sealed.
+var ErrNoSigner = errors.New("journal: own events need the unsealed instance key")
+
+// SetSigner sets the instance key with which the instance signs the
+// position of its own events (ADR 0003, Event signatures), and signs the
+// own events that have no signature yet: those of a journal migrated from
+// version 1.
+func (s *Store) SetSigner(ctx context.Context, key *ecdsa.PrivateKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keysMu.Lock()
+	s.signer = key
+	s.keysMu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT seq, kind, hash FROM events WHERE origin = ? AND sig IS NULL`, s.origin)
+	if err != nil {
+		return err
+	}
+	var unsigned []replication.Event
+	for rows.Next() {
+		e := replication.Event{Origin: s.origin}
+		if err := rows.Scan(&e.Seq, &e.Kind, &e.Hash); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		unsigned = append(unsigned, e)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, e := range unsigned {
+		sig, err := keys.Sign(key, protocol.ContextEvent, e.SigningInput())
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE events SET sig = ? WHERE origin = ? AND seq = ?`, sig, e.Origin, e.Seq); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// signOwn signs the position of an own event.
+func (s *Store) signOwn(seq int64, kind, hash string) ([]byte, error) {
+	s.keysMu.RLock()
+	key := s.signer
+	s.keysMu.RUnlock()
+	if key == nil {
+		return nil, ErrNoSigner
+	}
+	e := replication.Event{Origin: s.origin, Seq: seq, Kind: kind, Hash: hash}
+	return keys.Sign(key, protocol.ContextEvent, e.SigningInput())
 }
 
 // Binding is the projected current state of one identity.
@@ -348,26 +417,34 @@ func raiseMetaInt(ctx context.Context, q querier, key string, v int64) error {
 }
 
 // insertOwn records an event of this instance under the next sequence
-// number. Sequence numbers come from meta, never from the remaining rows,
-// so compaction cannot cause one to be used twice.
+// number, signed with the instance key. Sequence numbers come from meta,
+// never from the remaining rows, so compaction cannot cause one to be used
+// twice.
 func (s *Store) insertOwn(ctx context.Context, tx *sql.Tx, kind, identity string, epoch uint64, hash string, body []byte) (int64, error) {
 	seq, err := metaInt(ctx, tx, "next_seq")
 	if err != nil {
 		return 0, err
 	}
-	return seq, s.insert(ctx, tx, s.origin, seq, kind, identity, epoch, hash, body)
+	if seq > replication.MaxSeq {
+		return 0, fmt.Errorf("journal: sequence number %d above the limit", seq)
+	}
+	sig, err := s.signOwn(seq, kind, hash)
+	if err != nil {
+		return 0, err
+	}
+	return seq, s.insert(ctx, tx, s.origin, seq, kind, identity, epoch, hash, body, sig)
 }
 
 // insert records an event at the next position and advances the coverage
 // of its origin over every event stored contiguously after it.
-func (s *Store) insert(ctx context.Context, tx *sql.Tx, origin string, seq int64, kind, identity string, epoch uint64, hash string, body []byte) error {
+func (s *Store) insert(ctx context.Context, tx *sql.Tx, origin string, seq int64, kind, identity string, epoch uint64, hash string, body, sig []byte) error {
 	pos, err := metaInt(ctx, tx, "next_pos")
 	if err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO events (origin, seq, kind, identity, epoch, hash, body, recorded_at, pos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		origin, seq, kind, identity, epoch, hash, body, s.now().UTC().Format(time.RFC3339Nano), pos); err != nil {
+		`INSERT INTO events (origin, seq, kind, identity, epoch, hash, body, recorded_at, pos, sig) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		origin, seq, kind, identity, epoch, hash, body, formatTime(s.now()), pos, sig); err != nil {
 		return err
 	}
 	if err := setMetaInt(ctx, tx, "next_pos", pos+1); err != nil {

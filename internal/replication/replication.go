@@ -5,15 +5,17 @@
 // verify every event before they store it, and a new or rebuilt instance
 // pulls a peer's journal page by page.
 //
-// The package knows events only as (origin, seq, kind, hash, body). Storage
-// is the caller's Store; verifying an event, telling which kinds are always
-// ingested and reading the coverage of a checkpoint are callbacks. It
-// depends on the standard library only, so that it can move to a library
-// of its own.
+// The package knows events only as (origin, seq, kind, hash, body, sig).
+// Storage is the caller's Store; verifying an event, telling which kinds
+// are always ingested and reading the coverage of a checkpoint are
+// callbacks. It depends on the standard library only, so that it can move
+// to a library of its own.
 package replication
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,6 +35,10 @@ const (
 	PathEvents = "/v1/journal/events"
 )
 
+// MaxSeq is the highest sequence number and coverage that ingest accepts,
+// so that no counter derived from a peer's numbers can overflow.
+const MaxSeq = 1 << 53
+
 // Event is one journal event. (Origin, Seq) identifies it across instances:
 // Origin is the instance that first recorded it and Seq that instance's
 // sequence number. Hash identifies the content.
@@ -42,6 +48,23 @@ type Event struct {
 	Kind   string `json:"kind"`
 	Hash   string `json:"hash"`
 	Body   []byte `json:"body"`
+	// Sig is the origin's signature over SigningInput. The package carries
+	// it; Verify must check it, or any peer could put an event under
+	// another origin's (origin, seq) and make the genuine one conflict.
+	Sig []byte `json:"sig,omitempty"`
+}
+
+// SigningInput returns the bytes an origin signs for an event: the JSON
+// array [origin, seq, kind, hash]. The hash covers the body.
+func (e Event) SigningInput() []byte {
+	b, _ := json.Marshal([]any{e.Origin, e.Seq, e.Kind, e.Hash}) // cannot fail
+	return b
+}
+
+// size estimates the encoded size of an event in a page.
+func (e *Event) size() int64 {
+	enc := base64.StdEncoding
+	return int64(enc.EncodedLen(len(e.Body)) + enc.EncodedLen(len(e.Sig)) + len(e.Origin) + len(e.Kind) + len(e.Hash) + 128)
 }
 
 // Stored is an event with its position in the local insertion order of the
@@ -59,8 +82,10 @@ type Page struct {
 	Instance string `json:"instance"`
 	// Start is the sender's checkpoint that its compaction relied on. It is
 	// present when events above the requested position have been deleted;
-	// the receiver ingests it first and raises its coverage to the
-	// checkpoint's.
+	// the receiver ingests it first. Only a pull, which an operator starts
+	// against a peer of their choice, raises the receiver's coverage to the
+	// checkpoint's: a pushed claim could otherwise make the receiver skip
+	// events or raise its own sequence counter.
 	Start *Stored `json:"start,omitempty"`
 	// Events above the requested position, in the sender's insertion order.
 	Events []Stored `json:"events"`
@@ -85,8 +110,9 @@ type Ack struct {
 type Store interface {
 	// Read returns up to limit events above position after, in insertion
 	// order, and the position the result reaches. If compaction has deleted
-	// events above after, start is the checkpoint it relied on and last is
-	// at least the highest deleted position.
+	// events above after, start is the checkpoint it relied on; last is
+	// then the highest deleted position unless the result is full, in
+	// which case it is the position of the last event returned.
 	Read(ctx context.Context, after int64, limit int) (start *Stored, events []Stored, last int64, err error)
 	// Lookup returns the hash stored under (origin, seq).
 	Lookup(ctx context.Context, origin string, seq int64) (hash string, found bool, err error)
@@ -132,7 +158,9 @@ type Config struct {
 	Self  string
 	Peers []Peer
 	Store Store
-	// Verify checks an event before it is stored. An error rejects it.
+	// Verify checks an event before it is stored, its Sig included. An
+	// error that wraps ErrInvalid rejects the event; any other error is
+	// temporary: nothing is stored or acknowledged, and the sender retries.
 	Verify func(ctx context.Context, e Event) error
 	// AlwaysIngest reports kinds that are ingested even at or below the
 	// coverage of their origin, unless their hash is already stored. Other
@@ -155,7 +183,8 @@ type Config struct {
 
 	// BatchSize is the most events per page. Default 256.
 	BatchSize int
-	// MaxBody limits the size of a page. Default 32 MiB.
+	// MaxBody limits the size of a page a peer accepts. Pages are cut to
+	// fit; a single event larger than that cannot be sent. Default 32 MiB.
 	MaxBody int64
 	// RetryMin and RetryMax bound the backoff after a failed push. Defaults
 	// 1s and 1m.
@@ -165,10 +194,12 @@ type Config struct {
 	Idle time.Duration
 }
 
-// Errors of ingest. ErrConflict wraps ErrRejected.
+// Errors of ingest. ErrConflict wraps ErrRejected. Verify wraps ErrInvalid
+// for events that do not verify.
 var (
 	ErrRejected = errors.New("event rejected")
 	ErrConflict = fmt.Errorf("%w: same origin and sequence number with another hash", ErrRejected)
+	ErrInvalid  = errors.New("invalid event")
 )
 
 // Replicator pushes, ingests and pulls events.
@@ -238,7 +269,7 @@ func (r *Replicator) checkShape(e Event) error {
 	switch {
 	case e.Origin != r.cfg.Self && r.peers[e.Origin].Name == "":
 		return fmt.Errorf("unknown origin %q", e.Origin)
-	case e.Seq < 1:
+	case e.Seq < 1 || e.Seq > MaxSeq:
 		return fmt.Errorf("sequence number %d", e.Seq)
 	case e.Kind == "" || len(e.Kind) > 64:
 		return fmt.Errorf("bad kind %q", e.Kind)
@@ -261,36 +292,25 @@ func (r *Replicator) reject(peer string, e Event, err error) error {
 	return err
 }
 
-// Ingest verifies and stores a page from peer, in order. It stops at the
-// first event it rejects and returns the last position it accepted; the
-// coverage of that event's origin stops there, because nothing after it is
-// stored from this page. A rejected event is never acknowledged, so the
-// sender keeps it in its outbox and compaction keeps it on the sender.
+// Ingest verifies and stores a page that peer pushed, in order. It stops at
+// the first event it rejects and returns the last position it accepted;
+// the coverage of that event's origin stops there, because nothing after
+// it is stored from this page. A rejected event is never acknowledged, so
+// the sender keeps it in its outbox and compaction keeps it on the sender.
+// The checkpoint a page starts with is ingested like any event; its
+// coverage counts only on a pull.
 func (r *Replicator) Ingest(ctx context.Context, peer string, p Page) (accepted int64, err error) {
+	return r.ingestPage(ctx, peer, p, false)
+}
+
+func (r *Replicator) ingestPage(ctx context.Context, peer string, p Page, pulled bool) (accepted int64, err error) {
 	if p.V != Version {
 		return 0, fmt.Errorf("%w: page version %d", ErrRejected, p.V)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	st := r.cfg.Store
 	if p.Start != nil {
-		s := p.Start.Event
-		if s.Origin != peer || s.Kind != r.cfg.CheckpointKind {
-			return 0, r.reject(peer, s, errors.New("a page may start only with a checkpoint of its sender"))
-		}
-		if _, err := r.ingest(ctx, peer, s); err != nil {
-			return 0, err
-		}
-		// Ingest may acknowledge a checkpoint without verifying it (at or
-		// below the coverage); its coverage counts only once it verifies.
-		if err := r.cfg.Verify(ctx, s); err != nil {
-			return 0, r.reject(peer, s, err)
-		}
-		cov, err := r.cfg.CheckpointCoverage(s)
-		if err != nil {
-			return 0, r.reject(peer, s, err)
-		}
-		if err := st.RaiseCoverage(ctx, cov); err != nil {
+		if err := r.ingestStart(ctx, peer, p.Start.Event, pulled); err != nil {
 			return 0, err
 		}
 	}
@@ -313,6 +333,41 @@ func (r *Replicator) Ingest(ctx context.Context, peer string, p Page) (accepted 
 		accepted = e.Pos
 	}
 	return max(accepted, p.Last), nil
+}
+
+// ingestStart ingests the checkpoint a page starts with and, on a pull,
+// raises the coverage to the checkpoint's.
+func (r *Replicator) ingestStart(ctx context.Context, peer string, s Event, pulled bool) error {
+	if s.Origin != peer || s.Kind != r.cfg.CheckpointKind {
+		return r.reject(peer, s, errors.New("a page may start only with a checkpoint of its sender"))
+	}
+	if _, err := r.ingest(ctx, peer, s); err != nil || !pulled {
+		return err
+	}
+	// Ingest may acknowledge a checkpoint without verifying it (at or below
+	// the coverage); its coverage counts only once it verifies.
+	if err := r.verify(ctx, peer, s); err != nil {
+		return err
+	}
+	cov, err := r.cfg.CheckpointCoverage(s)
+	if err != nil {
+		return r.reject(peer, s, err)
+	}
+	for o, n := range cov {
+		if n < 0 || n > MaxSeq {
+			return r.reject(peer, s, fmt.Errorf("coverage %d of %q", n, o))
+		}
+	}
+	return r.cfg.Store.RaiseCoverage(ctx, cov)
+}
+
+// verify runs Verify; only an ErrInvalid rejects the event.
+func (r *Replicator) verify(ctx context.Context, peer string, e Event) error {
+	err := r.cfg.Verify(ctx, e)
+	if err != nil && errors.Is(err, ErrInvalid) {
+		return r.reject(peer, e, err)
+	}
+	return err
 }
 
 // ingest checks and stores one event; stored reports whether it was new.
@@ -344,8 +399,8 @@ func (r *Replicator) ingest(ctx context.Context, peer string, e Event) (stored b
 			return false, err
 		}
 	}
-	if err := r.cfg.Verify(ctx, e); err != nil {
-		return false, r.reject(peer, e, err)
+	if err := r.verify(ctx, peer, e); err != nil {
+		return false, err
 	}
 	if err := st.Append(ctx, e); err != nil {
 		return false, err

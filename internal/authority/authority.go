@@ -207,6 +207,11 @@ func (a *Authority) setKey(k *ecdsa.PrivateKey) error {
 	if err != nil {
 		return err
 	}
+	// The journal signs the position of every own event; it gets the key
+	// before the instance counts as unsealed and starts writing.
+	if err := a.store.SetSigner(context.Background(), k); err != nil {
+		return fmt.Errorf("journal: %w", err)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.key != nil {

@@ -71,6 +71,10 @@ type ReplicationConfig struct {
 	Listen string `yaml:"listen"`
 	// Peers are all other instances of the trust domain.
 	Peers []PeerConfig `yaml:"peers"`
+	// MaxPageMiB is the largest page this instance accepts from a peer and
+	// sends to one, in MiB. A checkpoint must fit into one page, about
+	// 1.6 KB per identity; set the same value on every instance. Default 32.
+	MaxPageMiB int `yaml:"max_page_mib"`
 }
 
 // PeerConfig is another instance.
@@ -249,6 +253,9 @@ func (c *Config) SetDefaults() {
 	if c.ControlSocket == "" {
 		c.ControlSocket = "/var/lib/ergosum/control.sock"
 	}
+	if c.Replication.MaxPageMiB == 0 {
+		c.Replication.MaxPageMiB = 32
+	}
 	if c.Compaction.CheckpointInterval == 0 {
 		c.Compaction.CheckpointInterval = 24 * time.Hour
 	}
@@ -312,6 +319,9 @@ func (c *Config) Validate() error {
 		case pushes:
 			errs = append(errs, errors.New("replication.listen is required when a peer has a url"))
 		}
+	}
+	if c.Replication.MaxPageMiB < 1 || c.Replication.MaxPageMiB > 1024 {
+		errs = append(errs, fmt.Errorf("replication.max_page_mib %d out of range (1 to 1024)", c.Replication.MaxPageMiB))
 	}
 	if c.Compaction.CheckpointInterval < time.Minute || c.Compaction.Interval < time.Second {
 		errs = append(errs, errors.New("compaction: checkpoint_interval must be at least 1m and interval at least 1s"))

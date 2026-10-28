@@ -77,7 +77,7 @@ func (s *memStore) Read(_ context.Context, after int64, limit int) (*replication
 	last := after
 	if after < s.compacted {
 		cp := *s.frontCP
-		start, last = &cp, s.compacted
+		start = &cp
 	}
 	var out []replication.Stored
 	for _, e := range s.events {
@@ -85,6 +85,9 @@ func (s *memStore) Read(_ context.Context, after int64, limit int) (*replication
 			out = append(out, e)
 			last = max(last, e.Pos)
 		}
+	}
+	if len(out) < limit {
+		last = max(last, s.compacted)
 	}
 	return start, out, last, nil
 }
@@ -222,14 +225,15 @@ type node struct {
 	store *memStore
 	rep   *replication.Replicator
 	srv   *httptest.Server
-	// verify rejects bodies starting with "bad".
+	// verify rejects bodies starting with "bad" and fails without a
+	// verdict on bodies starting with "flaky".
 	rejected []string
 	mu       sync.Mutex
 }
 
 // cluster builds nodes whose peers are given by links (name -> peers with
-// URL); every node knows every other node.
-func cluster(t *testing.T, names []string, links map[string][]string) map[string]*node {
+// URL); every node knows every other node. opts adjust each configuration.
+func cluster(t *testing.T, names []string, links map[string][]string, opts ...func(*replication.Config)) map[string]*node {
 	t.Helper()
 	nodes := map[string]*node{}
 	for _, n := range names {
@@ -252,16 +256,19 @@ func cluster(t *testing.T, names []string, links map[string][]string) map[string
 			}
 			peers = append(peers, p)
 		}
-		rep, err := replication.New(replication.Config{
+		cfg := replication.Config{
 			Self:  n,
 			Peers: peers,
 			Store: nd.store,
 			Verify: func(_ context.Context, e replication.Event) error {
-				if strings.HasPrefix(string(e.Body), "bad") {
+				switch {
+				case strings.HasPrefix(string(e.Body), "bad"):
 					nd.mu.Lock()
 					nd.rejected = append(nd.rejected, string(e.Body))
 					nd.mu.Unlock()
-					return errors.New("bad body")
+					return fmt.Errorf("%w: bad body", replication.ErrInvalid)
+				case strings.HasPrefix(string(e.Body), "flaky"):
+					return errors.New("database unavailable")
 				}
 				return nil
 			},
@@ -282,7 +289,11 @@ func cluster(t *testing.T, names []string, links map[string][]string) map[string
 			RetryMin: 10 * time.Millisecond,
 			RetryMax: 50 * time.Millisecond,
 			Idle:     20 * time.Millisecond,
-		})
+		}
+		for _, o := range opts {
+			o(&cfg)
+		}
+		rep, err := replication.New(cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

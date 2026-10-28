@@ -94,6 +94,7 @@ func (a *Authority) setupReplication(ps []peer) error {
 		Authenticate:       r.authenticate,
 		OnReject:           a.onReject,
 		Logger:             a.log.With("component", "replication"),
+		MaxBody:            int64(a.cfg.Replication.MaxPageMiB) << 20,
 		RetryMin:           a.opts.RetryMin,
 		RetryMax:           a.opts.RetryMax,
 		Idle:               a.opts.ReplicationIdle,
@@ -215,11 +216,10 @@ func (a *Authority) Sync(ctx context.Context, peer string) (replication.PullResu
 
 // Checkpoint writes a checkpoint now (ergosum journal checkpoint).
 func (a *Authority) Checkpoint(ctx context.Context) (journal.Receipt, error) {
-	key, _ := a.signingKey()
-	if key == nil {
+	if a.Sealed() {
 		return journal.Receipt{}, ErrSealed
 	}
-	rec, err := a.store.WriteCheckpoint(ctx, key)
+	rec, err := a.store.WriteCheckpoint(ctx)
 	if err != nil {
 		return rec, err
 	}

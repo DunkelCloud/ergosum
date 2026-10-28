@@ -16,6 +16,13 @@ func TamperForTest(s *Store) error {
 	return err
 }
 
+// ResignForTest tries to replace the signatures of all events; the
+// triggers allow a signature to be set only once.
+func ResignForTest(s *Store) error {
+	_, err := s.db.Exec(`UPDATE events SET sig = x'00'`)
+	return err
+}
+
 // DeleteForTest deletes one event directly, past every check but the
 // delete trigger.
 func DeleteForTest(s *Store, origin string, seq int64) error {

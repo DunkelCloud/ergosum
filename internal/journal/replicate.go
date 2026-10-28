@@ -47,19 +47,28 @@ func strictDecode(data []byte, v any) error {
 	return nil
 }
 
-// ErrUnverified wraps every reason why ingest refuses an event.
-var ErrUnverified = errors.New("event does not verify")
+// ErrUnverified wraps every reason why ingest refuses an event. It wraps
+// replication.ErrInvalid; other errors of Verify are temporary.
+var ErrUnverified = fmt.Errorf("%w: event does not verify", replication.ErrInvalid)
 
 func unverified(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", ErrUnverified, fmt.Sprintf(format, a...))
 }
 
-// Verify checks an event from another instance before it is stored:
-// binding events against the registry and the trust domain exactly as the
-// write API does, observations and checkpoints against the instance key of
-// their origin, and every binding inside a checkpoint like a binding event.
-// The hash must match the content.
+// Verify checks an event from another instance before it is stored: its
+// position (origin, seq, kind, hash) against the instance key of its
+// origin, binding events against the registry and the trust domain exactly
+// as the write API does, observations and checkpoints against the instance
+// key of their origin, and every binding inside a checkpoint like a binding
+// event. The hash must match the content.
 func (s *Store) Verify(ctx context.Context, e replication.Event) error {
+	key := s.instanceKey(e.Origin)
+	if key == nil {
+		return unverified("no instance key for origin %q", e.Origin)
+	}
+	if !keys.Verify(key, protocol.ContextEvent, e.SigningInput(), e.Sig) {
+		return unverified("the position %s/%d is not signed by %s", e.Origin, e.Seq, e.Origin)
+	}
 	switch {
 	case AlwaysIngest(e.Kind):
 		be, err := s.verifyBinding(e.Body)
@@ -187,32 +196,51 @@ func (s *Store) Read(ctx context.Context, after int64, limit int) (start *replic
 		if start, err = s.eventAt(ctx, fp); err != nil {
 			return nil, nil, 0, fmt.Errorf("journal: checkpoint of the compaction frontier: %w", err)
 		}
-		last = compacted
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT pos, origin, seq, kind, hash, body FROM events WHERE pos > ? ORDER BY pos LIMIT ?`, after, limit)
+	events, err = s.storedEvents(ctx, `WHERE pos > ? ORDER BY pos LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var e replication.Stored
-		if err := rows.Scan(&e.Pos, &e.Origin, &e.Seq, &e.Kind, &e.Hash, &e.Body); err != nil {
-			return nil, nil, 0, err
-		}
-		events = append(events, e)
-		last = max(last, e.Pos)
+	if len(events) > 0 {
+		last = events[len(events)-1].Pos
 	}
-	return start, events, last, rows.Err()
+	// Only a page that holds everything above after reaches past the
+	// deleted positions; a full one ends at its last event, so that the
+	// events that survived compaction further up are not skipped.
+	if len(events) < limit {
+		last = max(last, compacted)
+	}
+	return start, events, last, nil
 }
 
-func (s *Store) eventAt(ctx context.Context, pos int64) (*replication.Stored, error) {
-	e := replication.Stored{Pos: pos}
-	err := s.db.QueryRowContext(ctx, `SELECT origin, seq, kind, hash, body FROM events WHERE pos = ?`, pos).
-		Scan(&e.Origin, &e.Seq, &e.Kind, &e.Hash, &e.Body)
+const storedColumns = `SELECT pos, origin, seq, kind, hash, body, sig FROM events `
+
+func (s *Store) storedEvents(ctx context.Context, where string, args ...any) ([]replication.Stored, error) {
+	rows, err := s.db.QueryContext(ctx, storedColumns+where, args...)
 	if err != nil {
 		return nil, err
 	}
-	return &e, nil
+	defer func() { _ = rows.Close() }()
+	var out []replication.Stored
+	for rows.Next() {
+		var e replication.Stored
+		if err := rows.Scan(&e.Pos, &e.Origin, &e.Seq, &e.Kind, &e.Hash, &e.Body, &e.Sig); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) eventAt(ctx context.Context, pos int64) (*replication.Stored, error) {
+	events, err := s.storedEvents(ctx, `WHERE pos = ?`, pos)
+	if err != nil {
+		return nil, err
+	}
+	if len(events) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return &events[0], nil
 }
 
 // Lookup implements replication.Store.
@@ -315,7 +343,7 @@ func (s *Store) Append(ctx context.Context, e replication.Event) error {
 		}
 		identity = h.Identity
 	}
-	if err := s.insert(ctx, tx, e.Origin, e.Seq, e.Kind, identity, epoch, e.Hash, e.Body); err != nil {
+	if err := s.insert(ctx, tx, e.Origin, e.Seq, e.Kind, identity, epoch, e.Hash, e.Body, e.Sig); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -323,7 +351,8 @@ func (s *Store) Append(ctx context.Context, e replication.Event) error {
 
 // RaiseCoverage implements replication.Store. Raising the coverage of the
 // own origin also raises the sequence counter, so that a rebuilt instance
-// never reuses a sequence number its peers know.
+// never reuses a sequence number its peers know. The replicator calls it
+// only on a pull, with values up to replication.MaxSeq.
 func (s *Store) RaiseCoverage(ctx context.Context, cov map[string]int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -387,20 +416,7 @@ func (s *Store) Outbox(ctx context.Context, after int64) (int64, time.Time, erro
 
 // Latest implements replication.Store.
 func (s *Store) Latest(ctx context.Context, origin, kind string) ([]replication.Stored, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT pos, origin, seq, kind, hash, body FROM events WHERE origin = ? AND kind = ? ORDER BY seq DESC`, origin, kind)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []replication.Stored
-	for rows.Next() {
-		var e replication.Stored
-		if err := rows.Scan(&e.Pos, &e.Origin, &e.Seq, &e.Kind, &e.Hash, &e.Body); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return s.storedEvents(ctx, `WHERE origin = ? AND kind = ? ORDER BY seq DESC`, origin, kind)
 }
 
 // SetFrontier implements replication.Store. The frontier only rises; a

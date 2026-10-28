@@ -87,6 +87,7 @@ func (r *Replicator) Push(ctx context.Context, peer string) (int, error) {
 	if start == nil && len(events) == 0 {
 		return 0, nil
 	}
+	events, last, _ = r.fit(start, events, last)
 	page := Page{V: Version, Instance: r.cfg.Self, Start: start, Events: events, Last: last}
 	ack, err := r.send(ctx, p, page)
 	// A peer cannot acknowledge what it was not sent: an answer beyond the
@@ -102,6 +103,10 @@ func (r *Replicator) Push(ctx context.Context, peer string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Success without the whole page would resend it at once, forever.
+	if ack.Accepted < last {
+		return 0, fmt.Errorf("peer %s accepted up to position %d of a page reaching %d", peer, ack.Accepted, last)
+	}
 	return len(events) + btoi(start != nil), nil
 }
 
@@ -110,6 +115,31 @@ func btoi(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// fit cuts events so that the page stays within the receiver's MaxBody,
+// keeping at least one event so that the outbox moves. A page too large
+// even with one event is logged; the receiver will refuse it.
+func (r *Replicator) fit(start *Stored, events []Stored, last int64) (kept []Stored, reach int64, cut bool) {
+	budget := r.cfg.MaxBody * 3 / 4 // room for the page's own fields
+	if start != nil {
+		budget -= start.size()
+	}
+	for i := range events {
+		if budget -= events[i].size(); budget >= 0 {
+			continue
+		}
+		if i > 0 {
+			return events[:i], events[i-1].Pos, true
+		}
+		r.log.Error("page larger than max_body with a single event", "origin", events[0].Origin, "seq", events[0].Seq,
+			"kind", events[0].Kind, "bytes", len(events[0].Body), "start", start != nil, "max_body", r.cfg.MaxBody)
+		if len(events) > 1 {
+			return events[:1], events[0].Pos, true
+		}
+		break
+	}
+	return events, last, false
 }
 
 func (r *Replicator) send(ctx context.Context, p Peer, page Page) (Ack, error) {
@@ -156,7 +186,9 @@ type PullResult struct {
 }
 
 // Pull reads a peer's whole journal and ingests it with the same checks as
-// a push. Pulling from several peers gives the union of their journals.
+// a push. Unlike a push, it raises the coverage to the checkpoint a page
+// starts with, since an operator chose the peer. Pulling from several peers
+// gives the union of their journals.
 func (r *Replicator) Pull(ctx context.Context, peer string) (PullResult, error) {
 	res := PullResult{Peer: peer}
 	p, ok := r.peers[peer]
@@ -172,7 +204,7 @@ func (r *Replicator) Pull(ctx context.Context, peer string) (PullResult, error) 
 		if page.Instance != peer {
 			return res, fmt.Errorf("peer %s sent a page of %q", peer, page.Instance)
 		}
-		if _, err := r.Ingest(ctx, peer, page); err != nil {
+		if _, err := r.ingestPage(ctx, peer, page, true); err != nil {
 			return res, err
 		}
 		res.Pages++
@@ -204,7 +236,11 @@ func (r *Replicator) fetch(ctx context.Context, p Peer, after int64) (Page, erro
 		return Page{}, fmt.Errorf("peer %s answered %s", p.Name, resp.Status)
 	}
 	var page Page
-	if err := json.NewDecoder(io.LimitReader(resp.Body, r.cfg.MaxBody)).Decode(&page); err != nil {
+	lr := &io.LimitedReader{R: resp.Body, N: r.cfg.MaxBody}
+	if err := json.NewDecoder(lr).Decode(&page); err != nil {
+		if lr.N <= 0 {
+			return Page{}, fmt.Errorf("peer %s: page larger than %d bytes", p.Name, r.cfg.MaxBody)
+		}
 		return Page{}, fmt.Errorf("peer %s: bad page: %w", p.Name, err)
 	}
 	return page, nil
@@ -243,7 +279,11 @@ func (r *Replicator) handleIngest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	var page Page
-	if err := json.NewDecoder(io.LimitReader(req.Body, r.cfg.MaxBody)).Decode(&page); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, r.cfg.MaxBody)).Decode(&page); err != nil {
+		if mbe := (*http.MaxBytesError)(nil); errors.As(err, &mbe) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, Ack{V: Version, Error: fmt.Sprintf("page larger than %d bytes", mbe.Limit)})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, Ack{V: Version, Error: "malformed page"})
 		return
 	}
@@ -284,8 +324,10 @@ func (r *Replicator) handleEvents(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	more := len(events) == limit
+	events, last, cut := r.fit(start, events, last)
 	if events == nil {
 		events = []Stored{}
 	}
-	writeJSON(w, http.StatusOK, Page{V: Version, Instance: r.cfg.Self, Start: start, Events: events, Last: last, More: len(events) == limit})
+	writeJSON(w, http.StatusOK, Page{V: Version, Instance: r.cfg.Self, Start: start, Events: events, Last: last, More: more || cut})
 }

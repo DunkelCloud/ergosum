@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -254,7 +255,9 @@ func page(from string, events ...replication.Event) replication.Page {
 	return p
 }
 
-func bindingEvent(t *testing.T, ev *journal.BindingEvent, origin string, seq int64) replication.Event {
+// bindingEvent wraps an admin-signed binding event as recorded by origin
+// at seq, its position signed with key.
+func bindingEvent(t *testing.T, key *ecdsa.PrivateKey, ev *journal.BindingEvent, origin string, seq int64) replication.Event {
 	t.Helper()
 	body, err := json.Marshal(ev)
 	if err != nil {
@@ -264,10 +267,11 @@ func bindingEvent(t *testing.T, ev *journal.BindingEvent, origin string, seq int
 	if err != nil {
 		t.Fatal(err)
 	}
-	return replication.Event{Origin: origin, Seq: seq, Kind: ev.Kind, Hash: h, Body: body}
+	return signedAt(t, key, replication.Event{Origin: origin, Seq: seq, Kind: ev.Kind, Hash: h, Body: body})
 }
 
-// sealed signs a payload as an instance would and wraps it as an event.
+// sealed signs a payload as an instance would and wraps it as an event
+// whose position is signed with the same key.
 func sealed(t *testing.T, key *ecdsa.PrivateKey, context, origin, kind string, seq int64, payload any) replication.Event {
 	t.Helper()
 	env, err := protocol.Seal(key, context, payload)
@@ -277,7 +281,18 @@ func sealed(t *testing.T, key *ecdsa.PrivateKey, context, origin, kind string, s
 	body, _ := json.Marshal(env)
 	raw, _ := base64.RawURLEncoding.DecodeString(env.Payload)
 	sum := sha256.Sum256(raw)
-	return replication.Event{Origin: origin, Seq: seq, Kind: kind, Hash: hex.EncodeToString(sum[:]), Body: body}
+	return signedAt(t, key, replication.Event{Origin: origin, Seq: seq, Kind: kind, Hash: hex.EncodeToString(sum[:]), Body: body})
+}
+
+// signedAt signs the position of e with key.
+func signedAt(t *testing.T, key *ecdsa.PrivateKey, e replication.Event) replication.Event {
+	t.Helper()
+	sig, err := keys.Sign(key, protocol.ContextEvent, e.SigningInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Sig = sig
+	return e
 }
 
 func observationEvent(t *testing.T, key *ecdsa.PrivateKey, instance, origin string, seq int64) replication.Event {
@@ -369,7 +384,7 @@ func TestIngestVerifiesBindingEvents(t *testing.T) {
 		{"other trust domain", adm.Sign(t, jt.Set("other.example.com", host1, 1, fp, tailnetCheck(host1Tailnet)), "alice", "bob")},
 	}
 	for _, tc := range cases {
-		status, ack := b.postPage(a, page(instA, bindingEvent(t, tc.ev, instA, 1)))
+		status, ack := b.postPage(a, page(instA, bindingEvent(t, a.key, tc.ev, instA, 1)))
 		if status != http.StatusUnprocessableEntity || ack.Accepted != 0 {
 			t.Fatalf("%s: %d %+v", tc.name, status, ack)
 		}
@@ -380,7 +395,7 @@ func TestIngestVerifiesBindingEvents(t *testing.T) {
 	if got := opsGet(t, b, "/metrics"); !strings.Contains(got, `machine_identity_journal_rejected_total{peer="authority-a"} 6`) {
 		t.Fatalf("rejections not counted:\n%s", got)
 	}
-	status, ack := b.postPage(a, page(instA, bindingEvent(t, adm.Sign(t, base(1), "alice", "bob"), instA, 1)))
+	status, ack := b.postPage(a, page(instA, bindingEvent(t, a.key, adm.Sign(t, base(1), "alice", "bob"), instA, 1)))
 	if status != http.StatusOK || ack.Accepted != 1 || b.binding(host1) == nil {
 		t.Fatalf("approved event: %d %+v", status, ack)
 	}
@@ -466,10 +481,14 @@ func TestIngestRejectsForeignObservations(t *testing.T) {
 	c := newCluster(t, []string{instA, instB, instC}, clusterOptions{})
 	a, b, cc := c.envs[instA], c.envs[instB], c.envs[instC]
 	stranger, _ := keys.Generate()
+	// The envelope cases carry a valid position signature of A, so that the
+	// envelope itself is what fails.
 	for name, ev := range map[string]replication.Event{
-		"unknown key":            observationEvent(t, stranger, instA, instA, 1),
-		"key of another peer":    observationEvent(t, cc.key, instA, instA, 1),
-		"other instance claimed": observationEvent(t, a.key, instC, instA, 1),
+		"unknown key":             signedAt(t, a.key, observationEvent(t, stranger, instA, instA, 1)),
+		"key of another peer":     signedAt(t, a.key, observationEvent(t, cc.key, instA, instA, 1)),
+		"other instance claimed":  observationEvent(t, a.key, instC, instA, 1),
+		"position signed by C":    signedAt(t, cc.key, observationEvent(t, a.key, instA, instA, 1)),
+		"position signed by none": func() replication.Event { e := observationEvent(t, a.key, instA, instA, 1); e.Sig = nil; return e }(),
 	} {
 		if status, _ := b.postPage(a, page(instA, ev)); status != http.StatusUnprocessableEntity {
 			t.Fatalf("%s: %d", name, status)
@@ -488,6 +507,71 @@ func TestIngestRejectsForeignObservations(t *testing.T) {
 	}
 }
 
+// TestPeerCannotTakePositions: a peer cannot put a valid binding event
+// under another instance's position (origin, seq), where the genuine event
+// would then conflict everywhere and cut that instance off; it cannot raise
+// another instance's sequence counter either, neither with an event under
+// that instance's origin nor with the coverage of a checkpoint it pushes.
+func TestPeerCannotTakePositions(t *testing.T) {
+	c := newCluster(t, []string{instA, instB, instC}, clusterOptions{})
+	a, b, cc := c.envs[instA], c.envs[instB], c.envs[instC]
+	ctx := context.Background()
+	a.bind(host1, fingerprintOf(t), 1, tailnetCheck(host1Tailnet))
+	eventually(t, "binding everywhere", func() bool { return converged(a, b, cc) && cc.binding(host1) != nil })
+	bodies, err := a.auth.Store().EventBodies(ctx, journal.KindBindingSet)
+	if err != nil || len(bodies) != 1 {
+		t.Fatal(bodies, err)
+	}
+	var ev journal.BindingEvent
+	if err := json.Unmarshal(bodies[0], &ev); err != nil {
+		t.Fatal(err)
+	}
+	nextA, nextC := a.state().NextSeq, cc.state().NextSeq
+	for name, e := range map[string]replication.Event{
+		"C's next position":           bindingEvent(t, b.key, &ev, instC, nextC),
+		"A's own next position":       bindingEvent(t, b.key, &ev, instA, nextA+1),
+		"A's last position":           bindingEvent(t, b.key, &ev, instA, math.MaxInt64-1),
+		"C's position, A's signature": bindingEvent(t, a.key, &ev, instC, nextC),
+	} {
+		if status, ack := a.postPage(b, page(instB, e)); status != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: %d %+v", name, status, ack)
+		}
+	}
+	// C's genuine event at that position still reaches everyone.
+	cc.bind(host2, fingerprintOf(t), 1, tailnetCheck(host2Tailnet))
+	eventually(t, "C's event everywhere", func() bool { return a.binding(host2) != nil && b.binding(host2) != nil })
+
+	// B's own, validly signed checkpoint claims coverage of A and C. Pushed,
+	// it is stored but its claims count for nothing; above the limit it does
+	// not verify at all.
+	empty := sha256.Sum256(nil)
+	claim := func(seq int64, cov map[string]int64) replication.Stored {
+		cp := journal.Checkpoint{V: 1, Type: "checkpoint", TrustDomain: trustDomain, Instance: instB,
+			Kid: keys.Thumbprint(&b.key.PublicKey), CreatedAt: time.Now().UTC(), Coverage: cov,
+			Bindings: []json.RawMessage{}, StateHash: hex.EncodeToString(empty[:])}
+		return replication.Stored{Pos: 1, Event: sealed(t, b.key, protocol.ContextCheckpoint, instB, journal.KindCheckpoint, seq, cp)}
+	}
+	before := a.state()
+	p := page(instB)
+	start := claim(1_000_000, map[string]int64{instA: 1000, instC: 1000})
+	p.Start, p.Last = &start, 1
+	if status, ack := a.postPage(b, p); status != http.StatusOK {
+		t.Fatalf("pushed checkpoint: %d %+v", status, ack)
+	}
+	if after := a.state(); after.NextSeq != before.NextSeq || after.Coverage[instC] != before.Coverage[instC] {
+		t.Fatalf("a pushed checkpoint moved the counters: %+v -> %+v", before, after)
+	}
+	start = claim(1_000_001, map[string]int64{instC: replication.MaxSeq + 1})
+	p.Start = &start
+	if status, _ := a.postPage(b, p); status != http.StatusUnprocessableEntity {
+		t.Fatalf("checkpoint with coverage above the limit: %d", status)
+	}
+	// A still writes, and its events still replicate.
+	const host3, host3Tailnet = "host3.example.com", "host3.tailnet.example.com"
+	a.bind(host3, fingerprintOf(t), 1, tailnetCheck(host3Tailnet))
+	eventually(t, "A's new event at C", func() bool { return cc.binding(host3) != nil })
+}
+
 // TestCheckpointWithUnapprovedBindingRejected: the instance signature on a
 // checkpoint grants nothing; one unapproved binding rejects all of it.
 func TestCheckpointWithUnapprovedBindingRejected(t *testing.T) {
@@ -498,12 +582,12 @@ func TestCheckpointWithUnapprovedBindingRejected(t *testing.T) {
 	if status, _ := b.postPage(a, page(instA, checkpointEvent(t, a.key, instA, 1, good, forged))); status != http.StatusUnprocessableEntity {
 		t.Fatalf("checkpoint with an unapproved binding: %d", status)
 	}
-	if status, _ := b.postPage(a, page(instA, checkpointEvent(t, b.key, instA, 1, good))); status != http.StatusUnprocessableEntity {
+	if status, _ := b.postPage(a, page(instA, signedAt(t, a.key, checkpointEvent(t, b.key, instA, 1, good)))); status != http.StatusUnprocessableEntity {
 		t.Fatalf("checkpoint of A signed with B's key: %d", status)
 	}
 	tampered := checkpointEvent(t, a.key, instA, 1, good)
 	tampered.Hash = strings.Repeat("0", 64)
-	if status, _ := b.postPage(a, page(instA, tampered)); status != http.StatusUnprocessableEntity {
+	if status, _ := b.postPage(a, page(instA, signedAt(t, a.key, tampered))); status != http.StatusUnprocessableEntity {
 		t.Fatalf("checkpoint with a wrong hash: %d", status)
 	}
 	if b.binding(host1) != nil || b.binding(host2) != nil {
@@ -667,6 +751,12 @@ func TestExportStreamsJournal(t *testing.T) {
 	var ev journal.BindingEvent
 	if err := json.Unmarshal(lines[0].Body, &ev); err != nil || len(ev.Signatures) == 0 {
 		t.Fatalf("exported body is not the signed event: %v", err)
+	}
+	for _, l := range lines {
+		pos := replication.Event{Origin: l.Origin, Seq: l.Seq, Kind: l.Kind, Hash: l.Hash}
+		if !keys.Verify(&e.key.PublicKey, protocol.ContextEvent, pos.SigningInput(), l.Sig) {
+			t.Fatalf("exported position %s/%d is not signed by its instance", l.Origin, l.Seq)
+		}
 	}
 }
 

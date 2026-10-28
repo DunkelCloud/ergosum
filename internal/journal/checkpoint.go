@@ -1,19 +1,19 @@
 package journal
 
 import (
-	"bytes"
+	"bufio"
 	"context"
-	"crypto/ecdsa"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +21,7 @@ import (
 
 	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
+	"github.com/DunkelCloud/ergosum/internal/replication"
 )
 
 // Checkpoint is the payload of a checkpoint event (ADR 0003, Checkpoints
@@ -82,7 +83,10 @@ func (s *Store) verifyCheckpoint(origin string, payload []byte) (*Checkpoint, er
 		return nil, unverified("checkpoint without time")
 	}
 	for o, n := range cp.Coverage {
-		if n < 0 || (o != s.origin && s.instanceKey(o) == nil) {
+		if n < 0 || n > replication.MaxSeq {
+			return nil, unverified("checkpoint coverage %d of %q", n, o)
+		}
+		if o != s.origin && s.instanceKey(o) == nil {
 			return nil, unverified("checkpoint coverage of unknown origin %q", o)
 		}
 	}
@@ -156,10 +160,13 @@ func projectionHash(ctx context.Context, q querier) (string, error) {
 }
 
 // WriteCheckpoint records a checkpoint of the current projection and
-// coverage, signed with the instance key.
-func (s *Store) WriteCheckpoint(ctx context.Context, key *ecdsa.PrivateKey) (Receipt, error) {
+// coverage, signed with the instance key (SetSigner).
+func (s *Store) WriteCheckpoint(ctx context.Context) (Receipt, error) {
+	s.keysMu.RLock()
+	key := s.signer
+	s.keysMu.RUnlock()
 	if key == nil {
-		return Receipt{}, errors.New("journal: a checkpoint needs the unsealed instance key")
+		return Receipt{}, ErrNoSigner
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -225,12 +232,14 @@ func (s *Store) LastCheckpoint(ctx context.Context) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, at.String)
 }
 
-// ChangedSinceCheckpoint reports whether events were stored after the
-// latest own checkpoint, or there is none and the journal is not empty.
+// ChangedSinceCheckpoint reports whether events other than checkpoints were
+// stored after the latest own checkpoint, or there is none and the journal
+// holds such events. The peers' checkpoints do not count, or every instance
+// would answer every other one's checkpoint with its own, forever.
 func (s *Store) ChangedSinceCheckpoint(ctx context.Context) (bool, error) {
 	var changed bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM events WHERE pos >
-		COALESCE((SELECT MAX(pos) FROM events WHERE origin = ? AND kind = ?), 0))`, s.origin, KindCheckpoint).Scan(&changed)
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM events WHERE kind <> ?1 AND pos >
+		COALESCE((SELECT MAX(pos) FROM events WHERE origin = ?2 AND kind = ?1), 0))`, KindCheckpoint, s.origin).Scan(&changed)
 	return changed, err
 }
 
@@ -294,12 +303,12 @@ func (s *Store) Compact(ctx context.Context, o CompactOptions) (int64, error) {
 		}
 		limit = min(limit, exported)
 	}
-	now := s.now().UTC()
+	now := s.now()
 	cutoff := func(d time.Duration) string {
 		if d <= 0 {
 			return ""
 		}
-		return now.Add(-d).Format(time.RFC3339Nano)
+		return formatTime(now.Add(-d))
 	}
 	args := []any{limit, cutoff(o.Retention.Observations), cutoff(o.Retention.KeyDuplicate), cutoff(o.Retention.Bindings)}
 	var n, maxPos int64
@@ -319,42 +328,47 @@ func (s *Store) Compact(ctx context.Context, o CompactOptions) (int64, error) {
 }
 
 // ArchiveLine is one event in an export: JSON lines that need no trust in
-// whoever stores them, because observations and checkpoints are signed by
-// their instance and binding events by administrators.
+// whoever stores them, because every position is signed by its origin,
+// observations and checkpoints by their instance and binding events by
+// administrators.
 type ArchiveLine struct {
 	Origin string          `json:"origin"`
 	Seq    int64           `json:"seq"`
 	Kind   string          `json:"kind"`
 	Hash   string          `json:"hash"`
 	Body   json.RawMessage `json:"body"`
+	Sig    []byte          `json:"sig"`
 }
+
+// exportBatch is how many events Export reads at a time. Between batches
+// the database is free for issuance and replication, however slowly the
+// writer takes the lines.
+const exportBatch = 256
 
 // Export writes every event above position after as JSON lines, in
 // insertion order, and returns the last position written.
 func (s *Store) Export(ctx context.Context, w io.Writer, after int64) (last int64, n int, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT pos, origin, seq, kind, hash, body FROM events WHERE pos > ? ORDER BY pos`, after)
-	if err != nil {
-		return after, 0, err
-	}
-	defer func() { _ = rows.Close() }()
 	last = after
-	for rows.Next() {
-		var l ArchiveLine
-		var body []byte
-		if err := rows.Scan(&last, &l.Origin, &l.Seq, &l.Kind, &l.Hash, &body); err != nil {
-			return last, n, err
-		}
-		l.Body = body
-		data, err := json.Marshal(l)
+	for {
+		events, err := s.storedEvents(ctx, `WHERE pos > ? ORDER BY pos LIMIT ?`, last, exportBatch)
 		if err != nil {
 			return last, n, err
 		}
-		if _, err := w.Write(append(data, '\n')); err != nil {
-			return last, n, err
+		for _, e := range events {
+			data, err := json.Marshal(ArchiveLine{Origin: e.Origin, Seq: e.Seq, Kind: e.Kind, Hash: e.Hash, Body: e.Body, Sig: e.Sig})
+			if err != nil {
+				return last, n, err
+			}
+			if _, err := w.Write(append(data, '\n')); err != nil {
+				return last, n, err
+			}
+			last = e.Pos
+			n++
 		}
-		n++
+		if len(events) < exportBatch {
+			return last, n, nil
+		}
 	}
-	return last, n, rows.Err()
 }
 
 // ExportArchive writes the events not yet archived to a new file in dir
@@ -365,13 +379,35 @@ func (s *Store) ExportArchive(ctx context.Context, dir string) (path string, n i
 	if err != nil {
 		return "", 0, err
 	}
-	var buf bytes.Buffer
-	last, n, err := s.Export(ctx, &buf, after)
+	// Streamed to a temporary file and renamed, so that a large first
+	// archive does not have to fit in memory and no partial file appears.
+	f, err := os.CreateTemp(dir, ".export-*.tmp")
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name()) // no-op after a successful rename
+	}()
+	if err := f.Chmod(0o640); err != nil && runtime.GOOS != "windows" {
+		return "", 0, err
+	}
+	bw := bufio.NewWriter(f)
+	last, n, err := s.Export(ctx, bw, after)
 	if err != nil || n == 0 {
 		return "", 0, err
 	}
+	if err := bw.Flush(); err != nil {
+		return "", 0, err
+	}
+	if err := f.Sync(); err != nil {
+		return "", 0, err
+	}
+	if err := f.Close(); err != nil {
+		return "", 0, err
+	}
 	path = filepath.Join(dir, fmt.Sprintf("%s-%012d-%012d.jsonl", s.origin, after+1, last))
-	if err := keys.WriteFileAtomic(path, buf.Bytes(), 0o640); err != nil {
+	if err := os.Rename(f.Name(), path); err != nil {
 		return "", 0, err
 	}
 	s.mu.Lock()

@@ -3,6 +3,7 @@ package journal_test
 import (
 	"context"
 	"crypto/dsa" //nolint:staticcheck // DSA is used only to assert that it is rejected
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"database/sql"
@@ -18,22 +19,42 @@ import (
 	"github.com/DunkelCloud/ergosum/internal/journal"
 	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
 	"github.com/DunkelCloud/ergosum/internal/keys"
+	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
 
 const td = "example.com"
 
 func newStore(t *testing.T, admins *jt.Admins, threshold int) *journal.Store {
 	t.Helper()
+	return openInstance(t, admins, threshold, "instance-a", newKey(t))
+}
+
+// openInstance opens a journal for an instance and gives it its key.
+func openInstance(t *testing.T, admins *jt.Admins, threshold int, name string, key *ecdsa.PrivateKey) *journal.Store {
+	t.Helper()
 	reg, err := journal.NewRegistry(admins.Registry(threshold))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := journal.Open(filepath.Join(t.TempDir(), "journal.db"), "instance-a", td, reg)
+	s, err := journal.Open(filepath.Join(t.TempDir(), "journal.db"), name, td, reg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
+	if err := s.SetSigner(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	s.SetInstanceKeys(map[string]*ecdsa.PublicKey{name: &key.PublicKey})
 	return s
+}
+
+func newKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	k, err := keys.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }
 
 func fingerprint(t *testing.T) string {
@@ -283,11 +304,21 @@ func TestAppendOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")); err != nil {
+	ev := admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")
+	if _, err := s.AppendBinding(ctx, ev); !errors.Is(err, journal.ErrNoSigner) {
+		t.Fatalf("own event without the instance key: %v", err)
+	}
+	if err := s.SetSigner(ctx, newKey(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendBinding(ctx, ev); err != nil {
 		t.Fatal(err)
 	}
 	if err := journal.TamperForTest(s); err == nil {
 		t.Fatal("UPDATE on the journal succeeded")
+	}
+	if err := journal.ResignForTest(s); err == nil {
+		t.Fatal("an event was signed a second time")
 	}
 	s.Close()
 	// Reopening with another trust domain or instance name is refused; the
@@ -432,9 +463,19 @@ func TestMigrationFromV1(t *testing.T) {
 	if err != nil || len(events) != 3 || last != 3 || events[0].Seq != 1 || events[2].Pos != 3 {
 		t.Fatalf("positions after migration: %+v, %d, %v", events, last, err)
 	}
+	// The events of version 1 are signed once the key is there.
+	key := newKey(t)
+	if err := s.SetSigner(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	_, events, _, _ = s.Read(ctx, 0, 10)
+	for _, e := range events {
+		if !keys.Verify(&key.PublicKey, protocol.ContextEvent, e.SigningInput(), e.Sig) {
+			t.Fatalf("migrated event %d not signed", e.Seq)
+		}
+	}
 	// The projection carries the winning event, ready for a checkpoint.
-	key, _ := keys.Generate()
-	if _, err := s.WriteCheckpoint(ctx, key); err != nil {
+	if _, err := s.WriteCheckpoint(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := journal.TamperForTest(s); err == nil {
