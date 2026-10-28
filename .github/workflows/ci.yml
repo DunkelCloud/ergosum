@@ -82,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Pinned; bump deliberately.
-      VAULT_VERSION: "1.15.6"
+      VAULT_VERSION: "1.19.2"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
