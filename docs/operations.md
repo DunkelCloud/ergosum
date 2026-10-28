@@ -344,11 +344,17 @@ Decommissioning:
 1. `ergosum revoke` with the approvals the registry demands. Every instance
    stops issuing as soon as the revocation reaches it; a token already
    issued stays valid until it expires.
-2. Revoke the Vault tokens of the machine's entity
+2. Wait until every instance has the revocation: the same state hash
+   everywhere, and `GET /v1/bindings/<identity>` answers `binding.revoked`.
+3. Revoke the Vault tokens of the machine's entity
    (`vault token revoke` by accessor, or disable the entity).
-3. Stop `ergosumd` and delete its state directory, so that no copy of the
+4. Stop `ergosumd` and delete its state directory, so that no copy of the
    key remains on the disk.
-4. Remove the machine from monitoring and backups.
+5. Only now release the machine's addresses and overlay node. A released
+   public address can be handed to someone else; while a binding still
+   names it, that machine together with a stolen backup would pass the
+   checks.
+6. Remove the machine from monitoring and backups.
 
 ## Alerts
 
