@@ -55,7 +55,10 @@ jobs:
   netns:
     # The real binaries in Linux network namespaces: sealed start and
     # unseal, an SSH-signed binding, issuance with a net check, and a clone
-    # in another segment that is refused.
+    # in another segment that is refused; then three instances replicating
+    # the journal: four-eyes approval with ergosum bind and sign, catch-up
+    # after an outage, convergence after a partition, compaction, and a new
+    # instance built from a sync.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -66,6 +69,8 @@ jobs:
         run: CGO_ENABLED=0 go build -o dist/ ./cmd/...
       - name: Integration test in network namespaces
         run: sudo BIN="$PWD/dist" bash test/netns/run.sh
+      - name: Journal replication in network namespaces
+        run: sudo BIN="$PWD/dist" bash test/netns/replication.sh
 
   build:
     runs-on: ubuntu-latest
