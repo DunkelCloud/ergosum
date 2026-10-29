@@ -84,6 +84,9 @@ func (f *adminFlags) tool() (*admin.Tool, error) {
 		return nil, err
 	}
 	if len(cfg.Authorities) == 0 {
+		if _, err := os.Stat(f.config); errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("no authority: the configuration %s does not exist; create it, point ERGOSUM_ADMIN_CONFIG or -config at one, or give -authority and -authority-key", f.config)
+		}
 		return nil, fmt.Errorf("no authority: configure one in %s or give -authority and -authority-key", f.config)
 	}
 	client, err := admin.NewClient(cfg)
