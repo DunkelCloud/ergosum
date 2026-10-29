@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/jwt"
+	"github.com/DunkelCloud/ergosum/internal/metrics"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
 
@@ -59,6 +60,22 @@ func TestBackoff(t *testing.T) {
 		if d := b.next(); d < time.Second || d > 5*time.Minute {
 			t.Fatalf("attempt %d: %s", i, d)
 		}
+	}
+}
+
+// A long round yields no clock skew estimate: the answer may come from any
+// point in it.
+func TestObserveSkew(t *testing.T) {
+	d := &Daemon{metrics: metrics.NewRegistry()}
+	d.mClockSkew = d.metrics.Gauge("skew", "")
+	sent := time.Unix(1_800_000_000, 0)
+	d.observeSkew(sent.Add(3*time.Second), sent, sent.Add(2*time.Second))
+	if got := d.mClockSkew.Get(""); got != 2 {
+		t.Fatalf("short round: %v", got)
+	}
+	d.observeSkew(sent.Add(60*time.Second), sent, sent.Add(80*time.Second))
+	if got := d.mClockSkew.Get(""); got != 2 {
+		t.Fatalf("a long round changed the estimate: %v", got)
 	}
 }
 

@@ -321,8 +321,14 @@ func (d *Daemon) request(ctx context.Context, a *authorityClient) (string, jwt.C
 	return tr.Token, claims, nil
 }
 
+// maxSkewRound is the longest request round whose answer still yields a
+// clock skew estimate. The estimate assumes the authority answered in the
+// middle of the round; a long round (callbacks that time out, a refused
+// request) can be off by half its length.
+const maxSkewRound = 10 * time.Second
+
 func (d *Daemon) observeSkew(server, sent, received time.Time) {
-	if server.IsZero() {
+	if server.IsZero() || received.Sub(sent) > maxSkewRound {
 		return
 	}
 	mid := sent.Add(received.Sub(sent) / 2)
