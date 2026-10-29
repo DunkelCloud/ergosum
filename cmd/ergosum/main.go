@@ -17,7 +17,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/DunkelCloud/ergosum/internal/authority"
-	"github.com/DunkelCloud/ergosum/internal/journal"
 	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/version"
 )
@@ -41,11 +40,12 @@ Journal of the local instance (through its control socket):
   ergosum journal sync -from PEER [-from PEER...] [-socket %[2]s]
   ergosum journal export [-out FILE] [-archive] [-socket %[2]s]
 
-Binding changes, signed with ssh-keygen (see "ergosum bind -h"):
-  ergosum bind -identity NAME -key SHA256:... -check TYPE:TARGET... [-sign-key KEY] [-submit]
-  ergosum revoke -identity NAME [-sign-key KEY] [-submit]
-  ergosum sign [-sign-key KEY] [-submit] EVENT.json [MORE.json...]
-`, defaultConfig, defaultSocket)
+Bindings, from an administrator's machine (configuration: %[3]s):
+  ergosum bind [-sign-key KEY] [-yes] [-text OUT] FILE   sign and record a binding file
+  ergosum revoke [-out FILE] NAME                        revoke a binding
+  ergosum show [-out FILE] NAME                          current binding, in the file format
+  ergosum list                                           all bindings
+`, defaultConfig, defaultSocket, defaultAdminConfig())
 }
 
 func main() {
@@ -64,11 +64,13 @@ func main() {
 	case "journal":
 		err = journalCmd(os.Args[2:])
 	case "bind":
-		err = bindOrRevoke(journal.KindBindingSet, os.Args[2:])
+		err = bind(os.Args[2:])
 	case "revoke":
-		err = bindOrRevoke(journal.KindBindingRevoked, os.Args[2:])
-	case "sign":
-		err = sign(os.Args[2:])
+		err = revoke(os.Args[2:])
+	case "show":
+		err = show(os.Args[2:])
+	case "list":
+		err = list(os.Args[2:])
 	case "version":
 		fmt.Println("ergosum", version.String())
 	case "help", "-h", "--help":

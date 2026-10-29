@@ -59,6 +59,23 @@ func TestSignVerify(t *testing.T) {
 	}
 }
 
+// Inspect reads the claimed key and namespace of a signature that does not
+// verify, for error messages.
+func TestInspect(t *testing.T) {
+	s := signers(t)["ed25519"]
+	sig, err := Sign(s, "file", []byte("text"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, ns, err := Inspect(sig)
+	if err != nil || ns != "file" || Fingerprint(pub) != Fingerprint(s.PublicKey()) {
+		t.Fatalf("%v %q %v", pub, ns, err)
+	}
+	if _, _, err := Inspect([]byte("not a signature")); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("garbage: %v", err)
+	}
+}
+
 func TestVerifyRejectsGarbage(t *testing.T) {
 	for _, in := range []string{
 		"",
