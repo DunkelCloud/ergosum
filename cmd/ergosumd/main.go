@@ -20,24 +20,25 @@ const defaultConfig = "/etc/ergosum/ergosumd.yaml"
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
-  ergosumd [run] [-config %[1]s] [-log-format json|text]
+  ergosumd run [-config %[1]s] [-log-format json|text]
   ergosumd fingerprint [-config %[1]s]
   ergosumd version
 `, defaultConfig)
 }
 
 func main() {
-	args := os.Args[1:]
-	cmd := "run"
-	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
-		cmd, args = args[0], args[1:]
+	// No default command: a call without one, say to see the usage, must not
+	// start a second daemon next to the service and write its token file.
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
 	}
 	var err error
-	switch cmd {
+	switch os.Args[1] {
 	case "run":
-		err = run(args)
+		err = run(os.Args[2:])
 	case "fingerprint":
-		err = fingerprint(args)
+		err = fingerprint(os.Args[2:])
 	case "version":
 		fmt.Println("ergosumd", version.String())
 	case "help", "-h", "--help":

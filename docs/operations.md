@@ -333,11 +333,20 @@ ergosum revoke -identity host1.example.com -sign-key ~/.ssh/id_ed25519 -out revo
 `-sign-key` takes a private key file, a security key handle, or a public key
 whose private key is in `ssh-agent`. The tool asks before it signs (`-yes`
 skips the question) and checks every signature before it writes the file.
-Without the tool, sign the canonical text (ADR 0003) directly:
+`ergosum sign -submit` with one event file and no `-sign-key` only submits
+and leaves the file as it is. Without the tool, sign the canonical text
+(ADR 0003) directly:
 
 ```sh
 ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n ergosum-binding event.txt   # each admin
 ```
+
+`-f` takes the private key or, with the key in `ssh-agent`, its public key
+in OpenSSH format. A public key in the SSH2 format (RFC 4716, as PuTTYgen
+exports it) fails with a misleading "No such file or directory";
+`ssh-keygen -i -f key.pub` converts it. Copy `event.txt` as it is: saved by
+an editor with CRLF line endings it is a different text, and the signature
+does not match.
 
 and post the JSON form with all signatures to `POST /v1/bindings` on any
 instance. Admin keys are ed25519, ECDSA, RSA with at least 2048 bits, or
