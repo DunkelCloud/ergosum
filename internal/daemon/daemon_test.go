@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,6 +80,51 @@ func TestObserveSkew(t *testing.T) {
 	d.observeSkew(sent.Add(60*time.Second), sent, sent.Add(80*time.Second))
 	if got := d.mClockSkew.Get(""); got != 2 {
 		t.Fatalf("a long round changed the estimate: %v", got)
+	}
+}
+
+// A request proposes the tailnet name and checks for the addresses:
+// public IPv4 active, IPv6 and unknown networks commented out.
+func TestRequest(t *testing.T) {
+	cfg := Config{
+		Identity: "host1.example.com", StateDir: t.TempDir(), TokenGroup: "-",
+		Addresses:   []string{"198.51.100.20", "2001:db8::20", "10.99.0.7"},
+		Authorities: []AuthorityConfig{{URL: "https://192.0.2.1:7432", Key: "SHA256:" + strings.Repeat("A", 43)}},
+	}
+	d, err := New(cfg, Options{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		TailnetName: func(context.Context) (string, error) { return "host1.tailnet.example.com", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := d.Request(context.Background(), false, time.Unix(1_800_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"\nidentity host1.example.com\n",
+		"\nkey " + d.Fingerprint() + "\n",
+		"\ncheck tailnet host1.tailnet.example.com\n",
+		"\ncheck ip 198.51.100.20\n",
+		"\n# check ip 2001:db8::20\n",
+		"\n# check net 10.99.0.7/??\n",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("request lacks %q:\n%s", want, out)
+		}
+	}
+	// A request for a new key keeps the current one in use.
+	cur := d.Fingerprint()
+	out, err = d.Request(context.Background(), true, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := d.PendingFingerprint()
+	if next == "" || next == cur || d.Fingerprint() != cur || !strings.Contains(string(out), "key "+next) {
+		t.Fatalf("new key %q, current %q:\n%s", next, d.Fingerprint(), out)
+	}
+	// Asked again, it names the same next key.
+	if _, err := d.Request(context.Background(), true, time.Now()); err != nil || d.PendingFingerprint() != next {
+		t.Fatalf("second request: %v %s", err, d.PendingFingerprint())
 	}
 }
 
