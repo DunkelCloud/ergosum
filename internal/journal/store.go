@@ -287,10 +287,23 @@ type Binding struct {
 	Hash     string  `json:"hash"`
 	Origin   string  `json:"origin"`
 	Seq      int64   `json:"seq"`
+	// SignedBy names the administrators who approved the event, as the read
+	// API reports them (see Registry.SignerNames); the journal never stores
+	// it.
+	SignedBy []string `json:"signed_by,omitempty"`
 }
 
 // Active reports whether the binding allows issuance.
 func (b *Binding) Active() bool { return b != nil && b.Kind == KindBindingSet }
+
+// BindingList is the answer of the list endpoint: the projection of every
+// identity, ordered by identity, and what an event needs to be accepted.
+type BindingList struct {
+	V           int                 `json:"v"`
+	TrustDomain string              `json:"trust_domain"`
+	Approvals   map[string]Approval `json:"approvals"`
+	Bindings    []*Binding          `json:"bindings"`
+}
 
 // Receipt describes where an event was recorded.
 type Receipt struct {
@@ -304,7 +317,7 @@ type Receipt struct {
 var (
 	ErrTrustDomain = errors.New("event belongs to another trust domain")
 	ErrLowerEpoch  = errors.New("epoch is lower than the current binding")
-	ErrSuperseded  = errors.New("an event with the same epoch takes precedence")
+	ErrEpochTaken  = errors.New("another event holds this epoch")
 )
 
 // querier is what both *sql.DB and *sql.Tx offer.
@@ -315,9 +328,12 @@ type querier interface {
 }
 
 // AppendBinding verifies an admin-signed binding event against the registry
-// and the ordering rule and appends it. Events that would not change the
-// projection are rejected rather than recorded. Re-submitting an accepted
-// event is idempotent.
+// and appends it. It takes only an event above the current epoch, even one
+// that would win at the same epoch: an administrator's change was made
+// against the binding it saw, and must not replace another change unnoticed.
+// Ingest still applies the ordering rule, so that events written at
+// different instances converge. Re-submitting an accepted event is
+// idempotent.
 func (s *Store) AppendBinding(ctx context.Context, e *BindingEvent) (Receipt, error) {
 	if err := e.Validate(); err != nil {
 		return Receipt{}, err
@@ -359,8 +375,8 @@ func (s *Store) AppendBinding(ctx context.Context, e *BindingEvent) (Receipt, er
 		if e.Epoch < cur.Epoch {
 			return Receipt{}, fmt.Errorf("%w: %d < %d", ErrLowerEpoch, e.Epoch, cur.Epoch)
 		}
-		if !Wins(cand, cur) {
-			return Receipt{}, fmt.Errorf("%w: epoch %d", ErrSuperseded, e.Epoch)
+		if e.Epoch == cur.Epoch {
+			return Receipt{}, fmt.Errorf("%w: epoch %d", ErrEpochTaken, e.Epoch)
 		}
 	}
 	body, err := json.Marshal(e)
@@ -518,16 +534,15 @@ func (s *Store) Binding(ctx context.Context, identity string) (*Binding, error) 
 	return binding(ctx, s.db, identity)
 }
 
-func binding(ctx context.Context, q querier, identity string) (*Binding, error) {
+const bindingColumns = `identity, kind, epoch, key, checks, hash, origin, seq`
+
+// rowScanner is what *sql.Row and *sql.Rows offer.
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanBinding(r rowScanner) (*Binding, error) {
 	var b Binding
 	var checks string
-	err := q.QueryRowContext(ctx,
-		`SELECT identity, kind, epoch, key, checks, hash, origin, seq FROM bindings WHERE identity = ?`, identity).
-		Scan(&b.Identity, &b.Kind, &b.Epoch, &b.Key, &checks, &b.Hash, &b.Origin, &b.Seq)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
+	if err := r.Scan(&b.Identity, &b.Kind, &b.Epoch, &b.Key, &checks, &b.Hash, &b.Origin, &b.Seq); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(checks), &b.Checks); err != nil {
@@ -535,6 +550,56 @@ func binding(ctx context.Context, q querier, identity string) (*Binding, error) 
 	}
 	return &b, nil
 }
+
+func binding(ctx context.Context, q querier, identity string) (*Binding, error) {
+	b, err := scanBinding(q.QueryRowContext(ctx, `SELECT `+bindingColumns+` FROM bindings WHERE identity = ?`, identity))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return b, err
+}
+
+// List returns the projection of every identity, ordered by identity.
+func (s *Store) List(ctx context.Context) ([]*Binding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+bindingColumns+` FROM bindings ORDER BY identity`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []*Binding{}
+	for rows.Next() {
+		b, err := scanBinding(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// BindingEvent returns the event behind the projection of identity, with
+// its signatures, or nil.
+func (s *Store) BindingEvent(ctx context.Context, identity string) (*BindingEvent, error) {
+	var body []byte
+	err := s.db.QueryRowContext(ctx, `SELECT body FROM bindings WHERE identity = ?`, identity).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil || len(body) == 0 {
+		return nil, err
+	}
+	var e BindingEvent
+	if err := json.Unmarshal(body, &e); err != nil {
+		return nil, fmt.Errorf("journal: binding of %s: %w", identity, err)
+	}
+	return &e, nil
+}
+
+// TrustDomain returns the trust domain the journal is pinned to.
+func (s *Store) TrustDomain() string { return s.trustDomain }
+
+// Registry returns the registry that binding events are verified against.
+func (s *Store) Registry() *Registry { return s.registry }
 
 // AppendObservation records an instance-signed observation. body is the
 // JSON of a signed envelope.

@@ -389,6 +389,7 @@ func (a *Authority) apiHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+protocol.PathToken, a.handleToken)
 	mux.HandleFunc("POST "+protocol.PathBindings, a.handleBindingWrite)
+	mux.HandleFunc("GET "+protocol.PathBindings, a.handleBindingList)
 	mux.HandleFunc("GET "+protocol.PathBindings+"/{identity}", a.handleBindingRead)
 	mux.HandleFunc("GET "+protocol.PathKeys, a.handleKeys)
 	mux.HandleFunc("GET "+protocol.PathKeysPEM, a.handleKeysPEM)

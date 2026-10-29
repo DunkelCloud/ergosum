@@ -154,6 +154,57 @@ func (r *Registry) Verify(e *BindingEvent) ([]string, error) {
 	return signers, nil
 }
 
+// Approval is the threshold and the allowed administrators of one event
+// kind as the read API shows them: administrator name to the SSH
+// fingerprint of the key.
+type Approval struct {
+	Threshold int               `json:"threshold"`
+	Admins    map[string]string `json:"admins"`
+}
+
+// Approvals returns the threshold and the allowed keys of every event kind,
+// so that tooling can tell when an event has enough signatures.
+func (r *Registry) Approvals() map[string]Approval {
+	out := make(map[string]Approval, len(r.approvals))
+	for kind, ap := range r.approvals {
+		admins := make(map[string]string, len(ap.Keys))
+		for _, name := range ap.Keys {
+			admins[name] = sshsig.Fingerprint(r.admins[name])
+		}
+		out[kind] = Approval{Threshold: ap.Threshold, Admins: admins}
+	}
+	return out
+}
+
+// SignerNames describes who approved a recorded event: for every signature
+// that verifies over its canonical text, the registry name of the key, or
+// its fingerprint if the registry does not know the key (any more). Unlike
+// Verify it checks no threshold and skips what does not verify.
+func (r *Registry) SignerNames(e *BindingEvent) []string {
+	canonical, err := e.Canonical()
+	if err != nil {
+		return nil
+	}
+	byKey := make(map[string]string, len(r.admins))
+	for name, pub := range r.admins {
+		byKey[string(pub.Marshal())] = name
+	}
+	var out []string
+	for _, sig := range e.Signatures {
+		pub, err := sshsig.Verify([]byte(sig), Namespace, canonical)
+		if err != nil {
+			continue
+		}
+		name, ok := byKey[string(pub.Marshal())]
+		if !ok {
+			name = sshsig.Fingerprint(pub)
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (r *Registry) allowed(ap ApprovalConfig, pub ssh.PublicKey) string {
 	m := pub.Marshal()
 	for _, name := range ap.Keys {

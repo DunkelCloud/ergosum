@@ -530,8 +530,8 @@ func opsGet(t *testing.T, e *env, path string) string {
 	return string(b)
 }
 
-// TestBindingWriteAPI: the write API applies the registry and the ordering
-// rule; nothing it rejects reaches the journal.
+// TestBindingWriteAPI: the write API applies the registry and takes only
+// events above the current epoch; nothing it rejects reaches the journal.
 func TestBindingWriteAPI(t *testing.T) {
 	admins := jt.NewAdmins(t, "alice", "bob", "carol")
 	e := newEnv(t, envOptions{threshold: 2, admins: admins})
@@ -559,6 +559,7 @@ func TestBindingWriteAPI(t *testing.T) {
 		{"valid", admins.Sign(t, ev(2), "alice", "carol"), http.StatusCreated},
 		{"resubmitted", admins.Sign(t, ev(2), "bob", "carol"), http.StatusOK},
 		{"lower epoch", admins.Sign(t, ev(1), "alice", "bob"), http.StatusConflict},
+		{"same epoch, other event", admins.Sign(t, jt.Revoke(trustDomain, host1, 2), "alice", "bob"), http.StatusConflict},
 	}
 	for _, c := range cases {
 		status, body := e.writeBinding(c.event)

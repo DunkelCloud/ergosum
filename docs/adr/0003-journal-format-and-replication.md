@@ -176,12 +176,49 @@ instances during a partition converge everywhere after replication.
 
 The write API (`POST /v1/bindings` on the authority's TLS listener, ADR 0001)
 answers `201` with origin, sequence number and hash. It rejects invalid
-content or insufficient approvals with `422 rejected`, and an event that
-would not win against the current projection (lower epoch, or same epoch
-and losing) with `409 conflict`. Re-submitting an accepted event is
-acknowledged with `200` without storing it again. `GET
-/v1/bindings/<identity>` returns the projection, including the current
-epoch. Through ingest, every verified event is stored, and the rule decides.
+content or insufficient approvals with `422 rejected`, and an event whose
+epoch is not above the current one with `409 conflict` — also an event that
+would win at the same epoch, such as a revocation. An administrator's change
+is made against the binding they saw; if another change took its epoch
+meanwhile, the change must be made anew, so that none replaces another one
+unnoticed. Re-submitting an accepted event is acknowledged with `200`
+without storing it again. Through ingest, every verified event is stored,
+and the ordering rule decides: two changes written at different instances
+before either has the other still converge.
+
+### Read API
+
+On the same listener, for administrator tooling and for daemons:
+
+- `GET /v1/bindings/<identity>` returns the projection of one identity
+  (`404` if it has none), including the current epoch, and `signed_by`: the
+  administrators who approved the winning event, by their registry name, or
+  by key fingerprint for a key the registry no longer knows.
+- `GET /v1/bindings` returns the projection of every identity, ordered by
+  identity, the trust domain, and per event kind the threshold and the
+  allowed administrators with their key fingerprints, so that tooling can
+  tell when an event has enough signatures:
+
+  ```json
+  {
+    "v": 1,
+    "trust_domain": "example.com",
+    "approvals": {
+      "binding.set": {"threshold": 2, "admins": {"alice": "SHA256:...", "bob": "SHA256:..."}},
+      "binding.revoked": {"threshold": 1, "admins": {"alice": "SHA256:...", "bob": "SHA256:..."}}
+    },
+    "bindings": [
+      {"identity": "host1.example.com", "kind": "binding.set", "epoch": 3,
+       "key": "SHA256:...", "checks": [{"type": "tailnet", "target": "host1.tailnet.example.com"}],
+       "hash": "...", "origin": "authority-a", "seq": 12}
+    ]
+  }
+  ```
+
+Bindings and administrator key fingerprints are no secret, and the
+per-identity read already showed every binding to whoever knew the name.
+The list saves the guessing; it shows the inventory to every machine that
+reaches the listener.
 
 ### Observations
 
@@ -503,10 +540,16 @@ leader, no quorum.
 - Checkpoints double as anti-entropy for bindings: an instance that missed a
   binding event gets it with the next checkpoint of any peer, and the state
   hash shows divergence.
-- Administrators sign with `ssh-keygen`, including FIDO keys, and can read
-  what they sign.
+- Administrators sign with `ssh-keygen` or through their SSH agent,
+  including FIDO keys, and can read what they sign.
+- A change made against an outdated binding is refused at the write API
+  instead of silently replacing the newer one.
 
 **Bad**
+
+- An administrator whose change lost its epoch to another one starts again.
+- The list of every binding is readable by every machine that reaches the
+  API listener.
 
 - The registry is static: adding or removing an administrator is a
   deployment to every instance, and a stale registry on one instance rejects
