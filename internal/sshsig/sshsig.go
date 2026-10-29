@@ -65,10 +65,15 @@ func Sign(signer ssh.Signer, namespace string, message []byte) ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: pemType, Bytes: b.Bytes()}), nil
 }
 
-// Verify checks an armored SSHSIG signature over message in the given
-// namespace and returns the public key that made it. The caller decides
-// whether that key is trusted.
-func Verify(armored []byte, namespace string, message []byte) (ssh.PublicKey, error) {
+// parsed is the content of an armored signature.
+type parsed struct {
+	pub       ssh.PublicKey
+	namespace string
+	hash      string
+	sig       ssh.Signature
+}
+
+func parse(armored []byte) (*parsed, error) {
 	block, rest := pem.Decode(armored)
 	if block == nil || block.Type != pemType || len(bytes.TrimSpace(rest)) != 0 {
 		return nil, ErrMalformed
@@ -91,21 +96,43 @@ func Verify(armored []byte, namespace string, message []byte) (ssh.PublicKey, er
 		return nil, ErrMalformed
 	}
 	_ = reserved // ignored, as specified
-	if string(ns) != namespace {
-		return nil, fmt.Errorf("%w: %q", ErrNamespace, ns)
+	p := &parsed{namespace: string(ns), hash: string(hashAlg)}
+	var err error
+	if p.pub, err = ssh.ParsePublicKey(pubBytes); err != nil {
+		return nil, ErrMalformed
 	}
-	h := string(hashAlg)
+	if err := ssh.Unmarshal(sigBytes, &p.sig); err != nil {
+		return nil, ErrMalformed
+	}
+	return p, nil
+}
+
+// Inspect returns the key and the namespace an armored signature claims,
+// without verifying it: for diagnostics only, never for trust.
+func Inspect(armored []byte) (pub ssh.PublicKey, namespace string, err error) {
+	p, err := parse(armored)
+	if err != nil {
+		return nil, "", err
+	}
+	return p.pub, p.namespace, nil
+}
+
+// Verify checks an armored SSHSIG signature over message in the given
+// namespace and returns the public key that made it. The caller decides
+// whether that key is trusted.
+func Verify(armored []byte, namespace string, message []byte) (ssh.PublicKey, error) {
+	p, err := parse(armored)
+	if err != nil {
+		return nil, err
+	}
+	if p.namespace != namespace {
+		return nil, fmt.Errorf("%w: %q", ErrNamespace, p.namespace)
+	}
+	h := p.hash
 	if h != hashSHA512 && h != hashSHA256 {
 		return nil, fmt.Errorf("%w: hash %q", ErrWeakAlgorithm, h)
 	}
-	pub, err := ssh.ParsePublicKey(pubBytes)
-	if err != nil {
-		return nil, ErrMalformed
-	}
-	var sig ssh.Signature
-	if err := ssh.Unmarshal(sigBytes, &sig); err != nil {
-		return nil, ErrMalformed
-	}
+	pub, sig := p.pub, p.sig
 	if sig.Format == ssh.KeyAlgoRSA { // RSA with SHA-1
 		return nil, fmt.Errorf("%w: %s", ErrWeakAlgorithm, sig.Format)
 	}

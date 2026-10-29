@@ -32,9 +32,11 @@ carries (see [Backups](#backups)).
 
 1. Install `ergosumd`, write `/etc/ergosum/ergosumd.yaml`
    (`examples/ergosumd.yaml`).
-2. `sudo -u ergosum ergosumd fingerprint` creates the key on first use and
-   prints the fingerprint for the binding. Run it as the service user: a key
-   created by root belongs to root, and the service cannot read it.
+2. `sudo -u ergosum ergosumd request -out host1.txt` creates the key on
+   first use and writes the binding request for the administrators (see
+   [Administration](#administration)); `ergosumd fingerprint` prints only the
+   fingerprint. Run both as the service user: a key created by root belongs
+   to root, and the service cannot read it.
 3. Allow TCP 7433 (or the configured callback port) from the authorities'
    source addresses only. The listener is open only while a request is in
    flight.
@@ -54,8 +56,9 @@ Metrics (node_exporter textfile collector, `metrics_file`):
 | `machine_identity_token_expiry_timestamp_seconds` | expiry of the current token |
 | `machine_identity_last_success_timestamp_seconds` | last successful request |
 | `machine_identity_last_error_timestamp_seconds` | last failed request |
-| `machine_identity_clock_skew_seconds` | authority clock minus local clock |
+| `machine_identity_clock_skew_seconds` | authority clock minus local clock, estimated from request rounds of at most 10 s |
 | `machine_identity_callbacks_total{status}` | callbacks answered; any `no_open_request` means the key is used elsewhere |
+| `machine_identity_key_change_pending` | 1 while a new key waits for its binding |
 
 Short token lifetimes need synchronized clocks.
 
@@ -306,61 +309,151 @@ protection class:
   for `bindings`). Ingest verifies history against the current registry; an
   event approved only with a removed key stops a sync.
 
-## Writing a binding
+## Administration
 
-`ergosum bind`, `ergosum revoke` and `ergosum sign` read the current epoch
-from an authority, show the canonical text, sign it with `ssh-keygen -Y sign`
-and merge the signatures of several administrators. A configuration saves
-the flags:
+Bindings are changed from an administrator's machine with `ergosum` (builds
+for Linux, Windows and macOS). Every change is one text file that grows
+from step to step and that the people involved pass on:
+
+1. The machine's administrator writes the request on the machine:
+   `sudo -u ergosum ergosumd request -out host1.txt`. It holds the
+   identity, the key and the checks the machine proposes from where it
+   stands: its tailnet name, public addresses as `ip` checks, the networks
+   of private addresses as `net` checks. IPv6 addresses and virtual
+   interfaces are proposed commented out.
+2. An ergosum administrator checks the proposed checks, edits the file if
+   needed and runs `ergosum bind host1.txt`. The tool adds kind, trust
+   domain and the next epoch (read from an authority), shows the text to
+   sign and how it differs from the current binding, signs with the
+   administrator's key and appends the signature.
+3. If the registry demands more approvals, the next administrator runs
+   `ergosum bind host1.txt` on the same file. The tool records the event as
+   soon as the signatures reach the threshold and notes where at the end of
+   the file.
+
+```text
+# Binding request for host1.example.com, written by ergosumd request at ...
+identity host1.example.com
+key SHA256:...
+# tailnet name (tailscale status)
+check tailnet host1.tailnet.example.com
+# eth0: public address
+check ip 192.0.2.10
+# added by ergosum bind at ..., epoch from https://100.64.0.10:7432
+kind binding.set
+trust-domain example.com
+epoch 4
+# signed by alice (SHA256:...) at ...
+-----BEGIN SSH SIGNATURE-----
+...
+-----END SSH SIGNATURE-----
+```
+
+The fields are the lines of the canonical text (ADR 0003) in any order;
+`#` starts a comment, and line endings and encoding (UTF-8, or UTF-16 as
+Windows PowerShell writes it) do not matter. Administrators see only this
+format; the JSON form of an event exists only on the wire.
+
+The tool refuses what would otherwise fail later or go unnoticed:
+
+- If the text changed after a signature, it names the signature that no
+  longer matches. Undo the change, or remove the signature and sign again.
+- If the binding changed between making the file and recording it (another
+  change took the epoch), the tool stops, and so does the authority (`409`):
+  no change replaces another one unnoticed. Start with a new file.
+- A key that the registry does not allow for the kind cannot sign, and a
+  key signs only once.
+
+### Configuration
 
 ```yaml
-# ~/.config/ergosum/admin.yaml (or $ERGOSUM_ADMIN_CONFIG)
-trust_domain: example.com
-authorities:                     # tried in order
+# ~/.config/ergosum/admin.yaml, on Windows %AppData%\ergosum\admin.yaml
+# (or $ERGOSUM_ADMIN_CONFIG)
+sign_key: ~/.ssh/id_ed25519.pub   # the administrator's key, see below
+authorities:                      # tried in order
   - url: https://100.64.0.10:7432
-    key: SHA256:...              # instance fingerprint, from "ergosum keygen"
+    key: SHA256:...               # instance fingerprint, from "ergosum keygen"
+trust_domain: example.com         # optional: must match the authorities'
 ```
+
+`sign_key` is a public key (a file, or the key line itself) whose private
+key the SSH agent holds: `ssh-agent` through `SSH_AUTH_SOCK`, on Windows
+the OpenSSH agent service (`Get-Service ssh-agent`) or another agent whose
+pipe `SSH_AUTH_SOCK` names. A public key in the SSH2 format, as PuTTYgen
+exports it, works as well. If the agent does not hold the key, the tool
+signs with `ssh-keygen -Y sign` and the private key file next to the public
+one, which asks for the passphrase or the touch of a security key; a
+private key file as `sign_key` is signed that way, too. `-sign-key`
+overrides the configuration, `-yes` signs without asking.
+
+The administrator's machine needs TCP 7432 to at least one authority: the
+read side (`GET /v1/bindings`) and the write side share that listener.
+
+### Routine cases
+
+| Case | Who | Commands |
+| --- | --- | --- |
+| Enrollment | the machine's administrator, then ergosum administrators | `ergosumd request` on the machine, `ergosum bind FILE` |
+| Key change: routine, restore without state, after a duplicate-key alert | the machine's administrator, then ergosum administrators | `ergosumd request -new-key`, `ergosum bind FILE` |
+| Other place or checks: new address, other network, an additional check | either | `ergosumd request` on the machine, or `ergosum show NAME -out FILE` and edit it; then `ergosum bind FILE` |
+| Revocation, decommissioning | ergosum administrators | `ergosum revoke NAME` |
+| Binding again under an old name | as enrollment | `ergosum bind` shows "revoked in epoch k" and takes k+1 |
+| Renaming | enrollment for the new name, revocation for the old one | |
+| Restore | | same place with the state directory: nothing; without it: key change; another place: other place |
+| Looking up | anyone who reaches 7432 | `ergosum show NAME` (epoch, key, checks, who approved), `ergosum list` |
+
+**Key change.** `ergosumd request -new-key` creates the next key next to the
+current one (`identity.key.new`) and writes a request for it; asked again,
+it names the same next key. The daemon keeps using the current key. Before
+each request it asks an authority for its binding (`GET
+/v1/bindings/<identity>`); once the binding names the next key, it switches,
+deletes the old key and requests with the new one. No request is refused on
+the way, so no `foreign_key` appears. `ergosum bind` shows the change as
+"key old -> new"; the old key is invalid from the moment the binding is
+recorded. `machine_identity_key_change_pending` is 1 while the next key
+waits. After a restore without the state directory there is no old key:
+`ergosumd request` creates a new one.
+
+**Revocation.** `ergosum revoke NAME` shows what it ends, writes
+`NAME.revoke.txt` and continues as `ergosum bind`; another administrator
+signs the same file if the registry demands it. Then follow
+[Decommissioning](#decommissioning).
+
+**Overlapping changes.** A file holds the epoch it was made for. If another
+change is recorded first, the file is stale: the tool says so, and the
+change starts again from a new request or `ergosum show`.
+
+### Signing by hand
+
+If the tool cannot sign, an administrator signs with `ssh-keygen` directly
+and adds the signature to the file:
 
 ```sh
-# Administrator 1: build the event at the next epoch and sign it.
-ergosum bind -identity host1.example.com -key SHA256:<from ergosumd fingerprint>   -check tailnet:host1.tailnet.example.com -check ip:192.0.2.10   -sign-key ~/.ssh/id_ed25519_sk -out host1.json
-# Administrator 2, on another machine: check the text, sign, submit.
-ergosum sign -sign-key ~/.ssh/id_ed25519 -submit host1.json
-# Copies signed separately can be merged: ergosum sign -submit a.json b.json
-ergosum revoke -identity host1.example.com -sign-key ~/.ssh/id_ed25519 -out revoke.json
+ergosum bind -text event.txt host1.txt   # completes host1.txt, writes the text to sign
+ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n ergosum-binding event.txt
+cat event.txt.sig >> host1.txt          # PowerShell: Get-Content event.txt.sig | Add-Content host1.txt
+ergosum bind host1.txt                   # checks the signature, records at the threshold
 ```
 
-`-sign-key` takes a private key file, a security key handle, or a public key
-whose private key is in `ssh-agent`. The tool asks before it signs (`-yes`
-skips the question) and checks every signature before it writes the file.
-`ergosum sign -submit` with one event file and no `-sign-key` only submits
-and leaves the file as it is. Without the tool, sign the canonical text
-(ADR 0003) directly:
+`-f` takes the private key or, with the key in the agent, its public key in
+OpenSSH format. A public key in the SSH2 format (RFC 4716, as PuTTYgen
+exports it) fails in `ssh-keygen` with a misleading "No such file or
+directory"; `ssh-keygen -i -f key.pub > key-openssh.pub` converts it. Sign
+`event.txt` as it is: opened and saved by an editor with CRLF line endings
+it is a different text. `ergosum bind` recognizes a signature made over the
+CRLF form, or in another namespace than `ergosum-binding`, and says so.
 
-```sh
-ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n ergosum-binding event.txt   # each admin
-```
+Without the tool at all, post the JSON form of the event (ADR 0003) with
+all signatures to `POST /v1/bindings` on any instance. Admin keys are
+ed25519, ECDSA, RSA with at least 2048 bits, or security keys; `ssh-dss`
+keys and certificates are refused.
 
-`-f` takes the private key or, with the key in `ssh-agent`, its public key
-in OpenSSH format. A public key in the SSH2 format (RFC 4716, as PuTTYgen
-exports it) fails with a misleading "No such file or directory";
-`ssh-keygen -i -f key.pub` converts it. Copy `event.txt` as it is: saved by
-an editor with CRLF line endings it is a different text, and the signature
-does not match.
-
-and post the JSON form with all signatures to `POST /v1/bindings` on any
-instance. Admin keys are ed25519, ECDSA, RSA with at least 2048 bits, or
-security keys; `ssh-dss` keys and certificates are refused.
-
-## Enrollment and decommissioning
-
-Enrollment of a machine:
+### Enrollment
 
 1. Install `ergosumd` and its configuration; `sudo -u ergosum ergosumd
-   fingerprint` creates the key and prints the fingerprint.
-2. Administrators bind the identity to that fingerprint with the checks of
-   its place (`ergosum bind`, `ergosum sign -submit`). The machine needs no
-   bootstrap secret.
+   request -out host1.txt` creates the key and writes the request.
+2. Administrators adjust the checks and record the binding with `ergosum
+   bind`. The machine needs no bootstrap secret.
 3. Start `ergosumd`; check that `/run/ergosum/token` appears and that the
    authority's audit log shows `issued` with every check.
 4. Store the machine's backup settings in Vault and, while the role names
@@ -369,20 +462,22 @@ Enrollment of a machine:
 A machine restored at the same place together with its state directory
 keeps its key and its binding and receives tokens again. Restored without
 it, the machine needs a new key: delete what is left of the state
-directory, create a new key and bind it at the next epoch. A move to
-another place always needs a binding with the new place's checks at the
-next epoch.
+directory, write a request and bind it at the next epoch. A move to another
+place always needs a binding with the new place's checks at the next epoch.
 
-Decommissioning:
+### Decommissioning
 
-1. `ergosum revoke` with the approvals the registry demands. Every instance
-   stops issuing as soon as the revocation reaches it; a token already
-   issued stays valid until it expires.
+1. `ergosum revoke NAME` with the approvals the registry demands. Every
+   instance stops issuing as soon as the revocation reaches it; a token
+   already issued stays valid until it expires.
 2. Wait until every instance has the revocation: the same state hash
-   everywhere, and `GET /v1/bindings/<identity>` answers `binding.revoked`.
-3. Revoke the Vault tokens of the machine's entity
-   (`vault token revoke` by accessor, or disable the entity), and remove
-   the identity from the role if the role names its identities.
+   everywhere, and `GET /v1/bindings/<identity>` at each instance answers
+   `binding.revoked`.
+3. Disable the machine's Vault entity, whose alias is the token subject
+   `spiffe://<trust domain>/host/<identity>` on the `auth/machine` mount
+   (`ergosum revoke` prints the commands), so that the Vault tokens it holds
+   stop working; remove the identity from the role if the role names its
+   identities.
 4. Stop `ergosumd` and delete its state directory, so that no copy of the
    key remains on the disk.
 5. Only now release the machine's addresses and overlay node. A released

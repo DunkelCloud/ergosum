@@ -41,6 +41,9 @@ type Options struct {
 	Now    func() time.Time
 	// Listen creates the callback listener; default net.Listen.
 	Listen func(network, address string) (net.Listener, error)
+	// TailnetName returns the machine's overlay name for a request;
+	// default: ask "tailscale status".
+	TailnetName func(context.Context) (string, error)
 }
 
 // Daemon is one ergosumd instance.
@@ -49,9 +52,14 @@ type Daemon struct {
 	log         *slog.Logger
 	now         func() time.Time
 	listen      func(network, address string) (net.Listener, error)
-	key         *ecdsa.PrivateKey
-	cert        tls.Certificate
+	tailnetName func(context.Context) (string, error)
 	inflight    *inflight
+
+	kmu     sync.RWMutex
+	key     *ecdsa.PrivateKey
+	cert    tls.Certificate
+	pending *ecdsa.PrivateKey // the next key, until a binding names it
+
 	authorities []*authorityClient
 	preferred   int
 	tokenGID    int
@@ -64,6 +72,7 @@ type Daemon struct {
 	mError     *metrics.Vec
 	mClockSkew *metrics.Vec
 	mCallbacks *metrics.Vec
+	mPending   *metrics.Vec
 
 	lmu      sync.Mutex
 	users    int
@@ -84,8 +93,11 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 		return nil, err
 	}
 	overlay, _ := protocol.ParsePrefixes(cfg.OverlayPrefixes) // checked by Validate
-	d := &Daemon{cfg: cfg, log: opts.Logger, now: opts.Now, listen: opts.Listen, tokenGID: -1,
-		inflight: newInflight(), overlay: overlay}
+	d := &Daemon{cfg: cfg, log: opts.Logger, now: opts.Now, listen: opts.Listen, tailnetName: opts.TailnetName,
+		tokenGID: -1, inflight: newInflight(), overlay: overlay}
+	if d.tailnetName == nil {
+		d.tailnetName = tailnetName
+	}
 	if d.log == nil {
 		d.log = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	}
@@ -98,7 +110,7 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, err
 	}
-	key, created, err := keys.LoadOrCreate(filepath.Join(cfg.StateDir, "identity.key"))
+	key, created, err := keys.LoadOrCreate(d.keyPath())
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +120,9 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	}
 	if d.cert, err = tlspin.Certificate(key); err != nil {
 		return nil, err
+	}
+	if d.pending, err = keys.Load(d.keyPath() + pendingSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+		d.log.Warn("cannot read the next key; keeping the current key", "err", err)
 	}
 	for _, a := range cfg.Authorities {
 		d.authorities = append(d.authorities, &authorityClient{
@@ -136,11 +151,162 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	d.mClockSkew = d.metrics.Gauge("machine_identity_clock_skew_seconds", "Authority clock minus local clock, estimated per request.")
 	d.mCallbacks = d.metrics.Counter("machine_identity_callbacks_total", "Callbacks answered by status.", "status",
 		protocol.StatusConfirmed, protocol.StatusNoOpenRequest)
+	d.mPending = d.metrics.Gauge("machine_identity_key_change_pending", "1 while a new key waits for its binding.")
+	if d.pending != nil {
+		d.mPending.Set("", 1)
+	}
 	return d, nil
 }
 
+// pendingSuffix names the next key next to the current one.
+const pendingSuffix = ".new"
+
+func (d *Daemon) keyPath() string { return filepath.Join(d.cfg.StateDir, "identity.key") }
+
+// identity returns the current key and its TLS certificate.
+func (d *Daemon) identity() (*ecdsa.PrivateKey, tls.Certificate) {
+	d.kmu.RLock()
+	defer d.kmu.RUnlock()
+	return d.key, d.cert
+}
+
 // Fingerprint returns the identity key fingerprint to bind.
-func (d *Daemon) Fingerprint() string { return keys.Fingerprint(&d.key.PublicKey) }
+func (d *Daemon) Fingerprint() string {
+	k, _ := d.identity()
+	return keys.Fingerprint(&k.PublicKey)
+}
+
+// PendingFingerprint returns the fingerprint of the key that waits for its
+// binding, or "".
+func (d *Daemon) PendingFingerprint() string {
+	d.kmu.RLock()
+	defer d.kmu.RUnlock()
+	if d.pending == nil {
+		return ""
+	}
+	return keys.Fingerprint(&d.pending.PublicKey)
+}
+
+// NewKey creates the next identity key next to the current one, or keeps
+// the one that waits already, and returns its fingerprint. The daemon
+// switches to it once an authority shows a binding to it.
+func (d *Daemon) NewKey() (string, error) {
+	key, created, err := keys.LoadOrCreate(d.keyPath() + pendingSuffix)
+	if err != nil {
+		return "", err
+	}
+	d.kmu.Lock()
+	d.pending = key
+	d.kmu.Unlock()
+	d.mPending.Set("", 1)
+	fp := keys.Fingerprint(&key.PublicKey)
+	if created {
+		d.log.Info("generated the next identity key", "fingerprint", fp)
+	}
+	return fp, nil
+}
+
+// loadPendingKey picks up the next key from the state directory, where
+// "ergosumd request -new-key" puts it while the service runs, and forgets it
+// if the file is gone.
+func (d *Daemon) loadPendingKey() *ecdsa.PrivateKey {
+	d.kmu.Lock()
+	defer d.kmu.Unlock()
+	key, err := keys.Load(d.keyPath() + pendingSuffix)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if d.pending != nil {
+			d.log.Info("the next key is gone; keeping the current key")
+		}
+		d.pending = nil
+		d.mPending.Set("", 0)
+		return nil
+	case err != nil:
+		d.log.Warn("cannot read the next key; keeping the current key", "err", err)
+		return nil
+	case d.pending != nil && d.pending.Equal(key):
+		return d.pending
+	}
+	d.pending = key
+	d.mPending.Set("", 1)
+	d.log.Info("found the next key; it waits for its binding", "next", keys.Fingerprint(&key.PublicKey))
+	return key
+}
+
+// adoptPendingKey switches to the next key once an authority shows a
+// binding to it, and deletes the old key. Until then the daemon keeps its
+// current key, so that it never sends a request that the authorities refuse
+// as foreign_key.
+func (d *Daemon) adoptPendingKey(ctx context.Context) {
+	next := d.loadPendingKey()
+	if next == nil {
+		return
+	}
+	want := keys.Fingerprint(&next.PublicKey)
+	bound, err := d.boundKey(ctx)
+	if err != nil {
+		d.log.Warn("cannot read the binding; keeping the current key", "err", err)
+		return
+	}
+	if bound != want {
+		d.log.Info("the next key waits for its binding", "next", want, "bound", bound)
+		return
+	}
+	cert, err := tlspin.Certificate(next)
+	if err != nil {
+		d.log.Error("switching keys failed", "err", err)
+		return
+	}
+	if err := os.Rename(d.keyPath()+pendingSuffix, d.keyPath()); err != nil {
+		d.log.Error("switching keys failed", "err", err)
+		return
+	}
+	d.kmu.Lock()
+	d.key, d.cert, d.pending = next, cert, nil
+	d.kmu.Unlock()
+	d.mPending.Set("", 0)
+	d.log.Info("switched to the next key, which the binding names now; the old key is deleted", "fingerprint", want)
+}
+
+// boundKey returns the key of the identity's active binding, as the first
+// reachable authority shows it, or "" if it has none.
+func (d *Daemon) boundKey(ctx context.Context) (string, error) {
+	var errs []error
+	n := len(d.authorities)
+	for i := 0; i < n; i++ {
+		a := d.authorities[(d.preferred+i)%n]
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.url+protocol.PathBindings+"/"+d.cfg.Identity, http.NoBody)
+		if err != nil {
+			return "", err
+		}
+		resp, err := a.client.Do(req)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
+		case resp.StatusCode == http.StatusNotFound:
+			return "", nil
+		case resp.StatusCode != http.StatusOK:
+			errs = append(errs, fmt.Errorf("%s: %s", a.url, resp.Status))
+		default:
+			var b struct{ Kind, Key string }
+			if err := json.Unmarshal(data, &b); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
+				continue
+			}
+			if b.Kind != "binding.set" {
+				return "", nil
+			}
+			return b.Key, nil
+		}
+	}
+	return "", errors.Join(errs...)
+}
 
 // CallbackCount returns how many callbacks were answered with status.
 func (d *Daemon) CallbackCount(status string) float64 { return d.mCallbacks.Get(status) }
@@ -148,9 +314,10 @@ func (d *Daemon) CallbackCount(status string) float64 { return d.mCallbacks.Get(
 // Run obtains a token, writes it and renews it from half its lifetime on,
 // until ctx ends.
 func (d *Daemon) Run(ctx context.Context) error {
-	d.log.Info("starting", "identity", d.cfg.Identity, "fingerprint", d.Fingerprint())
+	d.log.Info("starting", "identity", d.cfg.Identity, "fingerprint", d.Fingerprint(), "next_key", d.PendingFingerprint())
 	bo := backoff{base: 5 * time.Second, max: 5 * time.Minute}
 	for {
+		d.adoptPendingKey(ctx)
 		token, claims, err := d.Obtain(ctx)
 		var wait time.Duration
 		if err == nil {
@@ -263,12 +430,13 @@ func (d *Daemon) request(ctx context.Context, a *authorityClient) (string, jwt.C
 	id := protocol.NewRequestID()
 	d.inflight.add(id, a.pin)
 	defer d.inflight.remove(id)
+	key, _ := d.identity()
 	req := protocol.TokenRequest{
 		V: protocol.Version, Type: protocol.TypeTokenRequest, Identity: d.cfg.Identity,
 		RequestID: id, Timestamp: d.now().UTC(), Addresses: d.addresses(),
-		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&d.key.PublicKey)),
+		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&key.PublicKey)),
 	}
-	env, err := protocol.Seal(d.key, protocol.ContextRequest, req)
+	env, err := protocol.Seal(key, protocol.ContextRequest, req)
 	if err != nil {
 		return "", jwt.Claims{}, err
 	}
@@ -321,8 +489,14 @@ func (d *Daemon) request(ctx context.Context, a *authorityClient) (string, jwt.C
 	return tr.Token, claims, nil
 }
 
+// maxSkewRound is the longest request round whose answer still yields a
+// clock skew estimate. The estimate assumes the authority answered in the
+// middle of the round; a long round (callbacks that time out, a refused
+// request) can be off by half its length.
+const maxSkewRound = 10 * time.Second
+
 func (d *Daemon) observeSkew(server, sent, received time.Time) {
-	if server.IsZero() {
+	if server.IsZero() || received.Sub(sent) > maxSkewRound {
 		return
 	}
 	mid := sent.Add(received.Sub(sent) / 2)
@@ -335,6 +509,28 @@ func (d *Daemon) addresses() []string {
 	if len(d.cfg.Addresses) > 0 {
 		return d.cfg.Addresses
 	}
+	cands := d.detectAddresses()
+	out, truncated := pickAddresses(cands)
+	if truncated {
+		d.addrWarn.Do(func() {
+			d.log.Warn("more underlay addresses than a request can carry; set addresses: in the configuration if the bound network is missing",
+				"detected", len(cands), "reported", len(out))
+		})
+	}
+	return out
+}
+
+// ifaceAddr is a detected address with the interface it belongs to.
+type ifaceAddr struct {
+	addr   string
+	iface  string
+	index  int
+	prefix netip.Prefix // the network of the address on that interface
+}
+
+// detectAddresses lists the global unicast addresses outside the overlay on
+// the interfaces that are up.
+func (d *Daemon) detectAddresses() []ifaceAddr {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
@@ -361,24 +557,14 @@ func (d *Daemon) addresses() []string {
 			if !ip.IsGlobalUnicast() || protocol.InPrefixes(ip, d.overlay) {
 				continue
 			}
-			cands = append(cands, ifaceAddr{addr: ip.String(), iface: ifc.Name, index: ifc.Index})
+			ones, _ := ipn.Mask.Size()
+			if ip.Is4() && ones > 32 {
+				ones -= 96
+			}
+			cands = append(cands, ifaceAddr{addr: ip.String(), iface: ifc.Name, index: ifc.Index, prefix: netip.PrefixFrom(ip, ones).Masked()})
 		}
 	}
-	out, truncated := pickAddresses(cands)
-	if truncated {
-		d.addrWarn.Do(func() {
-			d.log.Warn("more underlay addresses than a request can carry; set addresses: in the configuration if the bound network is missing",
-				"detected", len(cands), "reported", len(out))
-		})
-	}
-	return out
-}
-
-// ifaceAddr is a detected address with the interface it belongs to.
-type ifaceAddr struct {
-	addr  string
-	iface string
-	index int
+	return cands
 }
 
 // virtualInterfacePrefixes name interfaces of containers, hypervisor bridges
@@ -395,10 +581,9 @@ func virtualInterface(name string) bool {
 	return false
 }
 
-// pickAddresses orders the candidates (physical-looking interfaces first,
-// then by interface index), drops duplicates and cuts the list at the
-// protocol's limit. truncated reports whether addresses were left out.
-func pickAddresses(cands []ifaceAddr) (out []string, truncated bool) {
+// orderAddresses puts physical-looking interfaces first, then orders by
+// interface index.
+func orderAddresses(cands []ifaceAddr) {
 	sort.SliceStable(cands, func(i, j int) bool {
 		vi, vj := virtualInterface(cands[i].iface), virtualInterface(cands[j].iface)
 		if vi != vj {
@@ -406,6 +591,13 @@ func pickAddresses(cands []ifaceAddr) (out []string, truncated bool) {
 		}
 		return cands[i].index < cands[j].index
 	})
+}
+
+// pickAddresses orders the candidates (see orderAddresses), drops
+// duplicates and cuts the list at the protocol's limit. truncated reports
+// whether addresses were left out.
+func pickAddresses(cands []ifaceAddr) (out []string, truncated bool) {
+	orderAddresses(cands)
 	out = make([]string, 0, min(len(cands), protocol.MaxAddresses))
 	seen := map[string]bool{}
 	for _, c := range cands {
@@ -439,7 +631,8 @@ func (d *Daemon) acquireListener() error {
 	for _, a := range d.cfg.Authorities {
 		pins = append(pins, a.Key)
 	}
-	tcfg := tlspin.ServerConfig(d.cert, tlspin.Fingerprints(pins...))
+	_, cert := d.identity()
+	tcfg := tlspin.ServerConfig(cert, tlspin.Fingerprints(pins...))
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+protocol.PathCallback, d.handleCallback)
 	srv := &http.Server{Handler: mux, TLSConfig: tcfg, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second}
@@ -488,7 +681,8 @@ func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 		RequestID: cb.RequestID, Nonce: cb.Nonce, Target: cb.Target, Authority: cb.Authority,
 		Timestamp: d.now().UTC(),
 	}
-	env, err := protocol.Seal(d.key, protocol.ContextCallbackResponse, resp)
+	key, _ := d.identity()
+	env, err := protocol.Seal(key, protocol.ContextCallbackResponse, resp)
 	if err != nil {
 		http.Error(w, "signing failed", http.StatusInternalServerError)
 		return

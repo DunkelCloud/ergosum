@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
 	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
+	"github.com/DunkelCloud/ergosum/internal/sshsig"
 )
 
 const td = "example.com"
@@ -224,63 +226,73 @@ func TestApprovals(t *testing.T) {
 }
 
 func TestOrderingRule(t *testing.T) {
+	set := func(epoch uint64, hash string) *journal.Binding {
+		return &journal.Binding{Kind: journal.KindBindingSet, Epoch: epoch, Hash: hash}
+	}
+	revoked := &journal.Binding{Kind: journal.KindBindingRevoked, Epoch: 5, Hash: "ff"}
+	for _, c := range []struct {
+		name string
+		a, b *journal.Binding
+	}{
+		{"higher epoch", set(6, "ff"), set(5, "00")},
+		{"revocation at the same epoch", revoked, set(5, "00")},
+		{"smaller hash at the same epoch", set(5, "0a"), set(5, "0b")},
+	} {
+		if !journal.Wins(c.a, c.b) || journal.Wins(c.b, c.a) {
+			t.Errorf("%s: wrong winner", c.name)
+		}
+	}
+}
+
+// TestWriteNeedsHigherEpoch: the write API takes only events above the
+// current epoch, so that an administrator's change made against one binding
+// never replaces another change unnoticed, not even one it would win
+// against.
+func TestWriteNeedsHigherEpoch(t *testing.T) {
 	ctx := context.Background()
 	admins := jt.NewAdmins(t, "alice")
 	s := newStore(t, admins, 1)
 	id := "host1.example.com"
 
-	a := admins.Sign(t, jt.Set(td, id, 5, fingerprint(t), tailnet), "alice")
-	b := admins.Sign(t, jt.Set(td, id, 5, fingerprint(t), tailnet), "alice")
-	ha, _ := a.Hash()
-	hb, _ := b.Hash()
-	small, large := a, b
-	if hb < ha {
-		small, large = b, a
-	}
-	// The larger hash first, then the smaller one replaces it.
-	if _, err := s.AppendBinding(ctx, large); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.AppendBinding(ctx, small); err != nil {
+	first := admins.Sign(t, jt.Set(td, id, 5, fingerprint(t), tailnet), "alice")
+	if _, err := s.AppendBinding(ctx, first); err != nil {
 		t.Fatal(err)
 	}
 	cur, _ := s.Binding(ctx, id)
-	if cur.Key != small.Key {
-		t.Fatal("same epoch: smaller hash did not win")
-	}
-	// Re-submitting the losing event is idempotent and changes nothing.
-	again := admins.Sign(t, jt.Set(td, id, 5, large.Key, tailnet), "alice")
+	// Re-submitting the event is idempotent.
+	again := admins.Sign(t, jt.Set(td, id, 5, first.Key, tailnet), "alice")
 	if r, err := s.AppendBinding(ctx, again); err != nil || !r.Duplicate {
 		t.Fatalf("resubmission: %+v %v", r, err)
 	}
-	if cur, _ = s.Binding(ctx, id); cur.Key != small.Key {
-		t.Fatal("resubmitted loser changed the projection")
-	}
-	// A new same-epoch event with a larger hash than the current one is
-	// rejected.
+	// Another event at the same epoch is refused, also one with a smaller
+	// hash and a revocation, which would both win in the ordering rule.
 	for {
 		c := admins.Sign(t, jt.Set(td, id, 5, fingerprint(t), tailnet), "alice")
-		if h, _ := c.Hash(); h > cur.Hash {
-			if _, err := s.AppendBinding(ctx, c); !errors.Is(err, journal.ErrSuperseded) {
-				t.Fatalf("got %v", err)
+		if h, _ := c.Hash(); h < cur.Hash {
+			if _, err := s.AppendBinding(ctx, c); !errors.Is(err, journal.ErrEpochTaken) {
+				t.Fatalf("same epoch, smaller hash: %v", err)
 			}
 			break
 		}
 	}
-	// A revocation at the same epoch wins over the binding.
-	if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Revoke(td, id, 5), "alice")); err != nil {
+	if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Revoke(td, id, 5), "alice")); !errors.Is(err, journal.ErrEpochTaken) {
+		t.Fatalf("revocation at the same epoch: %v", err)
+	}
+	if b, _ := s.Binding(ctx, id); b.Hash != cur.Hash {
+		t.Fatal("a refused event changed the projection")
+	}
+	// A revocation at the next epoch, then a new binding re-enrolls.
+	if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Revoke(td, id, 6), "alice")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := s.Binding(ctx, id); b.Active() {
+		t.Fatal("revocation did not end the binding")
+	}
+	if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Set(td, id, 7, fingerprint(t), tailnet), "alice")); err != nil {
 		t.Fatal(err)
 	}
 	cur, _ = s.Binding(ctx, id)
-	if cur.Active() {
-		t.Fatal("same epoch: revocation did not win")
-	}
-	// A new binding at a higher epoch re-enrolls.
-	if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Set(td, id, 6, fingerprint(t), tailnet), "alice")); err != nil {
-		t.Fatal(err)
-	}
-	cur, _ = s.Binding(ctx, id)
-	if !cur.Active() || cur.Epoch != 6 {
+	if !cur.Active() || cur.Epoch != 7 {
 		t.Fatalf("re-enrollment: %+v", cur)
 	}
 
@@ -292,6 +304,54 @@ func TestOrderingRule(t *testing.T) {
 	all, _ := s.Bindings(ctx)
 	if len(ref) != len(all) || ref[id].Hash != all[id].Hash {
 		t.Fatalf("projection drift: %+v vs %+v", ref[id], all[id])
+	}
+}
+
+// TestListAndSigners: the read side for administrators lists every
+// identity in order, keeps the approving signatures of the winner and names
+// its signers, by registry name or, for a key the registry no longer knows,
+// by fingerprint.
+func TestListAndSigners(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice", "bob", "carol")
+	s := newStore(t, admins, 2)
+	for _, id := range []string{"host2.example.com", "host1.example.com"} {
+		if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Set(td, id, 1, fingerprint(t), tailnet), "bob", "alice")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := s.List(ctx)
+	if err != nil || len(list) != 2 || list[0].Identity != "host1.example.com" || list[1].Identity != "host2.example.com" {
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	e, err := s.BindingEvent(ctx, "host1.example.com")
+	if err != nil || e == nil || len(e.Signatures) != 2 {
+		t.Fatalf("event: %+v %v", e, err)
+	}
+	if got := s.Registry().SignerNames(e); strings.Join(got, ",") != "alice,bob" {
+		t.Fatalf("signers %v", got)
+	}
+	if e, _ := s.BindingEvent(ctx, "host3.example.com"); e != nil {
+		t.Fatal("event for an unknown identity")
+	}
+	ap := s.Registry().Approvals()[journal.KindBindingSet]
+	if ap.Threshold != 2 || len(ap.Admins) != 3 || ap.Admins["alice"] != sshsig.Fingerprint(admins.Signers["alice"].PublicKey()) {
+		t.Fatalf("approvals %+v", ap)
+	}
+	// A registry without bob names him by fingerprint.
+	cfg := admins.Registry(1)
+	delete(cfg.Admins, "bob")
+	for k, a := range cfg.Approvals {
+		a.Keys = []string{"alice", "carol"}
+		cfg.Approvals[k] = a
+	}
+	reg, err := journal.NewRegistry(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reg.SignerNames(e)
+	if len(got) != 2 || !slices.Contains(got, "alice") || !slices.Contains(got, sshsig.Fingerprint(admins.Signers["bob"].PublicKey())) {
+		t.Fatalf("signers after bob left: %v", got)
 	}
 }
 

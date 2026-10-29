@@ -56,7 +56,7 @@ jobs:
     # The real binaries in Linux network namespaces: sealed start and
     # unseal, an SSH-signed binding, issuance with a net check, and a clone
     # in another segment that is refused; then three instances replicating
-    # the journal: four-eyes approval with ergosum bind and sign, catch-up
+    # the journal: four-eyes approval with ergosum bind, catch-up
     # after an outage, convergence after a partition, compaction, and a new
     # instance built from a sync.
     runs-on: ubuntu-latest
@@ -107,7 +107,14 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        goarch: [amd64, arm64]
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          # Administrators' machines need only the administrator tool.
+          - {goos: windows, goarch: amd64, admin: true}
+          - {goos: windows, goarch: arm64, admin: true}
+          - {goos: darwin, goarch: amd64, admin: true}
+          - {goos: darwin, goarch: arm64, admin: true}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -116,14 +123,18 @@ jobs:
       - name: Build static binaries
         env:
           CGO_ENABLED: "0"
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          ADMIN_ONLY: ${{ matrix.admin }}
         run: |
           mkdir -p dist
           LDFLAGS="-s -w -X github.com/DunkelCloud/ergosum/internal/version.Version=${GITHUB_REF_NAME} -X github.com/DunkelCloud/ergosum/internal/version.Commit=${GITHUB_SHA}"
-          go build -trimpath -ldflags "${LDFLAGS}" -o dist/ergosumd ./cmd/ergosumd
-          go build -trimpath -ldflags "${LDFLAGS}" -o dist/ergosum ./cmd/ergosum
+          EXT=""
+          [ "$GOOS" = windows ] && EXT=.exe
+          go build -trimpath -ldflags "${LDFLAGS}" -o "dist/ergosum${EXT}" ./cmd/ergosum
+          [ "$ADMIN_ONLY" = true ] || go build -trimpath -ldflags "${LDFLAGS}" -o dist/ergosumd ./cmd/ergosumd
       - name: Check that the binaries are static
+        if: matrix.goos == 'linux'
         run: |
           for b in dist/*; do
             file "$b"
@@ -131,7 +142,7 @@ jobs:
           done
       - uses: actions/upload-artifact@v5
         with:
-          name: ergosum-linux-${{ matrix.goarch }}
+          name: ergosum-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
           retention-days: 14
 

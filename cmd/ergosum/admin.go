@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/DunkelCloud/ergosum/internal/admin"
-	"github.com/DunkelCloud/ergosum/internal/journal"
+	"github.com/DunkelCloud/ergosum/internal/keys"
 )
 
 // multiFlag collects a repeated flag.
@@ -23,16 +24,13 @@ type multiFlag []string
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(s string) error { *m = append(*m, s); return nil }
 
-// adminFlags are the flags that bind, revoke and sign share.
+// adminFlags are the flags that the administrator commands share.
 type adminFlags struct {
 	config       string
 	authority    string
 	authorityKey string
-	trustDomain  string
 	signKey      string
 	keygen       string
-	out          string
-	submit       bool
 	yes          bool
 }
 
@@ -46,16 +44,15 @@ func defaultAdminConfig() string {
 	return ""
 }
 
-func (f *adminFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.config, "config", defaultAdminConfig(), "administrator configuration (trust_domain, authorities)")
+func (f *adminFlags) register(fs *flag.FlagSet, signs bool) {
+	fs.StringVar(&f.config, "config", defaultAdminConfig(), "administrator configuration (authorities, sign_key)")
 	fs.StringVar(&f.authority, "authority", "", "authority URL, instead of the configured ones")
 	fs.StringVar(&f.authorityKey, "authority-key", "", "key fingerprint of -authority (SHA256:...)")
-	fs.StringVar(&f.trustDomain, "trust-domain", "", "trust domain, instead of the configured one")
-	fs.StringVar(&f.signKey, "sign-key", "", "sign with this key: private key file, security key handle, or public key held by ssh-agent")
-	fs.StringVar(&f.keygen, "ssh-keygen", "ssh-keygen", "ssh-keygen program")
-	fs.StringVar(&f.out, "out", "", "event file to write (\"-\" for stdout)")
-	fs.BoolVar(&f.submit, "submit", false, "write the event to the first reachable authority")
-	fs.BoolVar(&f.yes, "yes", false, "sign without asking")
+	if signs {
+		fs.StringVar(&f.signKey, "sign-key", "", "sign with this key instead of sign_key: public key held by ssh-agent, or private key file")
+		fs.StringVar(&f.keygen, "ssh-keygen", "ssh-keygen", "ssh-keygen program, for private key files")
+		fs.BoolVar(&f.yes, "yes", false, "sign without asking")
+	}
 }
 
 // load reads the configuration; a missing default file is not an error.
@@ -74,193 +71,155 @@ func (f *adminFlags) load() (admin.Config, error) {
 	if f.authority != "" {
 		cfg.Authorities = []admin.Authority{{URL: f.authority, Key: f.authorityKey}}
 	}
-	if f.trustDomain != "" {
-		cfg.TrustDomain = f.trustDomain
+	if f.signKey != "" {
+		cfg.SignKey = f.signKey
 	}
 	return cfg, nil
 }
 
-func (f *adminFlags) client(cfg admin.Config) (*admin.Client, error) {
-	if len(cfg.Authorities) == 0 {
-		return nil, nil
+// tool builds the administrator tool from the flags and the configuration.
+func (f *adminFlags) tool() (*admin.Tool, error) {
+	cfg, err := f.load()
+	if err != nil {
+		return nil, err
 	}
-	return admin.NewClient(cfg)
+	if len(cfg.Authorities) == 0 {
+		if _, err := os.Stat(f.config); errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("no authority: the configuration %s does not exist; create it, point ERGOSUM_ADMIN_CONFIG or -config at one, or give -authority and -authority-key", f.config)
+		}
+		return nil, fmt.Errorf("no authority: configure one in %s or give -authority and -authority-key", f.config)
+	}
+	client, err := admin.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	t := &admin.Tool{Client: client, TrustDomain: cfg.TrustDomain, Out: os.Stderr}
+	if cfg.SignKey != "" {
+		if t.Key, err = admin.LoadSignKey(cfg.SignKey, f.keygen); err != nil {
+			return nil, err
+		}
+	}
+	if !f.yes {
+		t.Confirm = confirm
+	}
+	return t, nil
 }
 
 func adminContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Minute)
 }
 
-// bindOrRevoke implements "ergosum bind" and "ergosum revoke".
-func bindOrRevoke(kind string, args []string) error {
-	fs := flag.NewFlagSet(strings.TrimPrefix(kind, "binding."), flag.ExitOnError)
+// bind implements "ergosum bind FILE".
+func bind(args []string) error {
+	fs := flag.NewFlagSet("bind", flag.ExitOnError)
 	var af adminFlags
-	af.register(fs)
-	identity := fs.String("identity", "", "identity (lower-case DNS name)")
-	epoch := fs.Uint64("epoch", 0, "epoch; default: the current epoch plus one, read from an authority")
-	var key string
-	var checks multiFlag
-	if kind == journal.KindBindingSet {
-		fs.StringVar(&key, "key", "", "daemon key fingerprint (from \"ergosumd fingerprint\")")
-		fs.Var(&checks, "check", "callback check type:target, repeatable (tailnet:NAME, ip:ADDR[:PORT], net:PREFIX)")
+	af.register(fs, true)
+	text := fs.String("text", "", "complete FILE and write the text to sign to this file, for signing by hand; no signature")
+	fs.Usage = func() {
+		_, _ = fmt.Fprintf(fs.Output(), `usage: ergosum bind [flags] FILE
+
+Takes a binding file one step further: adds kind, trust domain and the next
+epoch, shows the text to sign and what changes, signs with your key, and
+records the event once enough administrators have signed. The next
+administrator runs the same command on the same file.
+
+`)
+		fs.PrintDefaults()
 	}
+	_ = fs.Parse(args)
+	if fs.NArg() != 1 {
+		fs.Usage()
+		os.Exit(2)
+	}
+	t, err := af.tool()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := adminContext()
+	defer cancel()
+	if *text != "" {
+		return t.Text(ctx, fs.Arg(0), *text)
+	}
+	return t.Bind(ctx, fs.Arg(0))
+}
+
+// revoke implements "ergosum revoke NAME".
+func revoke(args []string) error {
+	fs := flag.NewFlagSet("revoke", flag.ExitOnError)
+	var af adminFlags
+	af.register(fs, true)
+	out := fs.String("out", "", "revocation file to write (default NAME.revoke.txt)")
+	_ = fs.Parse(args)
+	if fs.NArg() != 1 {
+		return errors.New("usage: ergosum revoke [flags] NAME")
+	}
+	t, err := af.tool()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := adminContext()
+	defer cancel()
+	return t.Revoke(ctx, fs.Arg(0), *out)
+}
+
+// show implements "ergosum show NAME".
+func show(args []string) error {
+	fs := flag.NewFlagSet("show", flag.ExitOnError)
+	var af adminFlags
+	af.register(fs, false)
+	out := fs.String("out", "", "write to this file instead of stdout (must not exist)")
+	_ = fs.Parse(args)
+	if fs.NArg() != 1 {
+		return errors.New("usage: ergosum show [flags] NAME")
+	}
+	t, err := af.tool()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := adminContext()
+	defer cancel()
+	if *out == "" {
+		return t.Show(ctx, fs.Arg(0), os.Stdout)
+	}
+	if _, err := os.Stat(*out); err == nil {
+		return fmt.Errorf("%s exists", *out)
+	}
+	var b strings.Builder
+	if err := t.Show(ctx, fs.Arg(0), &b); err != nil {
+		return err
+	}
+	return keys.WriteFileAtomic(*out, []byte(b.String()), 0o644) //nolint:gosec // holds no secret
+}
+
+// list implements "ergosum list".
+func list(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	var af adminFlags
+	af.register(fs, false)
 	_ = fs.Parse(args)
 	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected arguments: %v", fs.Args())
+		return errors.New("usage: ergosum list [flags]")
 	}
-	cfg, err := af.load()
+	t, err := af.tool()
 	if err != nil {
 		return err
-	}
-	if cfg.TrustDomain == "" {
-		return errors.New("no trust domain: set trust_domain in the configuration or give -trust-domain")
-	}
-	client, err := af.client(cfg)
-	if err != nil {
-		return err
-	}
-	var cs []journal.Check
-	for _, c := range checks {
-		ch, err := admin.ParseCheck(c)
-		if err != nil {
-			return err
-		}
-		cs = append(cs, ch)
 	}
 	ctx, cancel := adminContext()
 	defer cancel()
-	e, cur, err := admin.NewEvent(ctx, client, kind, cfg.TrustDomain, *identity, *epoch, key, cs)
-	if err != nil {
-		return err
-	}
-	if cur != nil {
-		fmt.Fprintf(os.Stderr, "current: %s at epoch %d (key %s)\n", cur.Kind, cur.Epoch, orNone(cur.Key))
-	}
-	out := af.out
-	if out == "" {
-		out = fmt.Sprintf("%s.epoch%d.json", e.Identity, e.Epoch)
-	}
-	return signWriteSubmit(ctx, &af, client, e, out)
-}
-
-func orNone(s string) string {
-	if s == "" {
-		return "none"
-	}
-	return s
-}
-
-// sign implements "ergosum sign": merge the signatures of event files,
-// optionally add one, write and submit.
-func sign(args []string) error {
-	fs := flag.NewFlagSet("sign", flag.ExitOnError)
-	var af adminFlags
-	af.register(fs)
-	_ = fs.Parse(args)
-	if fs.NArg() == 0 {
-		return errors.New("usage: ergosum sign [flags] EVENT.json [MORE.json...]")
-	}
-	var events []*journal.BindingEvent
-	for _, p := range fs.Args() {
-		e, err := admin.ReadEvent(p)
-		if err != nil {
-			return err
-		}
-		events = append(events, e)
-	}
-	e, err := admin.Merge(events...)
-	if err != nil {
-		return err
-	}
-	cfg, err := af.load()
-	if err != nil {
-		return err
-	}
-	var client *admin.Client
-	if af.submit {
-		if client, err = af.client(cfg); err != nil {
-			return err
-		}
-	}
-	// Without -out the result goes back to the first file, unless the call
-	// only submits one event unchanged: then there is nothing to write, and
-	// the file may sit where it cannot be written.
-	out := af.out
-	if out == "" && (fs.NArg() > 1 || af.signKey != "" || !af.submit) {
-		out = fs.Arg(0)
-	}
-	ctx, cancel := adminContext()
-	defer cancel()
-	return signWriteSubmit(ctx, &af, client, e, out)
-}
-
-func signWriteSubmit(ctx context.Context, af *adminFlags, client *admin.Client, e *journal.BindingEvent, out string) error {
-	canonical, err := e.Canonical()
-	if err != nil {
-		return err
-	}
-	signers, err := admin.Signers(e)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "\n%s\n", indent(string(canonical)))
-	for _, s := range signers {
-		fmt.Fprintf(os.Stderr, "signed by %s\n", s)
-	}
-	if af.signKey != "" {
-		if !af.yes {
-			if err := confirm("Sign this event?"); err != nil {
-				return err
-			}
-		}
-		fp, err := admin.AddSignature(ctx, e, admin.SSHKeygen(af.keygen, af.signKey))
-		switch {
-		case errors.Is(err, admin.ErrAlreadySigned):
-			fmt.Fprintf(os.Stderr, "%s has signed already\n", fp)
-		case err != nil:
-			return err
-		default:
-			fmt.Fprintf(os.Stderr, "signed by %s\n", fp)
-		}
-	}
-	if out != "" {
-		if err := admin.WriteEvent(out, e); err != nil {
-			return err
-		}
-		if out != "-" {
-			fmt.Fprintf(os.Stderr, "event written to %s (%d signatures)\n", out, len(e.Signatures))
-		}
-	}
-	if !af.submit {
-		return nil
-	}
-	if client == nil {
-		return errors.New("-submit needs an authority: configure one or give -authority and -authority-key")
-	}
-	r, from, err := client.Submit(ctx, e)
-	if err != nil {
-		return err
-	}
-	verb := "recorded"
-	if r.Duplicate {
-		verb = "already recorded"
-	}
-	fmt.Fprintf(os.Stderr, "%s by %s as %s/%d\n", verb, from, r.Origin, r.Seq)
-	return nil
-}
-
-func indent(s string) string {
-	return "    " + strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", "\n    ")
+	return t.List(ctx, os.Stdout)
 }
 
 // confirm asks on the terminal; without one, signing needs -yes.
 func confirm(question string) error {
 	fd := int(os.Stdin.Fd()) //nolint:gosec // file descriptors fit in int
 	if !term.IsTerminal(fd) {
-		return errors.New("not a terminal: read the event above and sign with -yes")
+		return errors.New("not a terminal: read the text above and sign with -yes")
 	}
-	fmt.Fprintf(os.Stderr, "%s [y/N] ", question)
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Fprintf(os.Stderr, "\n%s [y/N] ", question)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
 	if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
 		return errors.New("not signed")
 	}

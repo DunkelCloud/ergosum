@@ -36,7 +36,7 @@ func (a *Authority) handleBindingWrite(w http.ResponseWriter, r *http.Request) {
 				"identity", e.Identity, "epoch", e.Epoch, "remote", r.RemoteAddr, "reason", err.Error())
 		}
 		status, code := http.StatusUnprocessableEntity, protocol.ErrRejected
-		if errors.Is(err, journal.ErrLowerEpoch) || errors.Is(err, journal.ErrSuperseded) {
+		if errors.Is(err, journal.ErrLowerEpoch) || errors.Is(err, journal.ErrEpochTaken) {
 			status, code = http.StatusConflict, protocol.ErrConflict
 		}
 		a.writeError(w, status, code, err.Error())
@@ -56,7 +56,8 @@ func (a *Authority) handleBindingWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBindingRead returns the current projection of one identity, for
-// tooling that needs the current epoch.
+// tooling that needs the current epoch, and for daemons that wait for the
+// binding of a new key. It names the administrators who approved it.
 func (a *Authority) handleBindingRead(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("identity")
 	if !protocol.ValidDNSName(id) {
@@ -72,5 +73,28 @@ func (a *Authority) handleBindingRead(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusNotFound, "not_found", "")
 		return
 	}
+	e, err := a.store.BindingEvent(r.Context(), id)
+	if err != nil {
+		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "")
+		return
+	}
+	if e != nil {
+		b.SignedBy = a.store.Registry().SignerNames(e)
+	}
 	writeJSON(w, http.StatusOK, b)
+}
+
+// handleBindingList returns the projection of every identity and the
+// approvals the registry demands, for administrator tooling. Bindings are
+// no secret: the same is readable identity by identity.
+func (a *Authority) handleBindingList(w http.ResponseWriter, r *http.Request) {
+	bs, err := a.store.List(r.Context())
+	if err != nil {
+		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "")
+		return
+	}
+	writeJSON(w, http.StatusOK, journal.BindingList{
+		V: protocol.Version, TrustDomain: a.store.TrustDomain(),
+		Approvals: a.store.Registry().Approvals(), Bindings: bs,
+	})
 }

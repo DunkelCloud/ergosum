@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/daemon"
 	"github.com/DunkelCloud/ergosum/internal/version"
@@ -21,8 +22,12 @@ const defaultConfig = "/etc/ergosum/ergosumd.yaml"
 func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
   ergosumd run [-config %[1]s] [-log-format json|text]
+  ergosumd request [-config %[1]s] [-new-key] [-out FILE]
   ergosumd fingerprint [-config %[1]s]
   ergosumd version
+
+Run request and fingerprint as the service user (sudo -u ergosum ...):
+they create the key on first use.
 `, defaultConfig)
 }
 
@@ -37,6 +42,8 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		err = run(os.Args[2:])
+	case "request":
+		err = request(os.Args[2:])
 	case "fingerprint":
 		err = fingerprint(os.Args[2:])
 	case "version":
@@ -77,6 +84,38 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return d.Run(ctx)
+}
+
+// request writes a binding request for this machine, for an administrator
+// to complete with "ergosum bind".
+func request(args []string) error {
+	fs := flag.NewFlagSet("request", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConfig, "configuration file")
+	newKey := fs.Bool("new-key", false, "request a binding for a new key; the daemon keeps the current key until the binding names the new one")
+	out := fs.String("out", "", "write the request to this file (must not exist) instead of stdout")
+	_ = fs.Parse(args)
+	cfg, err := daemon.LoadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if *out != "" {
+		if _, err := os.Stat(*out); err == nil {
+			return fmt.Errorf("%s exists", *out)
+		}
+	}
+	d, err := daemon.New(cfg, daemon.Options{Logger: slog.New(slog.NewTextHandler(os.Stderr, nil))})
+	if err != nil {
+		return err
+	}
+	text, err := d.Request(context.Background(), *newKey, time.Now())
+	if err != nil {
+		return err
+	}
+	if *out == "" {
+		_, err = os.Stdout.Write(text)
+		return err
+	}
+	return os.WriteFile(*out, text, 0o644) //nolint:gosec // holds no secret
 }
 
 // fingerprint prints the identity key fingerprint, creating the key on

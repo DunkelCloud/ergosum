@@ -220,26 +220,33 @@ func parsePKCS8(der []byte) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
+// Load loads an unencrypted private key from path, which must not be
+// readable by others.
+func Load(path string) (*ecdsa.PrivateKey, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path comes from operator configuration
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPrivateMode(path); err != nil {
+		return nil, err
+	}
+	kf, err := ParseKeyFile(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if kf.Encrypted() {
+		return nil, fmt.Errorf("%s: encrypted keys are not supported here", path)
+	}
+	return kf.Key, nil
+}
+
 // LoadOrCreate loads an unencrypted private key from path or, if the file
 // does not exist, generates one and writes it with mode 0600. created
 // reports whether a new key was generated.
 func LoadOrCreate(path string) (key *ecdsa.PrivateKey, created bool, err error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path comes from operator configuration
-	if err == nil {
-		if err := checkPrivateMode(path); err != nil {
-			return nil, false, err
-		}
-		kf, err := ParseKeyFile(data)
-		if err != nil {
-			return nil, false, fmt.Errorf("%s: %w", path, err)
-		}
-		if kf.Encrypted() {
-			return nil, false, fmt.Errorf("%s: encrypted keys are not supported here", path)
-		}
-		return kf.Key, false, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, false, err
+	key, err = Load(path)
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return key, false, err
 	}
 	key, err = Generate()
 	if err != nil {

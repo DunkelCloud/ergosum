@@ -10,8 +10,8 @@
 #            |
 #   198.51.100.2 --- 198.51.100.20 host1 (segment 198.51.100.0/24)
 #
-# Two administrators approve a binding at a with "ergosum bind" and
-# "ergosum sign" (ssh-keygen signatures, approvals 2); it replicates to b,
+# Two administrators approve a binding at a, each with "ergosum bind" on
+# the same file (ssh-keygen signatures, approvals 2); it replicates to b,
 # where host1 obtains its token. b misses events while it is down and
 # catches up; a partition between a and b with one event on each side
 # converges. a writes a checkpoint and compacts, and c, a new instance,
@@ -146,18 +146,18 @@ authorities:
 EOF
 export ERGOSUM_ADMIN_CONFIG=$W/admin.yaml
 ergosum_at() { local ns=$1; shift; in_ns "$ns" "$BIN/ergosum" "$@"; }
-# approve NS AUTHORITY_FP IDENTITY KEY CHECK [EPOCH]: alice and bob sign
-# separately, bob submits.
+# approve NS AUTHORITY_FP IDENTITY KEY TYPE:TARGET: alice and bob sign the
+# same binding file one after the other; the second signature records it.
 approve() {
-	local ns=$1 fp=$2 id=$3 key=$4 check=$5 epoch=${6:-0} ev="$W/event-$RANDOM.json"
+	local ns=$1 fp=$2 id=$3 key=$4 check=$5 f="$W/binding-$RANDOM.txt"
 	local at=(-authority https://127.0.0.1:7432 -authority-key "$fp")
-	ergosum_at "$ns" bind "${at[@]}" -identity "$id" -key "$key" -check "$check" -epoch "$epoch" \
-		-sign-key "$W/alice" -yes -out "$ev" 2>> "$W/admin.log"
-	if ergosum_at "$ns" sign "${at[@]}" -submit "$ev" 2>> "$W/admin.log"; then
-		fail "one approval of two was accepted"
-	fi
-	ergosum_at "$ns" sign "${at[@]}" -sign-key "$W/bob" -yes -submit "$ev" 2>> "$W/admin.log" \
+	printf 'identity %s\nkey %s\ncheck %s\n' "$id" "$key" "${check/:/ }" > "$f"
+	ergosum_at "$ns" bind "${at[@]}" -sign-key "$W/alice" -yes "$f" 2>> "$W/admin.log" \
+		|| { cat "$W/admin.log"; fail "alice could not sign the binding for $id"; }
+	grep -q '^# recorded' "$f" && fail "one approval of two was accepted"
+	ergosum_at "$ns" bind "${at[@]}" -sign-key "$W/bob" -yes "$f" 2>> "$W/admin.log" \
 		|| { cat "$W/admin.log"; fail "binding for $id not recorded"; }
+	grep -q '^# recorded' "$f" || { cat "$W/admin.log"; fail "binding for $id not recorded"; }
 }
 
 log "four-eyes binding at a, token from b"
@@ -193,8 +193,8 @@ wait_for "b caught up" same_state a b
 
 log "partition between a and b"
 in_ns a ip link set ab down
-approve a "${FP[a]}" host3.example.com "$OTHER_FP" tailnet:host3.tailnet.example.com 1
-approve b "${FP[b]}" host3.example.com "$HOST1_FP" tailnet:host3.tailnet.example.com 1
+approve a "${FP[a]}" host3.example.com "$OTHER_FP" tailnet:host3.tailnet.example.com
+approve b "${FP[b]}" host3.example.com "$HOST1_FP" tailnet:host3.tailnet.example.com
 same_state a b && fail "partitioned instances already agree"
 in_ns a ip link set ab up
 wait_for "convergence after the partition" same_state a b

@@ -325,6 +325,7 @@ type machineOptions struct {
 	addresses   []string
 	targets     []string
 	authorities []*env
+	tailnet     string // the overlay name a request proposes
 }
 
 // machine creates a daemon for identity, reachable under the given targets.
@@ -353,7 +354,13 @@ func (e *env) machine(identity string, o machineOptions) *machine {
 	for _, a := range o.authorities {
 		cfg.Authorities = append(cfg.Authorities, daemon.AuthorityConfig{URL: a.url, Key: a.fingerprint()})
 	}
-	d, err := daemon.New(cfg, daemon.Options{Logger: quietLogger(e.t), Listen: e.net.at(o.targets...)})
+	tailnet := func(context.Context) (string, error) {
+		if o.tailnet == "" {
+			return "", errors.New("not on a tailnet")
+		}
+		return o.tailnet, nil
+	}
+	d, err := daemon.New(cfg, daemon.Options{Logger: quietLogger(e.t), Listen: e.net.at(o.targets...), TailnetName: tailnet})
 	if err != nil {
 		e.t.Fatal(err)
 	}

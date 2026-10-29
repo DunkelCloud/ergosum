@@ -30,8 +30,8 @@ const (
 // Namespace is the SSHSIG namespace of admin signatures over binding events.
 const Namespace = "ergosum-binding"
 
-// canonicalHeader is the first line of the canonical form.
-const canonicalHeader = "ergosum binding v1"
+// CanonicalHeader is the first line of the canonical form.
+const CanonicalHeader = "ergosum binding v1"
 
 // Check is one callback check of a binding.
 type Check struct {
@@ -171,7 +171,7 @@ func (e *BindingEvent) Canonical() ([]byte, error) {
 	}
 	var b strings.Builder
 	line := func(k, v string) { b.WriteString(k + " " + v + "\n") }
-	b.WriteString(canonicalHeader + "\n")
+	b.WriteString(CanonicalHeader + "\n")
 	line("kind", e.Kind)
 	line("trust-domain", e.TrustDomain)
 	line("identity", e.Identity)
