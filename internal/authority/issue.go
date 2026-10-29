@@ -295,11 +295,12 @@ func (a *Authority) callback(ctx context.Context, pc plannedCheck, host string, 
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return a.net.Dial(ctx, pc.route, address)
 		},
-		TLSClientConfig:   tlspin.ClientConfig(&cert, tlspin.Fingerprints(keys.Fingerprint(pub))),
-		DisableKeepAlives: true,
+		TLSClientConfig:        tlspin.ClientConfig(&cert, tlspin.Fingerprints(keys.Fingerprint(pub))),
+		DisableKeepAlives:      true,
+		MaxResponseHeaderBytes: 16 << 10,
 	}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: a.cfg.Callbacks.Timeout}
+	client := &http.Client{Transport: transport, Timeout: a.cfg.Callbacks.Timeout, CheckRedirect: tlspin.NoRedirect}
 
 	cb := protocol.Callback{
 		V: protocol.Version, Type: protocol.TypeCallback, RequestID: req.RequestID,

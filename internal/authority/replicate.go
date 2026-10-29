@@ -147,7 +147,7 @@ func (a *Authority) peerClient(name string) *http.Client {
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     time.Minute,
 	}
-	c := &http.Client{Transport: tr, Timeout: 2 * time.Minute}
+	c := &http.Client{Transport: tr, Timeout: 2 * time.Minute, CheckRedirect: tlspin.NoRedirect}
 	if !a.Sealed() {
 		r.client[name] = c // without a key the client cannot authenticate yet
 	}

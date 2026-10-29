@@ -92,7 +92,7 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, err
 	}
 	return &Client{cfg: cfg, http: func(a Authority) *http.Client {
-		return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
+		return &http.Client{Timeout: 30 * time.Second, CheckRedirect: tlspin.NoRedirect, Transport: &http.Transport{
 			TLSClientConfig: tlspin.ClientConfig(nil, tlspin.Fingerprints(a.Key)),
 		}}
 	}}, nil

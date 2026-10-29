@@ -129,7 +129,8 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 			url: a.URL,
 			pin: a.Key,
 			client: &http.Client{
-				Timeout: cfg.RequestTimeout,
+				Timeout:       cfg.RequestTimeout,
+				CheckRedirect: tlspin.NoRedirect,
 				Transport: &http.Transport{
 					TLSClientConfig: tlspin.ClientConfig(nil, tlspin.Fingerprints(a.Key)),
 					Proxy:           nil,
