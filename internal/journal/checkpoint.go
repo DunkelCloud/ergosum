@@ -121,7 +121,11 @@ func applyCheckpoint(ctx context.Context, q querier, cp *Checkpoint, origin stri
 			return err
 		}
 		b := &Binding{Identity: be.Identity, Kind: be.Kind, Epoch: be.Epoch, Key: be.Key, Checks: be.SortedChecks(), Hash: h, Origin: origin, Seq: seq}
-		if err := applyBinding(ctx, q, b, raw); err != nil {
+		body, err := json.Marshal(&be)
+		if err != nil {
+			return err
+		}
+		if err := applyBinding(ctx, q, b, body); err != nil {
 			return err
 		}
 	}

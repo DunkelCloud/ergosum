@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +30,10 @@ const (
 
 // Namespace is the SSHSIG namespace of admin signatures over binding events.
 const Namespace = "ergosum-binding"
+
+// MaxEpoch is the highest epoch of a binding event. Above it nothing could
+// follow, so a binding at the very top of the range could never be revoked.
+const MaxEpoch = 1 << 53
 
 // CanonicalHeader is the first line of the canonical form.
 const CanonicalHeader = "ergosum binding v1"
@@ -69,8 +74,8 @@ func (e *BindingEvent) Validate() error {
 	if !protocol.ValidDNSName(e.Identity) {
 		return invalid("bad identity %q", e.Identity)
 	}
-	if e.Epoch < 1 {
-		return invalid("epoch must be at least 1")
+	if e.Epoch < 1 || e.Epoch > MaxEpoch {
+		return invalid("epoch must be between 1 and 2^53")
 	}
 	switch e.Kind {
 	case KindBindingSet:
@@ -132,7 +137,9 @@ func validateCheck(c Check) error {
 
 // SplitTarget splits "host" or "host:port" (IPv6 as "[addr]:port" or bare
 // "addr") into host and port; port is 0 when absent. The host is returned as
-// written, so that validation can insist on the canonical form.
+// written, so that validation can insist on the canonical form. Every
+// target has one spelling only: the port is plain decimal without sign or
+// leading zeros, and brackets go around IPv6 addresses only.
 func SplitTarget(t string) (host string, port int, err error) {
 	if _, perr := netip.ParseAddr(t); perr == nil {
 		return t, 0, nil
@@ -144,12 +151,22 @@ func SplitTarget(t string) (host string, port int, err error) {
 	if err != nil {
 		return "", 0, err
 	}
-	n, err := strconv.Atoi(p)
-	if err != nil || n < 1 || n > 65535 {
+	if strings.HasPrefix(t, "[") {
+		if a, err := netip.ParseAddr(h); err != nil || !a.Is6() {
+			return "", 0, fmt.Errorf("brackets around %q, which is no IPv6 address", h)
+		}
+	}
+	if !portRe.MatchString(p) {
+		return "", 0, fmt.Errorf("bad port in %q", t)
+	}
+	n, _ := strconv.Atoi(p)
+	if n > 65535 {
 		return "", 0, fmt.Errorf("bad port in %q", t)
 	}
 	return h, n, nil
 }
+
+var portRe = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
 
 // SortedChecks returns the checks in canonical order (by type, then target).
 func (e *BindingEvent) SortedChecks() []Check {

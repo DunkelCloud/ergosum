@@ -95,10 +95,17 @@ Wire form (write API body and journal body):
 
 - `identity` and `tailnet` targets are lower-case DNS names; `ip` targets
   are IP addresses in canonical form, optionally with `:port` (IPv6 as
-  `[addr]:port`); `net` targets are masked prefixes.
+  `[addr]:port`); `net` targets are masked prefixes. Every target has one
+  spelling only: a port is plain decimal without sign or leading zeros,
+  and brackets go around IPv6 addresses only.
 - `binding.set` needs at least one check; checks are unique.
 - `binding.revoked` carries neither key nor checks.
-- `epoch` starts at 1.
+- `epoch` starts at 1 and stays at or below 2^53, so that a revocation can
+  always follow.
+- Ingest stores a binding event's body as this instance would write it.
+  The position signature covers the hash of the canonical text, not the
+  body, so a relay could respell the JSON (say, a duplicate key in other
+  case) in a way other readers of an export would understand differently.
 
 ### Canonical form
 
@@ -455,7 +462,9 @@ leader, no quorum.
   event under another instance's `(origin, seq)`, and the genuine event at
   that position would conflict at every instance and cut that instance off
   from replication in both directions. Sequence numbers and coverage above
-  2^53 are rejected, so that no counter derived from them can overflow.
+  2^53 are rejected, so that no counter derived from them can overflow. A
+  sync raises the own sequence counter at most to 2^32 below that, so that
+  a peer cannot leave the instance without numbers to write with.
 - **Push**: `POST /v1/journal/ingest` with a page. The peer answers
   `{"v": 1, "accepted": <position>}`, with `200` if it took the whole page
   and `422` and an `error` if it stopped at a rejected event; the cursor

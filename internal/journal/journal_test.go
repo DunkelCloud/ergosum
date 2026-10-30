@@ -117,6 +117,11 @@ func TestValidation(t *testing.T) {
 		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "ip", Target: "[2001:DB8::10]:7433"}), // not canonical
 		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "tailnet", Target: "100.64.0.5"}),     // an address, not a name
 		jt.Set("192.0.2.1", "host1.example.com", 1, fp, tailnet),                                         // trust domain is an address
+		jt.Set(td, "host1.example.com", journal.MaxEpoch+1, fp, tailnet),                                 // epoch beyond the range
+		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "ip", Target: "203.0.113.7:+7440"}),   // signed port
+		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "ip", Target: "203.0.113.7:07440"}),   // leading zero
+		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "tailnet", Target: "[a.example.com]:7433"}),
+		jt.Set(td, "host1.example.com", 1, fp, journal.Check{Type: "ip", Target: "[203.0.113.7]:7440"}), // brackets around IPv4
 	}
 	for i, e := range bad {
 		if err := e.Validate(); !errors.Is(err, journal.ErrInvalidEvent) {

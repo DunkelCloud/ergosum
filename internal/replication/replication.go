@@ -35,6 +35,10 @@ const (
 	PathEvents = "/v1/journal/events"
 )
 
+// ownReserve is how far below MaxSeq a sync may raise the coverage of the
+// syncing instance's own origin, so that it can always go on writing.
+const ownReserve = 1 << 32
+
 // MaxSeq is the highest sequence number and coverage that ingest accepts,
 // so that no counter derived from a peer's numbers can overflow.
 const MaxSeq = 1 << 53
@@ -362,6 +366,11 @@ func (r *Replicator) ingestStart(ctx context.Context, peer string, s Event, pull
 	for o, n := range cov {
 		if n < 0 || n > MaxSeq {
 			return r.reject(peer, s, fmt.Errorf("coverage %d of %q", n, o))
+		}
+		// The own sequence counter follows the own coverage; a peer must
+		// not push it so high that this instance can never write again.
+		if o == r.cfg.Self && n > MaxSeq-ownReserve {
+			return r.reject(peer, s, fmt.Errorf("coverage %d of this instance leaves no room to write", n))
 		}
 	}
 	return r.cfg.Store.RaiseCoverage(ctx, cov)

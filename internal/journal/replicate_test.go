@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -241,5 +242,37 @@ func TestRemovedOrigin(t *testing.T) {
 	_, events, _, _ = a.Read(ctx, 0, 100)
 	if cov, _ := a.CheckpointCoverage(events[len(events)-1].Event); cov["instance-c"] != 0 {
 		t.Fatalf("new checkpoint covers a removed instance: %v", cov)
+	}
+}
+
+// TestRelayedBodyStoredCanonically: the position signature covers the hash
+// of the canonical text, not the body, so a relay may respell the body. A
+// binding event is stored as this instance would write it.
+func TestRelayedBodyStoredCanonically(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice")
+	a, b := pair(t, admins)
+	if _, err := a.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")); err != nil {
+		t.Fatal(err)
+	}
+	_, events, _, err := a.Read(ctx, 0, 10)
+	if err != nil || len(events) != 1 {
+		t.Fatal(events, err)
+	}
+	e := events[0].Event
+	canonical := string(e.Body)
+	e.Body = []byte(strings.Replace(canonical, `"identity":`, `"IDENTITY":"host1.example.com","identity":`, 1))
+	if err := b.Verify(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Append(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	bodies, err := b.EventBodies(ctx, journal.KindBindingSet)
+	if err != nil || len(bodies) != 1 {
+		t.Fatal(bodies, err)
+	}
+	if string(bodies[0]) != canonical {
+		t.Fatalf("stored body %s, want %s", bodies[0], canonical)
 	}
 }

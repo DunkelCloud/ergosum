@@ -337,6 +337,13 @@ func (s *Store) Append(ctx context.Context, e replication.Event) error {
 		if err := json.Unmarshal(e.Body, &be); err != nil {
 			return err
 		}
+		// Stored as this instance would write it: a relayed body may spell
+		// fields in ways (duplicate keys in other case) that other readers
+		// of an export would understand differently. The position signature
+		// covers the hash of the canonical text, not the body.
+		if e.Body, err = json.Marshal(&be); err != nil {
+			return err
+		}
 		identity, epoch = be.Identity, be.Epoch
 		b := &Binding{Identity: be.Identity, Kind: be.Kind, Epoch: be.Epoch, Key: be.Key, Checks: be.SortedChecks(), Hash: e.Hash, Origin: e.Origin, Seq: e.Seq}
 		if err := applyBinding(ctx, tx, b, e.Body); err != nil {
