@@ -5,6 +5,7 @@ import (
 	"time"
 
 	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
+	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
 
 func validConfig(t *testing.T) Config {
@@ -94,5 +95,29 @@ func TestWindow(t *testing.T) {
 	}
 	if !w.allow(now.Add(time.Minute)) {
 		t.Fatal("new window refused")
+	}
+}
+
+// "No open request" proves a second key only from a daemon that ran when the
+// request was made; "ended" and a later process start prove nothing.
+func TestClassify(t *testing.T) {
+	requested := time.Unix(1_800_000_000, 0)
+	before := requested.Add(-time.Hour)
+	for _, c := range []struct {
+		status  string
+		started time.Time
+		want    string
+	}{
+		{protocol.StatusConfirmed, before, OutcomeConfirmed},
+		{protocol.StatusNoOpenRequest, before, OutcomeNoOpenRequest},
+		{protocol.StatusNoOpenRequest, requested.Add(time.Second), OutcomeEnded},
+		{protocol.StatusNoOpenRequest, time.Time{}, OutcomeEnded},
+		{protocol.StatusEnded, before, OutcomeEnded},
+		{"maybe", before, OutcomeInvalidResponse},
+	} {
+		got, _ := classify(protocol.CallbackResponse{Status: c.status, Started: c.started}, requested)
+		if got != c.want {
+			t.Errorf("%s started %s: %s, want %s", c.status, c.started, got, c.want)
+		}
 	}
 }

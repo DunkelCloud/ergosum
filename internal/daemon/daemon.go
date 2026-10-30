@@ -54,6 +54,7 @@ type Daemon struct {
 	listen      func(network, address string) (net.Listener, error)
 	tailnetName func(context.Context) (string, error)
 	inflight    *inflight
+	started     time.Time // reported in callback responses
 
 	kmu     sync.RWMutex
 	key     *ecdsa.PrivateKey
@@ -94,7 +95,7 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	}
 	overlay, _ := protocol.ParsePrefixes(cfg.OverlayPrefixes) // checked by Validate
 	d := &Daemon{cfg: cfg, log: opts.Logger, now: opts.Now, listen: opts.Listen, tailnetName: opts.TailnetName,
-		tokenGID: -1, inflight: newInflight(), overlay: overlay}
+		tokenGID: -1, overlay: overlay}
 	if d.tailnetName == nil {
 		d.tailnetName = tailnetName
 	}
@@ -104,6 +105,8 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	if d.now == nil {
 		d.now = time.Now
 	}
+	d.started = d.now().UTC()
+	d.inflight = newInflight(d.now)
 	if d.listen == nil {
 		d.listen = net.Listen
 	}
@@ -151,7 +154,7 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	d.mError = d.metrics.Gauge("machine_identity_last_error_timestamp_seconds", "Time of the last failed token request.")
 	d.mClockSkew = d.metrics.Gauge("machine_identity_clock_skew_seconds", "Authority clock minus local clock, estimated per request.")
 	d.mCallbacks = d.metrics.Counter("machine_identity_callbacks_total", "Callbacks answered by status.", "status",
-		protocol.StatusConfirmed, protocol.StatusNoOpenRequest)
+		protocol.StatusConfirmed, protocol.StatusNoOpenRequest, protocol.StatusEnded)
 	d.mPending = d.metrics.Gauge("machine_identity_key_change_pending", "1 while a new key waits for its binding.")
 	if d.pending != nil {
 		d.mPending.Set("", 1)
@@ -673,14 +676,11 @@ func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid callback", http.StatusBadRequest)
 		return
 	}
-	status := protocol.StatusNoOpenRequest
-	if d.inflight.confirms(cb.RequestID, keys.Fingerprint(peer)) {
-		status = protocol.StatusConfirmed
-	}
+	status := d.inflight.status(cb.RequestID, keys.Fingerprint(peer))
 	resp := protocol.CallbackResponse{
 		V: protocol.Version, Type: protocol.TypeCallbackResponse, Status: status,
 		RequestID: cb.RequestID, Nonce: cb.Nonce, Target: cb.Target, Authority: cb.Authority,
-		Timestamp: d.now().UTC(),
+		Timestamp: d.now().UTC(), Started: d.started,
 	}
 	key, _ := d.identity()
 	env, err := protocol.Seal(key, protocol.ContextCallbackResponse, resp)
@@ -689,10 +689,13 @@ func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.mCallbacks.Inc(status)
-	if status == protocol.StatusNoOpenRequest {
+	switch status {
+	case protocol.StatusNoOpenRequest:
 		d.log.Error("callback for a request this machine did not make: the identity key is in use elsewhere",
 			"request_id", cb.RequestID, "target", cb.Target, "authority", cb.Authority)
-	} else {
+	case protocol.StatusEnded:
+		d.log.Info("late callback for a request this machine has given up", "request_id", cb.RequestID, "target", cb.Target)
+	default:
 		d.log.Info("callback confirmed", "request_id", cb.RequestID, "target", cb.Target)
 	}
 	w.Header().Set("Content-Type", "application/json")

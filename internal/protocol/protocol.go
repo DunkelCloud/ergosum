@@ -215,13 +215,27 @@ type CallbackResponse struct {
 	Target    string    `json:"target"`
 	Authority string    `json:"authority"`
 	Timestamp time.Time `json:"timestamp"`
+	// Started is when the daemon process started. A "no open request" from
+	// a process that started after the request was made proves nothing: the
+	// request may have come from the process before it.
+	Started time.Time `json:"started"`
 }
 
 // Callback response status values.
 const (
 	StatusConfirmed     = "confirmed"
 	StatusNoOpenRequest = "no_open_request"
+	// StatusEnded: this process made the request to the calling instance
+	// but has given up on it (timeout, or it moved on to the next
+	// instance). It proves nothing; the instance discards the request.
+	StatusEnded = "ended"
 )
+
+// EndedTTL is how long a daemon answers "ended" for a request it gave up
+// on: longer than an instance can take to finish its callbacks. Instances
+// keep processed request IDs at least as long, so that nobody can replay an
+// ended ID to get "ended" instead of a proof.
+const EndedTTL = 10 * time.Minute
 
 // NewRequestID returns a fresh random request ID (128 bit, base64url).
 func NewRequestID() string { return randomToken(16) }

@@ -179,16 +179,26 @@ callback whose `authority` is not the kid of the TLS client key.
   "type": "callback_response",
   "status": "confirmed",
   "request_id": "...", "nonce": "...", "target": "...", "authority": "...",
-  "timestamp": "2026-10-27T20:00:01Z"
+  "timestamp": "2026-10-27T20:00:01Z",
+  "started": "2026-10-27T08:12:40Z"
 }
 ```
 
 `status` is `confirmed` if the daemon has a request with this ID in flight
-to the calling instance (the TLS client key), otherwise `no_open_request`.
-The response repeats request ID, nonce, target and
-authority; the authority checks all four and the signature against the bound
-key. A signed `no_open_request` from the bound key is proof that the key is
-used by someone else; the authority keeps it as evidence (ADR 0003).
+to the calling instance (the TLS client key); `ended` if this daemon
+process made that request to the calling instance but has given up on it,
+within the last 10 minutes (timeout, or it moved on to the next instance);
+otherwise `no_open_request`. `started` is when the daemon process started.
+The response repeats request ID, nonce, target and authority; the authority
+checks all four and the signature against the bound key.
+
+A signed `no_open_request` from the bound key is proof that the key is used
+by someone else, if the daemon process already ran when the request was
+made (`started` not after the request's `timestamp`, both from the
+machine's clock); the authority keeps it as evidence (ADR 0003). From a
+process started later it proves nothing: the request may have come from
+the process before it. `ended` proves nothing either. In both cases the
+authority discards the request like one whose requester went away.
 
 **Token response** — `200`:
 
@@ -221,18 +231,25 @@ the real machine confirms must therefore be worthless to the copy:
   never reuses it. It keeps its requests in flight in memory only, each with
   the key of the instance it went to; nothing about requests is on disk.
 - It confirms a callback only for a request in flight to the calling
-  instance. Once the request has ended, and at every other instance even
-  while it is in flight, the answer is `no_open_request`.
+  instance. For 10 minutes after it gave a request up it answers that
+  instance `ended`; at every other instance, and later, the answer is
+  `no_open_request`.
 - An instance processes a request ID at most once per identity. A repeat
-  within twice the clock-skew window is refused as `replay`, without a
-  callback; later, the real machine no longer confirms it.
+  within 15 minutes (and at least twice the clock-skew window) is refused
+  as `replay`, without a callback; this outlasts `ended`, so that nobody can
+  replay an ended ID to get `ended` instead of a proof. Later, the real
+  machine no longer confirms it.
 - If the requester's connection closes before the outcome is decided
   (daemon timeout, crash, restart), the instance cancels its callbacks and
   discards the request: no token, no observation.
 
-A crash or timeout therefore never turns into a `key_duplicate`: the
-instance that would hear the `no_open_request` has already dropped the
-request.
+A crash, restart or timeout therefore never turns into a `key_duplicate`.
+Usually the instance notices that the requester left and drops the request.
+If it does not in time (a slow callback, a connection broken on one side
+only), the daemon answers `ended`; a daemon restarted meanwhile answers
+`no_open_request` with a `started` after the request, which proves nothing.
+A second key holder gains from this only a request without proof right
+after the real machine restarted, never a token.
 
 ### Authority procedure
 
@@ -251,7 +268,9 @@ request.
 7. Run the callbacks (in parallel, each with a timeout, default 5 s). Each
    uses a fresh nonce. For `net`, try up to four reported addresses inside
    the prefix.
-8. Requester gone: discard. Otherwise any `no_open_request`:
+8. Requester gone, or any callback answered `ended` or `no_open_request`
+   from a daemon started after the request: discard. Otherwise any
+   `no_open_request`:
    `key_duplicate`; any callback that is unreachable, answers with another
    key or answers invalidly: `wrong_location`. All confirmed: issue the
    token.

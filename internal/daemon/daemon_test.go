@@ -130,21 +130,31 @@ func TestRequest(t *testing.T) {
 
 func TestInflight(t *testing.T) {
 	const a, b = "SHA256:authority-a", "SHA256:authority-b"
-	f := newInflight()
+	now := time.Unix(1_800_000_000, 0)
+	f := newInflight(func() time.Time { return now })
 	id := "AAAAAAAAAAAAAAAAAAAAAA"
-	if f.confirms(id, a) {
-		t.Fatal("unknown request confirmed")
+	if got := f.status(id, a); got != protocol.StatusNoOpenRequest {
+		t.Fatalf("unknown request: %s", got)
 	}
 	f.add(id, a)
-	if !f.confirms(id, a) {
-		t.Fatal("request in flight not confirmed")
+	if got := f.status(id, a); got != protocol.StatusConfirmed {
+		t.Fatalf("request in flight: %s", got)
 	}
 	// The same request ID from another instance is not ours.
-	if f.confirms(id, b) {
-		t.Fatal("request confirmed for an instance it was not sent to")
+	if got := f.status(id, b); got != protocol.StatusNoOpenRequest {
+		t.Fatalf("request to another instance: %s", got)
 	}
+	// Given up: a late callback from the same instance hears "ended", any
+	// other instance still "no open request".
 	f.remove(id)
-	if f.confirms(id, a) {
-		t.Fatal("finished request still confirmed")
+	if got := f.status(id, a); got != protocol.StatusEnded {
+		t.Fatalf("ended request: %s", got)
+	}
+	if got := f.status(id, b); got != protocol.StatusNoOpenRequest {
+		t.Fatalf("ended request, other instance: %s", got)
+	}
+	now = now.Add(protocol.EndedTTL + time.Second)
+	if got := f.status(id, a); got != protocol.StatusNoOpenRequest {
+		t.Fatalf("long ended request: %s", got)
 	}
 }

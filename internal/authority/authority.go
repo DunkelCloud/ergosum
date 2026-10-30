@@ -117,7 +117,7 @@ func New(cfg Config, opts Options) (*Authority, error) {
 		unverified: &window{every: time.Minute, max: unverifiedPerMinute},
 		// A daemon's request is in flight for far less than this; after
 		// that, a replayed ID meets a daemon that no longer confirms it.
-		seen:     newReplayCache(2 * cfg.ClockSkew),
+		seen:     newReplayCache(max(2*cfg.ClockSkew, protocol.EndedTTL+5*time.Minute)),
 		unsealed: make(chan struct{}),
 		ready:    make(chan struct{}),
 	}

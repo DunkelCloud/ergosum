@@ -35,6 +35,10 @@ const (
 	OutcomeOtherKey        = "other_key"
 	OutcomeInvalidResponse = "invalid_response"
 	OutcomeNoAddress       = "no_address"
+	// OutcomeEnded: the daemon gave up on the request, or restarted after
+	// it was made. The instance discards the request like one whose
+	// requester went away.
+	OutcomeEnded = "ended"
 )
 
 // CheckOutcome records one check of a request for audit and observations.
@@ -167,6 +171,15 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		// the journal.
 		a.log.Info("request abandoned by the requester", "identity", req.Identity, "request_id", req.RequestID)
 		return
+	}
+	for _, o := range outcomes {
+		if o.Outcome == OutcomeEnded {
+			// The daemon says it gave up on this request, or a restarted
+			// daemon cannot tell: discarded like an abandoned request.
+			a.log.Info("request ended at the machine", "identity", req.Identity, "request_id", req.RequestID, "detail", o.Detail)
+			a.writeError(w, http.StatusForbidden, protocol.ErrDenied, "")
+			return
+		}
 	}
 	obs.Checks = outcomes
 
@@ -355,16 +368,34 @@ func (a *Authority) callback(ctx context.Context, pc plannedCheck, host string, 
 		res.Outcome, res.Detail = OutcomeInvalidResponse, "response does not match the callback"
 		return res
 	}
-	switch cr.Status {
-	case protocol.StatusConfirmed:
-		res.Outcome = OutcomeConfirmed
-	case protocol.StatusNoOpenRequest:
-		res.Outcome = OutcomeNoOpenRequest
+	res.Outcome, res.Detail = classify(cr, req.Timestamp)
+	if res.Outcome == OutcomeNoOpenRequest {
 		res.Evidence = &env
-	default:
-		res.Outcome, res.Detail = OutcomeInvalidResponse, "unknown status"
 	}
 	return res
+}
+
+// classify turns a verified callback response into an outcome. "No open
+// request" is proof of a second key only from a daemon process that already
+// ran when the request was made: a process started later knows nothing of
+// requests its predecessor made. Both times come from the machine's clock;
+// a second key holder can choose the request's timestamp, but gains only
+// within the clock-skew window after a restart of the real machine, and
+// even then gets no token.
+func classify(cr protocol.CallbackResponse, requested time.Time) (outcome, detail string) {
+	switch cr.Status {
+	case protocol.StatusConfirmed:
+		return OutcomeConfirmed, ""
+	case protocol.StatusEnded:
+		return OutcomeEnded, "the daemon gave up on the request"
+	case protocol.StatusNoOpenRequest:
+		if cr.Started.IsZero() || cr.Started.After(requested) {
+			return OutcomeEnded, "the daemon started after the request; no proof"
+		}
+		return OutcomeNoOpenRequest, ""
+	default:
+		return OutcomeInvalidResponse, "unknown status"
+	}
 }
 
 func (a *Authority) issue(key *ecdsa.PrivateKey, b *journal.Binding, outcomes []CheckOutcome) (string, jwt.Claims, error) {

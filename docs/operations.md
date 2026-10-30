@@ -57,7 +57,7 @@ Metrics (node_exporter textfile collector, `metrics_file`):
 | `machine_identity_last_success_timestamp_seconds` | last successful request |
 | `machine_identity_last_error_timestamp_seconds` | last failed request |
 | `machine_identity_clock_skew_seconds` | authority clock minus local clock, estimated from request rounds of at most 10 s |
-| `machine_identity_callbacks_total{status}` | callbacks answered; any `no_open_request` means the key is used elsewhere |
+| `machine_identity_callbacks_total{status}` | callbacks answered: `confirmed`, `ended` (a late callback for a request this daemon gave up), `no_open_request` (the key is used elsewhere) |
 | `machine_identity_key_change_pending` | 1 while a new key waits for its binding |
 
 Short token lifetimes need synchronized clocks.
