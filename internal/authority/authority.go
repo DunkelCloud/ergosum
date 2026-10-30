@@ -34,6 +34,9 @@ const (
 	ResultForeignKey      = "foreign_key"
 	ResultUnknownIdentity = "unknown_identity"
 	ResultReplay          = "replay"
+	// ResultMisdirected: a request signed by the bound key but addressed to
+	// another instance arrived here. Whoever had it forwarded it.
+	ResultMisdirected = "misdirected"
 )
 
 // Limits for what unverified requests may cost. unverifiedPerMinute bounds
@@ -155,7 +158,7 @@ func New(cfg Config, opts Options) (*Authority, error) {
 	a.metrics = metrics.NewRegistry()
 	a.requests = a.metrics.Counter("machine_identity_requests_total",
 		"Token requests by result.", "result",
-		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity, ResultReplay)
+		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity, ResultReplay, ResultMisdirected)
 	a.sealedG = a.metrics.Gauge("machine_identity_authority_sealed",
 		"1 while the signing key is still encrypted and the instance issues nothing.")
 	a.bindings = a.metrics.Counter("machine_identity_binding_events_total",

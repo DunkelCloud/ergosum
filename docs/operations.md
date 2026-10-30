@@ -148,7 +148,7 @@ on a host of its own or on a shared host.
 
 | Metric | Meaning |
 | --- | --- |
-| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `foreign_key`, `unknown_identity` |
+| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `misdirected`, `foreign_key`, `unknown_identity` |
 | `machine_identity_authority_sealed` | 1 while sealed |
 | `machine_identity_binding_events_total{outcome}` | write API: `accepted`, `rejected` |
 | `machine_identity_journal_outbox_events{peer}` | events a peer has not acknowledged |
@@ -162,8 +162,10 @@ on a host of its own or on a shared host.
 `key_duplicate` is proof that a machine key exists twice and deserves a
 critical alert. `replay` means that someone with the machine key reused a
 request ID the machine had sent, typically a copy from a disk image; treat
-it like `key_duplicate`. Both are logged at level `error` with an `alert`
-field. `wrong_location` is a warning.
+it like `key_duplicate`. `misdirected` means that a request signed by the
+machine but addressed to another instance arrived here: that instance, or
+whoever relayed the request, passed it on. All three are logged at level
+`error` with an `alert` field. `wrong_location` is a warning.
 
 Audit entries are JSON log lines with `"log_type":"audit"` on stdout — one
 per token request (result, identity, request ID, presented key, per-check

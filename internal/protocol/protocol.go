@@ -153,6 +153,11 @@ type TokenRequest struct {
 	Timestamp time.Time `json:"timestamp"`
 	Addresses []string  `json:"addresses"`
 	Key       string    `json:"key"` // base64 (std) SubjectPublicKeyInfo DER
+	// To is the key fingerprint of the authority instance the request is
+	// addressed to. An instance refuses a request addressed to another one
+	// before any callback: the daemon has that request in flight to the
+	// other instance and would answer "no open request".
+	To string `json:"to"`
 }
 
 // Message types.

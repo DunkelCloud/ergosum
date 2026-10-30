@@ -224,7 +224,8 @@ reaches the listener.
 
 An instance records the outcome of a token request that verifies against
 a bound key as `observation.issued`, `observation.key_duplicate`,
-`observation.wrong_location` or `observation.replay`. The body is a signed
+`observation.wrong_location`, `observation.replay` or
+`observation.misdirected`. The body is a signed
 envelope (ADR 0001,
 context `ergosum/v1/observation`) made with the instance key, containing
 instance, kid, identity, epoch, request ID, presented key, remote address,
@@ -240,8 +241,8 @@ verify that way (`unknown_identity`, `foreign_key`) can be caused by anyone
 with any number of names; they count in the metric and reach the audit log
 within an overall limit (60 lines per minute), but never the journal.
 Rejected binding writes share that limit.
-`wrong_location` and `replay` can be repeated at will by a holder of the key
-and are journaled once per identity and minute; `issued` and
+`wrong_location`, `replay` and `misdirected` can be repeated at will by a
+holder of the key and are journaled once per identity and minute; `issued` and
 `key_duplicate` always.
 
 ### Checkpoints and compaction

@@ -4,9 +4,10 @@ groups:
   - name: ergosum
     rules:
       # A machine key exists twice: the bound key answered a callback with
-      # "no open request", or a second holder reused a request ID.
+      # "no open request", or a second holder reused a request ID; or a
+      # request the machine addressed to another instance was passed on.
       - alert: ErgosumKeyDuplicate
-        expr: increase(machine_identity_requests_total{result=~"key_duplicate|replay"}[10m]) > 0
+        expr: increase(machine_identity_requests_total{result=~"key_duplicate|replay|misdirected"}[10m]) > 0
         labels:
           severity: critical
         annotations:

@@ -380,6 +380,49 @@ func TestReplayedRequestID(t *testing.T) {
 	verifyEvidence(t, b, real.d.Fingerprint())
 }
 
+// TestForwardedRequest: an instance that forwards a request it received to
+// another instance gets nothing there. The request names the instance it is
+// addressed to, so the other instance refuses it before any callback, and
+// the machine never has to answer "no open request" for a request it made.
+func TestForwardedRequest(t *testing.T) {
+	sim := newSimNet()
+	admins := jt.NewAdmins(t, "alice", "bob", "carol")
+	a := newEnv(t, envOptions{instance: "authority-a", net: sim, admins: admins})
+	b := newEnv(t, envOptions{instance: "authority-b", net: sim, admins: admins})
+	real := a.machine(host1, machineOptions{targets: []string{at(host1Tailnet), at(host1IP)}, authorities: []*env{a, b}})
+	b.bind(host1, real.d.Fingerprint(), 1, tailnetCheck(host1Tailnet), ipCheck(host1IP))
+	// The request the machine has in flight to A, as A would pass it on.
+	release, err := real.d.HoldCallbackListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	key, _, err := keys.LoadOrCreate(filepath.Join(real.stateDir, "identity.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sim.mu.Lock()
+	before := len(sim.dials)
+	sim.mu.Unlock()
+	if status := postRequestTo(t, b, key, host1, protocol.NewRequestID(), a.fingerprint()); status != http.StatusForbidden {
+		t.Fatalf("forwarded request: status %d", status)
+	}
+	sim.mu.Lock()
+	after := len(sim.dials)
+	sim.mu.Unlock()
+	if after != before {
+		t.Fatal("callbacks for a request addressed to another instance")
+	}
+	requireCount(t, b.auth, authority.ResultMisdirected, 1)
+	requireCount(t, b.auth, authority.ResultKeyDuplicate, 0)
+	if n := len(b.observations(t, "observation.misdirected")); n != 1 {
+		t.Fatalf("misdirected observations: %d", n)
+	}
+	if real.d.CallbackCount(protocol.StatusNoOpenRequest) != 0 {
+		t.Fatal("the machine answered no open request")
+	}
+}
+
 // TestUnverifiedRefusalsStayOutOfJournal: requests that do not verify
 // against a bound key can be sent by anyone. They count in the metric but
 // never reach the journal, however many identities they name.
@@ -413,10 +456,17 @@ func TestUnverifiedRefusalsStayOutOfJournal(t *testing.T) {
 // returns the HTTP status.
 func postRequest(t *testing.T, e *env, key *ecdsa.PrivateKey, identity, requestID string) int {
 	t.Helper()
+	return postRequestTo(t, e, key, identity, requestID, e.fingerprint())
+}
+
+// postRequestTo sends a request addressed to the instance with key
+// fingerprint to, whichever instance e is.
+func postRequestTo(t *testing.T, e *env, key *ecdsa.PrivateKey, identity, requestID, to string) int {
+	t.Helper()
 	req := protocol.TokenRequest{
 		V: protocol.Version, Type: protocol.TypeTokenRequest, Identity: identity,
 		RequestID: requestID, Timestamp: time.Now().UTC(),
-		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&key.PublicKey)),
+		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&key.PublicKey)), To: to,
 	}
 	env, err := protocol.Seal(key, protocol.ContextRequest, req)
 	if err != nil {

@@ -435,7 +435,7 @@ func (d *Daemon) request(ctx context.Context, a *authorityClient) (string, jwt.C
 	req := protocol.TokenRequest{
 		V: protocol.Version, Type: protocol.TypeTokenRequest, Identity: d.cfg.Identity,
 		RequestID: id, Timestamp: d.now().UTC(), Addresses: d.addresses(),
-		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&key.PublicKey)),
+		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&key.PublicKey)), To: a.pin,
 	}
 	env, err := protocol.Seal(key, protocol.ContextRequest, req)
 	if err != nil {

@@ -133,7 +133,8 @@ for one never verifies for another:
   "request_id": "<22 chars base64url, 128 bit random>",
   "timestamp": "2026-10-27T20:00:00Z",
   "addresses": ["192.0.2.10", "2001:db8::10"],
-  "key": "<base64 DER SubjectPublicKeyInfo>"
+  "key": "<base64 DER SubjectPublicKeyInfo>",
+  "to": "SHA256:<fingerprint of the authority instance>"
 }
 ```
 
@@ -144,6 +145,12 @@ for one never verifies for another:
   addresses inside the bound prefix.
 - `timestamp` must lie within the authority's clock-skew window (default
   ±2 minutes).
+- `to` is the key fingerprint of the instance the request is addressed to,
+  the one the daemon pins for that URL. A request is meant for exactly one
+  instance: the daemon has it in flight to that instance only, and would
+  answer a callback from any other with "no open request". Without `to`, an
+  instance holding a request could pass it on to another one and make the
+  real machine sign evidence against itself.
 
 **Callback** — `POST /v1/callback` from the authority to the daemon, plain
 JSON (authenticated by the pinned TLS client key):
@@ -233,15 +240,18 @@ request.
 2. Look up the projected binding. No active binding: `unknown_identity`.
 3. Fingerprint of `key` differs from the binding, or the signature does not
    verify: `foreign_key`. No callback is made.
-4. Request ID already processed for this identity: `replay`. No callback is
+4. `to` names another instance: `misdirected`. No callback is made. The
+   request verified against the bound key, so whoever brought it here had it
+   from the machine: another instance or a relay.
+5. Request ID already processed for this identity: `replay`. No callback is
    made.
-5. Plan one callback per bound check; targets and ports come from the
+6. Plan one callback per bound check; targets and ports come from the
    binding. A `net` check whose prefix is not inside a network attached to
    this instance: answer `not_responsible` before any callback.
-6. Run the callbacks (in parallel, each with a timeout, default 5 s). Each
+7. Run the callbacks (in parallel, each with a timeout, default 5 s). Each
    uses a fresh nonce. For `net`, try up to four reported addresses inside
    the prefix.
-7. Requester gone: discard. Otherwise any `no_open_request`:
+8. Requester gone: discard. Otherwise any `no_open_request`:
    `key_duplicate`; any callback that is unreachable, answers with another
    key or answers invalidly: `wrong_location`. All confirmed: issue the
    token.

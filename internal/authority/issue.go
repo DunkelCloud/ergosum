@@ -139,6 +139,13 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		a.deny(ctx, w, ResultForeignKey, obs, "request signature does not verify")
 		return
 	}
+	// A request addressed to another instance gets no callback: the daemon
+	// has it in flight to that instance and would answer "no open request",
+	// which must remain proof of a second key.
+	if req.To != keys.Fingerprint(a.public) {
+		a.deny(ctx, w, ResultMisdirected, obs, "request addressed to "+req.To)
+		return
+	}
 	// The daemon never reuses a request ID. A repeat comes from a second
 	// holder of the key replaying an ID it has seen; it gets no callbacks.
 	if !a.seen.first(req.Identity+" "+req.RequestID, now) {
@@ -204,6 +211,9 @@ func validateRequest(req *protocol.TokenRequest) (*ecdsa.PublicKey, []netip.Addr
 	}
 	if !protocol.ValidRequestID(req.RequestID) {
 		return nil, nil, errors.New("bad request_id")
+	}
+	if !keys.ValidFingerprint(req.To) {
+		return nil, nil, errors.New("bad to")
 	}
 	spki, err := base64.StdEncoding.DecodeString(req.Key)
 	if err != nil {
@@ -410,7 +420,7 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 				"identity", obs.Identity, "key", obs.Key, "remote", obs.Remote, "reason", obs.Reason)
 		}
 		return
-	case result == ResultWrongLocation || result == ResultReplay:
+	case result == ResultWrongLocation || result == ResultReplay || result == ResultMisdirected:
 		if !a.limiter.allow(result+" "+obs.Identity, now) {
 			return
 		}
@@ -438,6 +448,9 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 		// copy of a disk image: as serious as a proven duplicate.
 		level = slog.LevelError
 		attrs = append(attrs, "alert", "request ID replayed: a second holder of the bound key reused an ID the machine had sent")
+	case ResultMisdirected:
+		level = slog.LevelError
+		attrs = append(attrs, "alert", "request addressed to another instance: an instance or a relay forwarded a signed request")
 	case ResultWrongLocation:
 		level = slog.LevelWarn
 	}
