@@ -251,13 +251,12 @@ func (c *Client) lists(ctx context.Context) ([]*journal.BindingList, []string, R
 // registry demands, as the first reachable authority has them, and the
 // identities whose binding the reachable authorities disagree on, which
 // happens while replication catches up.
-func (c *Client) List(ctx context.Context) (*journal.BindingList, string, Reach, []string, error) {
-	ls, from, reach, err := c.lists(ctx)
+func (c *Client) List(ctx context.Context) (l *journal.BindingList, from string, reach Reach, differ []string, err error) {
+	ls, froms, reach, err := c.lists(ctx)
 	if err != nil {
 		return nil, "", reach, nil, err
 	}
 	seen := map[string]bool{}
-	var differ []string
 	for _, l := range ls {
 		for _, b := range l.Bindings {
 			if seen[b.Identity] {
@@ -273,7 +272,7 @@ func (c *Client) List(ctx context.Context) (*journal.BindingList, string, Reach,
 		}
 	}
 	sort.Strings(differ)
-	return ls[0], from[0], reach, differ, nil
+	return ls[0], froms[0], reach, differ, nil
 }
 
 // State is what the reachable authorities agree on for one change: the
@@ -380,11 +379,12 @@ func at(b *journal.Binding) string {
 	return fmt.Sprintf("epoch %d (%s, event %s/%d)", b.Epoch, state, b.Origin, b.Seq)
 }
 
-// Holds reports whether the authority at url has the event with hash as
-// the binding of identity: "" if it does, otherwise what it has instead.
-func (c *Client) Holds(ctx context.Context, url, identity, hash string) (string, error) {
+// Holds reports whether the authority at authority (its URL) has the event
+// with hash as the binding of identity: "" if it does, otherwise what it
+// has instead.
+func (c *Client) Holds(ctx context.Context, authority, identity, hash string) (string, error) {
 	for _, a := range c.cfg.Authorities {
-		if a.URL != url {
+		if a.URL != authority {
 			continue
 		}
 		r, err := c.ask(ctx, a, http.MethodGet, protocol.PathBindings+"/"+identity, nil)
@@ -400,7 +400,7 @@ func (c *Client) Holds(ctx context.Context, url, identity, hash string) (string,
 		}
 		return at(b), nil
 	}
-	return "", fmt.Errorf("%s is not configured", url)
+	return "", fmt.Errorf("%s is not configured", authority)
 }
 
 // Authorities returns the URLs of the configured authorities.
@@ -463,12 +463,12 @@ const maxDetail = 300
 // printable makes text from an authority safe to show on a terminal:
 // control characters (escape sequences, line breaks) and bidirectional
 // overrides become spaces, invalid UTF-8 the replacement character, and the
-// text is cut after max characters.
-func printable(s string, max int) string {
+// text is cut after limit characters.
+func printable(s string, limit int) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
-		if n == max {
+		if n == limit {
 			b.WriteString("...")
 			break
 		}

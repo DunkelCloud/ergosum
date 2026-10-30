@@ -297,6 +297,23 @@ type Binding struct {
 // Active reports whether the binding allows issuance.
 func (b *Binding) Active() bool { return b != nil && b.Kind == KindBindingSet }
 
+// BindingList is the answer of the list endpoint: the projection of every
+// identity, ordered by identity, and what an event needs to be accepted.
+type BindingList struct {
+	V           int                 `json:"v"`
+	TrustDomain string              `json:"trust_domain"`
+	Approvals   map[string]Approval `json:"approvals"`
+	Bindings    []*Binding          `json:"bindings"`
+}
+
+// Receipt describes where an event was recorded.
+type Receipt struct {
+	Origin    string `json:"origin"`
+	Seq       int64  `json:"seq"`
+	Hash      string `json:"hash"`
+	Duplicate bool   `json:"duplicate,omitempty"`
+}
+
 // Validate checks a binding as the read API reports it. Tools that show it
 // or write it into a file rely on every field having its plain form, also
 // when an authority answers otherwise.
@@ -395,23 +412,6 @@ var (
 	adminNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$`)
 	hashRe      = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
-
-// BindingList is the answer of the list endpoint: the projection of every
-// identity, ordered by identity, and what an event needs to be accepted.
-type BindingList struct {
-	V           int                 `json:"v"`
-	TrustDomain string              `json:"trust_domain"`
-	Approvals   map[string]Approval `json:"approvals"`
-	Bindings    []*Binding          `json:"bindings"`
-}
-
-// Receipt describes where an event was recorded.
-type Receipt struct {
-	Origin    string `json:"origin"`
-	Seq       int64  `json:"seq"`
-	Hash      string `json:"hash"`
-	Duplicate bool   `json:"duplicate,omitempty"`
-}
 
 // Errors returned by AppendBinding besides the registry errors.
 var (

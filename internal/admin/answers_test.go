@@ -189,7 +189,7 @@ func TestAnswersFromAuthorities(t *testing.T) {
 		{"check with a line", func(f *fakeAuthority) {
 			f.binding.Checks = []journal.Check{{Type: "tailnet", Target: "host1.tailnet.example.com\nkey " + fingerprint(t)}}
 		}},
-		{"signer with an override", func(f *fakeAuthority) { f.binding.SignedBy = []string{"‮alice"} }},
+		{"signer with an override", func(f *fakeAuthority) { f.binding.SignedBy = []string{"\u202ealice"} }},
 		{"key that is none", func(f *fakeAuthority) { f.binding.Key = "SHA256:x\x1b]0;owned\x07" }},
 	}
 	for _, c := range bad {

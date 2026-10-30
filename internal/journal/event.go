@@ -172,7 +172,7 @@ func SplitTarget(t string) (host string, port int, err error) {
 	return h, n, nil
 }
 
-var portRe = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
+var portRe = regexp.MustCompile(`^[1-9]\d{0,4}$`)
 
 // SortedChecks returns the checks in canonical order (by type, then target).
 func (e *BindingEvent) SortedChecks() []Check {
