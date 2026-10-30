@@ -9,44 +9,64 @@ on:
 permissions:
   contents: read
 
-env:
-  GO_VERSION: "1.26"
-
+# Actions are pinned by commit, downloaded tools by checksum, and Go comes
+# from the toolchain line in go.mod; bump them deliberately.
 jobs:
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0 # full history so gitleaks can scan past commits
+          persist-credentials: false
       - name: Install gitleaks
         env:
           GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
         run: |
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
+          curl -sSfL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
       - name: Scan git history for secrets
         run: ./gitleaks git --no-banner --redact --verbose .
 
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          go-version: ${{ env.GO_VERSION }}
-      - uses: golangci/golangci-lint-action@v9
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          # Pinned; bump deliberately together with any cleanup it requires.
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
           version: v2.12.2
+
+  vulncheck:
+    # Known vulnerabilities in code this module calls, in its dependencies
+    # and in the standard library of the toolchain. "go run" checks the
+    # module against the checksum database.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
       - name: Vet
         run: go vet ./...
       - name: Test
@@ -61,12 +81,14 @@ jobs:
     # instance built from a sync.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
       - name: Build
-        run: CGO_ENABLED=0 go build -o dist/ ./cmd/...
+        run: scripts/build.sh dist
       - name: Integration test in network namespaces
         run: sudo BIN="$PWD/dist" bash test/netns/run.sh
       - name: Journal replication in network namespaces
@@ -81,22 +103,25 @@ jobs:
     # login after the token's max TTL, a key change and the rollback.
     runs-on: ubuntu-latest
     env:
-      # Pinned; bump deliberately.
       VAULT_VERSION: "1.19.2"
+      # From HashiCorp's SHA256SUMS, checked against their signature when
+      # pinned.
+      VAULT_SHA256: c6781c3e0ec431f39bcc8f1443d09f3b8944c90c348e91aa13182b4e1fd2797f
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
       - name: Build
-        run: CGO_ENABLED=0 go build -o dist/ ./cmd/...
+        run: scripts/build.sh dist
       - name: Install Vault and restic
         run: |
           mkdir -p tools
           cd tools
           curl -sSfLO "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
-          curl -sSfL "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_SHA256SUMS" \
-            | grep '_linux_amd64.zip$' | sha256sum -c -
+          echo "${VAULT_SHA256}  vault_${VAULT_VERSION}_linux_amd64.zip" | sha256sum -c -
           unzip -q "vault_${VAULT_VERSION}_linux_amd64.zip" vault
           sudo apt-get update -qq
           sudo apt-get install -y -qq restic
@@ -116,23 +141,28 @@ jobs:
           - {goos: darwin, goarch: amd64, admin: true}
           - {goos: darwin, goarch: arm64, admin: true}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          # Artifacts are built without a cache that other jobs fill.
+          cache: false
       - name: Build static binaries
         env:
-          CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
           ADMIN_ONLY: ${{ matrix.admin }}
         run: |
-          mkdir -p dist
-          LDFLAGS="-s -w -X github.com/DunkelCloud/ergosum/internal/version.Version=${GITHUB_REF_NAME} -X github.com/DunkelCloud/ergosum/internal/version.Commit=${GITHUB_SHA}"
-          EXT=""
-          [ "$GOOS" = windows ] && EXT=.exe
-          go build -trimpath -ldflags "${LDFLAGS}" -o "dist/ergosum${EXT}" ./cmd/ergosum
-          [ "$ADMIN_ONLY" = true ] || go build -trimpath -ldflags "${LDFLAGS}" -o dist/ergosumd ./cmd/ergosumd
+          if [ "$ADMIN_ONLY" = true ]; then
+            scripts/build.sh dist ergosum
+          else
+            scripts/build.sh dist
+          fi
+          sha256sum dist/*
       - name: Check that the binaries are static
         if: matrix.goos == 'linux'
         run: |
@@ -140,7 +170,7 @@ jobs:
             file "$b"
             file "$b" | grep -q 'statically linked'
           done
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ergosum-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
@@ -148,34 +178,55 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Builder image matches the toolchain
+        run: |
+          toolchain=$(sed -n 's/^toolchain go//p' go.mod)
+          image=$(sed -n 's/^FROM .*golang:\([0-9.]*\)-alpine@sha256:.*/\1/p' Dockerfile)
+          echo "go.mod: $toolchain, Dockerfile: $image"
+          test -n "$toolchain" && test "$toolchain" = "$image"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       # The builder stage runs on the native platform and Go cross-compiles,
-      # so no emulation is needed for the arm64 image.
+      # so no emulation is needed for the arm64 image. No build cache: what
+      # one run leaves there must not end up in another's image.
       - name: Build image (linux/amd64, linux/arm64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: false
           build-args: |
-            VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ env.COMMIT }}
       - name: Load amd64 image for a smoke test
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64
           load: true
           tags: ergosum:ci
           build-args: |
-            VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
-          cache-from: type=gha
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ env.COMMIT }}
       - name: Smoke test (non-root, read-only root filesystem)
         run: |
           docker run --rm --read-only ergosum:ci version
           test "$(docker image inspect ergosum:ci --format '{{.Config.User}}')" = "65532:65532"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Image carries the same binary as a build outside it
+        run: |
+          GOOS=linux GOARCH=amd64 scripts/build.sh dist ergosum
+          id=$(docker create ergosum:ci)
+          docker cp "$id:/usr/bin/ergosum" image-ergosum
+          docker rm "$id"
+          sha256sum dist/ergosum image-ergosum
+          cmp dist/ergosum image-ergosum
