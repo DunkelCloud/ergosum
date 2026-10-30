@@ -381,13 +381,19 @@ func TestIngestRules(t *testing.T) {
 	if _, err := ingest(t, a.rep, "b", ev("b", 1, kindNote, "one"), ev("b", 1, kindNote, "one")); err != nil {
 		t.Fatal(err)
 	}
-	// Same (origin, seq) with another hash: rejected, nothing after it.
+	// Same (origin, seq) with another hash that verifies: the origin signed
+	// two events for one position. The first stays, the second is skipped,
+	// and what follows still arrives.
 	acc, err := ingest(t, a.rep, "b", ev("b", 2, kindNote, "two"), ev("b", 2, kindNote, "other"), ev("b", 3, kindNote, "three"))
-	if !errors.Is(err, replication.ErrConflict) || acc != 1 {
-		t.Fatalf("conflict: accepted %d, err %v", acc, err)
+	if err != nil || acc != 3 {
+		t.Fatalf("equivocation: accepted %d, err %v", acc, err)
 	}
-	if a.store.has("b", 3) {
-		t.Fatal("event after a rejection stored")
+	if h, _, _ := a.store.Lookup(context.Background(), "b", 2); h != ev("b", 2, kindNote, "two").Hash || !a.store.has("b", 3) {
+		t.Fatal("equivocation changed the stored event or stopped the page")
+	}
+	// Same position, another hash that does not verify: rejected.
+	if _, err := ingest(t, a.rep, "b", ev("b", 2, kindNote, "bad two")); !errors.Is(err, replication.ErrRejected) {
+		t.Fatalf("forged conflict: %v", err)
 	}
 	// A rejected event stops the page; coverage stays below it.
 	acc, err = ingest(t, a.rep, "b", ev("b", 3, kindNote, "three"), ev("b", 4, kindNote, "bad four"), ev("b", 5, kindNote, "five"))

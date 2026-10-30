@@ -154,6 +154,7 @@ on a host of its own or on a shared host.
 | `machine_identity_journal_outbox_events{peer}` | events a peer has not acknowledged |
 | `machine_identity_journal_outbox_oldest_age_seconds{peer}` | age of the oldest of them; 0 if none |
 | `machine_identity_journal_rejected_total{peer}` | events from a peer that ingest rejected |
+| `machine_identity_journal_equivocations_total{origin}` | events skipped because their origin signed a contradicting event; take that instance out of service |
 | `machine_identity_journal_coverage{origin}` | sequence number up to which every event of an origin is here |
 | `machine_identity_journal_compaction_frontier{origin}` | sequence number up to which events of an origin may be deleted |
 | `machine_identity_journal_checkpoint_age_seconds` | age of the latest own checkpoint; -1 before the first |

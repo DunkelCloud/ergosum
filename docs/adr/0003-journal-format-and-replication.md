@@ -479,6 +479,17 @@ leader, no quorum.
   gaps. Events of the instance's own origin that it no longer holds are
   acknowledged if compaction removed them; a rebuilt instance stores the
   others and continues its sequence numbers after them.
+- **Equivocation**: an event at a position that holds another event, or a
+  binding event its origin recorded under another sequence number, that
+  verifies as well proves that its origin signed contradicting events. It is
+  proof against the origin, not against the sender: ingest acknowledges and
+  skips it, keeps the event it has, and raises an alarm (audit line with
+  both hashes and the signature, metric per origin). Stopping there instead
+  would let one compromised instance halt replication between all honest
+  ones, revocations included. Instances may then hold different events of
+  that origin at that position; for observations that only weakens the
+  record, and binding events converge through the checkpoints. An
+  equivocating instance must be taken out of service.
 - **Rejection**: only an event that fails verification is rejected. Ingest
   stops at the first rejected event and acknowledges
   only what came before it, so the coverage of that origin stops there. The

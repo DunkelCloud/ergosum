@@ -32,6 +32,16 @@ groups:
           summary: "{{ $labels.instance }}: journal event from {{ $labels.peer }} rejected"
           description: "Usually a registry that differs between instances, otherwise a forged event. See the audit log."
 
+      # An instance signed two contradicting events. The event is skipped
+      # and replication goes on, but the instance's key is not trustworthy.
+      - alert: ErgosumJournalEquivocation
+        expr: increase(machine_identity_journal_equivocations_total[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }}: instance {{ $labels.origin }} signed contradicting journal events"
+          description: "See the audit log (journal equivocation) for both hashes. Take that instance out of service."
+
       - alert: ErgosumJournalOutboxStuck
         expr: machine_identity_journal_outbox_oldest_age_seconds > 900
         for: 15m

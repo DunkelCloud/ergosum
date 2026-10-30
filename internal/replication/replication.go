@@ -179,6 +179,10 @@ type Config struct {
 	Authenticate func(r *http.Request) (peer string, ok bool)
 	// OnReject is called for every rejected event, for alarms.
 	OnReject func(peer string, e Event, err error)
+	// OnEquivocation is called when an origin signed two different events
+	// for one position, or Verify reports ErrEquivocation; stored is the
+	// hash already stored at that position, if any. The event is skipped.
+	OnEquivocation func(peer string, e Event, stored string, err error)
 	Logger   *slog.Logger
 
 	// BatchSize is the most events per page. Default 256.
@@ -195,11 +199,13 @@ type Config struct {
 }
 
 // Errors of ingest. ErrConflict wraps ErrRejected. Verify wraps ErrInvalid
-// for events that do not verify.
+// for events that do not verify, and ErrEquivocation for an event that
+// verifies but contradicts one its origin signed before.
 var (
-	ErrRejected = errors.New("event rejected")
-	ErrConflict = fmt.Errorf("%w: same origin and sequence number with another hash", ErrRejected)
-	ErrInvalid  = errors.New("invalid event")
+	ErrRejected     = errors.New("event rejected")
+	ErrConflict     = fmt.Errorf("%w: same origin and sequence number with another hash", ErrRejected)
+	ErrInvalid      = errors.New("invalid event")
+	ErrEquivocation = errors.New("origin signed contradicting events")
 )
 
 // Replicator pushes, ingests and pulls events.
@@ -384,7 +390,16 @@ func (r *Replicator) ingest(ctx context.Context, peer string, e Event) (stored b
 		if hash == e.Hash {
 			return false, nil
 		}
-		return false, r.reject(peer, e, fmt.Errorf("%w (stored: %s)", ErrConflict, hash))
+		// Same position, other content. If this event verifies too, its
+		// origin signed two events for one position: proof against the
+		// origin, not against the sender. It is reported and skipped;
+		// stopping here would let one instance halt replication between
+		// the honest ones, revocations included.
+		if err := r.verify(ctx, peer, e); err != nil {
+			return false, err
+		}
+		r.equivocation(peer, e, hash, fmt.Errorf("%w: %s/%d is stored with hash %s", ErrEquivocation, e.Origin, e.Seq, hash))
+		return false, nil
 	}
 	cov, err := st.Coverage(ctx, e.Origin)
 	if err != nil {
@@ -400,12 +415,24 @@ func (r *Replicator) ingest(ctx context.Context, peer string, e Event) (stored b
 		}
 	}
 	if err := r.verify(ctx, peer, e); err != nil {
+		if errors.Is(err, ErrEquivocation) {
+			r.equivocation(peer, e, "", err)
+			return false, nil
+		}
 		return false, err
 	}
 	if err := st.Append(ctx, e); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// equivocation reports an event that contradicts one its origin signed
+// before; the caller skips the event.
+func (r *Replicator) equivocation(peer string, e Event, stored string, err error) {
+	if r.cfg.OnEquivocation != nil {
+		r.cfg.OnEquivocation(peer, e, stored, err)
+	}
 }
 
 // Frontier raises the compaction frontier to the coverage of the newest own

@@ -205,6 +205,10 @@ func (a *Authority) Metrics() *metrics.Registry { return a.metrics }
 // RequestCount returns machine_identity_requests_total for a result.
 func (a *Authority) RequestCount(result string) float64 { return a.requests.Get(result) }
 
+// EquivocationCount returns how many contradicting events of origin were
+// skipped.
+func (a *Authority) EquivocationCount(origin string) float64 { return a.jm.equivocations.Get(origin) }
+
 func (a *Authority) setKey(k *ecdsa.PrivateKey) error {
 	cert, err := tlspin.Certificate(k)
 	if err != nil {

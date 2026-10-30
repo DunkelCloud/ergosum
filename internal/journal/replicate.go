@@ -87,7 +87,7 @@ func (s *Store) Verify(ctx context.Context, e replication.Event) error {
 		var seq int64
 		err = s.db.QueryRowContext(ctx, `SELECT seq FROM events WHERE origin = ? AND hash = ? AND kind LIKE 'binding.%' AND seq <> ?`, e.Origin, e.Hash, e.Seq).Scan(&seq)
 		if err == nil {
-			return unverified("%s recorded this binding event already as %d", e.Origin, seq)
+			return fmt.Errorf("%w: %s recorded this binding event already as %d", replication.ErrEquivocation, e.Origin, seq)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
