@@ -140,9 +140,12 @@ on a host of its own or on a shared host.
     -v ergosum-state:/var/lib/ergosum-authority \
     -v /etc/ergosum:/etc/ergosum:ro \
     --network host \
-    ghcr.io/example/ergosum:latest
+    ghcr.io/example/ergosum@sha256:...
   docker exec -it ergosum ergosum unseal
   ```
+
+  Name the image by digest, not by a tag such as `latest`: a tag can
+  move, and the authority must run exactly the binary that was checked.
 
   Host networking keeps source addresses and attached networks as on the
   host; with bridged networking `net` checks see only the bridge. The

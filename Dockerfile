@@ -1,6 +1,8 @@
 # The builder stage runs on the native build platform; Go cross-compiles via
 # GOARCH, so no emulation is needed for other target platforms.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+# Pinned by digest. The Go version matches the toolchain in go.mod, so that
+# the image carries the bytes that scripts/build.sh produces elsewhere.
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS builder
 
 ARG VERSION=dev
 ARG COMMIT=unknown
@@ -8,16 +10,13 @@ ARG TARGETARCH
 
 WORKDIR /build
 
-COPY go.mod go.sum* ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w \
-      -X github.com/DunkelCloud/ergosum/internal/version.Version=${VERSION} \
-      -X github.com/DunkelCloud/ergosum/internal/version.Commit=${COMMIT}" \
-    -o /out/usr/bin/ergosum ./cmd/ergosum
+RUN GOOS=linux GOARCH=${TARGETARCH} VERSION=${VERSION} COMMIT=${COMMIT} \
+    sh scripts/build.sh /out/usr/bin ergosum
 
 # The state directory (journal, control socket) belongs to the unprivileged
 # user, so that a named volume mounted there inherits the ownership.
