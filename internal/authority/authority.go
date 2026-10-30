@@ -294,7 +294,8 @@ func (a *Authority) Run(ctx context.Context) error {
 		a.addrMu.Lock()
 		a.opsAddr = ln.Addr()
 		a.addrMu.Unlock()
-		srv := &http.Server{Handler: a.opsHandler(), ReadHeaderTimeout: 10 * time.Second}
+		srv := &http.Server{Handler: a.opsHandler(), ReadHeaderTimeout: 10 * time.Second,
+			WriteTimeout: time.Minute, IdleTimeout: time.Minute}
 		servers = append(servers, srv)
 		go func() { errc <- serve(srv, ln) }()
 	}
@@ -396,7 +397,7 @@ func (a *Authority) apiHandler() http.Handler {
 	mux.HandleFunc("GET "+protocol.PathBindings+"/{identity}", a.handleBindingRead)
 	mux.HandleFunc("GET "+protocol.PathKeys, a.handleKeys)
 	mux.HandleFunc("GET "+protocol.PathKeysPEM, a.handleKeysPEM)
-	return mux
+	return a.bodyGuard(mux, maxAPIBody)
 }
 
 func (a *Authority) opsHandler() http.Handler {
@@ -419,7 +420,7 @@ func (a *Authority) opsHandler() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, st)
 	})
-	return mux
+	return a.bodyGuard(mux, 0)
 }
 
 func (a *Authority) handleKeys(w http.ResponseWriter, _ *http.Request) {
@@ -446,6 +447,32 @@ func (a *Authority) writeError(w http.ResponseWriter, status int, code, detail s
 // WriteTimeout. The deadline is cleared afterwards: the server's background
 // read must keep noticing a requester that goes away during the callbacks.
 const bodyReadTimeout = 15 * time.Second
+
+// maxAPIBody is the largest body the API listener takes (a binding event).
+const maxAPIBody = 256 << 10
+
+// bodyGuard bounds every request body before a handler sees it. A request
+// that announces a body gets the read deadline at once: an unread body is
+// otherwise drained after the handler without any deadline, so a client
+// that announces a body and never sends it held a connection for good.
+// GET and HEAD carry no body, larger ones are refused before reading, and
+// the connection is closed after such a refusal.
+func (a *Authority) bodyGuard(next http.Handler, limit int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.ContentLength > limit {
+			w.Header().Set("Connection", "close")
+			a.writeError(w, http.StatusRequestEntityTooLarge, protocol.ErrBadRequest, "request body not accepted")
+			return
+		}
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		next.ServeHTTP(w, r)
+	})
+}
 
 // readBody reads at most limit bytes of the request body under bodyReadTimeout.
 func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
