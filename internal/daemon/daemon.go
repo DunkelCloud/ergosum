@@ -33,6 +33,7 @@ import (
 	"github.com/DunkelCloud/ergosum/internal/metrics"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
 	"github.com/DunkelCloud/ergosum/internal/tlspin"
+	"github.com/DunkelCloud/ergosum/internal/version"
 )
 
 // Options carries dependencies that tests replace.
@@ -155,6 +156,8 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 		}
 	}
 	d.metrics = metrics.NewRegistry()
+	d.metrics.Info("machine_identity_build_info", "Version and commit of the running binary.",
+		"version", version.Version, "commit", version.Commit)
 	d.mExpiry = d.metrics.Gauge("machine_identity_token_expiry_timestamp_seconds", "Expiry of the current identity token.")
 	d.mSuccess = d.metrics.Gauge("machine_identity_last_success_timestamp_seconds", "Time of the last successful token request.")
 	d.mError = d.metrics.Gauge("machine_identity_last_error_timestamp_seconds", "Time of the last failed token request.")
