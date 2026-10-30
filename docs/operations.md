@@ -389,12 +389,26 @@ The tool refuses what would otherwise fail later or go unnoticed:
 ```yaml
 # ~/.config/ergosum/admin.yaml, on Windows %AppData%\ergosum\admin.yaml
 # (or $ERGOSUM_ADMIN_CONFIG)
+trust_domain: example.com         # the authorities' trust domain
 sign_key: ~/.ssh/id_ed25519.pub   # the administrator's key, see below
-authorities:                      # tried in order
+authorities:                      # every instance of the trust domain
   - url: https://100.64.0.10:7432
     key: SHA256:...               # instance fingerprint, from "ergosum keygen"
-trust_domain: example.com         # optional: must match the authorities'
+  - url: https://100.64.0.11:7432
+    key: SHA256:...
 ```
+
+The tool reads from every configured authority and insists that those that
+answer agree: on the trust domain (it must be the configured one), on the
+approvals, and on the binding of the identity at hand. If they disagree,
+`bind`, `revoke` and `show` stop and name both answers; that happens for a
+moment while replication carries a change, and otherwise means that one
+authority is wrong. `list` names the identities they disagree on. If only
+one authority answers, the tool says that it could compare its answers with
+none. A change goes to the first reachable authority; the tool then asks the
+others for a few seconds whether they have it, and says which do not yet.
+`-trust-domain`, `-authority` and `-authority-key` replace the configured
+values.
 
 `sign_key` is a public key (a file, or the key line itself) whose private
 key the SSH agent holds: `ssh-agent` through `SSH_AUTH_SOCK`, on Windows
@@ -406,8 +420,9 @@ one, which asks for the passphrase or the touch of a security key; a
 private key file as `sign_key` is signed that way, too. `-sign-key`
 overrides the configuration, `-yes` signs without asking.
 
-The administrator's machine needs TCP 7432 to at least one authority: the
-read side (`GET /v1/bindings`) and the write side share that listener.
+The administrator's machine needs TCP 7432 to every authority: the read
+side (`GET /v1/bindings`) and the write side share that listener. With one
+reachable the tool still works, but cannot compare.
 
 ### Routine cases
 

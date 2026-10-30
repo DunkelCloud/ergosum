@@ -2,12 +2,16 @@ package admin
 
 import "net/http"
 
-// NewClientWith is NewClient with the authorities answered by rt.
-func NewClientWith(cfg Config, rt http.RoundTripper) (*Client, error) {
+// ReadBackWait lets tests shorten the read-back after a change.
+var ReadBackWait = &readBackWait
+
+// NewClientRoutes is NewClient with each authority answered by its own
+// RoundTripper, by URL.
+func NewClientRoutes(cfg Config, rts map[string]http.RoundTripper) (*Client, error) {
 	c, err := NewClient(cfg)
 	if err != nil {
 		return nil, err
 	}
-	c.http = func(Authority) *http.Client { return &http.Client{Transport: rt} }
+	c.http = func(a Authority) *http.Client { return &http.Client{Transport: rts[a.URL]} }
 	return c, nil
 }

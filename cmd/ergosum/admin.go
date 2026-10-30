@@ -27,6 +27,7 @@ func (m *multiFlag) Set(s string) error { *m = append(*m, s); return nil }
 // adminFlags are the flags that the administrator commands share.
 type adminFlags struct {
 	config       string
+	trustDomain  string
 	authority    string
 	authorityKey string
 	signKey      string
@@ -45,7 +46,8 @@ func defaultAdminConfig() string {
 }
 
 func (f *adminFlags) register(fs *flag.FlagSet, signs bool) {
-	fs.StringVar(&f.config, "config", defaultAdminConfig(), "administrator configuration (authorities, sign_key)")
+	fs.StringVar(&f.config, "config", defaultAdminConfig(), "administrator configuration (trust_domain, authorities, sign_key)")
+	fs.StringVar(&f.trustDomain, "trust-domain", "", "trust domain of the authorities, instead of the configured one")
 	fs.StringVar(&f.authority, "authority", "", "authority URL, instead of the configured ones")
 	fs.StringVar(&f.authorityKey, "authority-key", "", "key fingerprint of -authority (SHA256:...)")
 	if signs {
@@ -68,6 +70,9 @@ func (f *adminFlags) load() (admin.Config, error) {
 			return cfg, err
 		}
 	}
+	if f.trustDomain != "" {
+		cfg.TrustDomain = f.trustDomain
+	}
 	if f.authority != "" {
 		cfg.Authorities = []admin.Authority{{URL: f.authority, Key: f.authorityKey}}
 	}
@@ -89,11 +94,14 @@ func (f *adminFlags) tool() (*admin.Tool, error) {
 		}
 		return nil, fmt.Errorf("no authority: configure one in %s or give -authority and -authority-key", f.config)
 	}
+	if cfg.TrustDomain == "" {
+		return nil, fmt.Errorf("no trust domain: set trust_domain in %s or give -trust-domain", f.config)
+	}
 	client, err := admin.NewClient(cfg)
 	if err != nil {
 		return nil, err
 	}
-	t := &admin.Tool{Client: client, TrustDomain: cfg.TrustDomain, Out: os.Stderr}
+	t := &admin.Tool{Client: client, Out: os.Stderr}
 	if cfg.SignKey != "" {
 		if t.Key, err = admin.LoadSignKey(cfg.SignKey, f.keygen); err != nil {
 			return nil, err

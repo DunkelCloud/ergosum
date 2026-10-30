@@ -32,13 +32,13 @@ type adminTool struct {
 
 func newAdminTool(t *testing.T, c *cluster, name string, authorities ...admin.Authority) *adminTool {
 	t.Helper()
-	client, err := admin.NewClient(admin.Config{Authorities: authorities})
+	client, err := admin.NewClient(admin.Config{TrustDomain: trustDomain, Authorities: authorities})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := c.admins.Signers[name]
 	at := &adminTool{}
-	at.Tool = &admin.Tool{Client: client, TrustDomain: trustDomain, Out: &at.out,
+	at.Tool = &admin.Tool{Client: client, Out: &at.out,
 		Key: &admin.SignKey{Public: s.PublicKey(), Sign: adminSigner(s)}}
 	return at
 }
@@ -276,4 +276,30 @@ func enrollAgain(t *testing.T, shown, path string) string {
 	t.Helper()
 	writeText(t, path, shown)
 	return path
+}
+
+// TestAdminAsksEveryAuthority: with every authority configured, the tool
+// reads from all of them and, after recording a change at one, finds it at
+// the other through replication.
+func TestAdminAsksEveryAuthority(t *testing.T) {
+	c := newCluster(t, []string{instA, instB}, clusterOptions{threshold: 1})
+	a, b := c.envs[instA], c.envs[instB]
+	ctx := context.Background()
+	alice := newAdminTool(t, c, "alice", admin.Authority{URL: a.url, Key: a.fingerprint()}, admin.Authority{URL: b.url, Key: b.fingerprint()})
+	m := a.machine(host1, machineOptions{targets: []string{at(host1Tailnet)}, authorities: []*env{a, b}, tailnet: host1Tailnet})
+	path := filepath.Join(t.TempDir(), "host1.txt")
+	writeText(t, path, "identity "+host1, "key "+m.d.Fingerprint(), "check tailnet "+host1Tailnet)
+	if err := alice.Bind(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	said := alice.said()
+	requireSaid(t, said, "Recorded by "+a.url, b.url+" has it.")
+	if strings.Contains(said, "Warning") || strings.Contains(said, "Only one") {
+		t.Fatalf("warning with both authorities reachable:\n%s", said)
+	}
+	var shown bytes.Buffer
+	if err := alice.Show(ctx, host1, &shown); err != nil {
+		t.Fatal(err)
+	}
+	requireSaid(t, shown.String(), "bound at epoch 1, approved by alice")
 }

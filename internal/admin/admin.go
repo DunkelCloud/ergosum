@@ -16,7 +16,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -31,14 +34,16 @@ import (
 
 // Config is the configuration of the administrator tools.
 type Config struct {
-	// TrustDomain, if set, must be the authorities' trust domain; events
-	// take it from the authority.
+	// TrustDomain is the authorities' trust domain; an authority that
+	// serves another one is not used.
 	TrustDomain string `yaml:"trust_domain"`
 	// SignKey is the administrator's key: a public key line or file whose
 	// private key the SSH agent holds, or a private key file for
 	// ssh-keygen.
 	SignKey string `yaml:"sign_key"`
-	// Authorities are tried in order, as by the daemon.
+	// Authorities are all instances of the trust domain. Reads ask every
+	// one and insist that those that answer agree; a change goes to the
+	// first reachable one, in order.
 	Authorities []Authority `yaml:"authorities"`
 }
 
@@ -64,8 +69,11 @@ func LoadConfig(path string) (Config, error) {
 	return c, nil
 }
 
-// Validate checks the authorities.
+// Validate checks the trust domain and the authorities.
 func (c Config) Validate() error {
+	if !protocol.ValidDNSName(c.TrustDomain) {
+		return fmt.Errorf("trust_domain %q: set the trust domain of the authorities", c.TrustDomain)
+	}
 	if len(c.Authorities) == 0 {
 		return errors.New("no authority configured")
 	}
@@ -108,89 +116,300 @@ type errUnreachable struct {
 
 func (e *errUnreachable) Error() string { return e.url + ": " + e.err.Error() }
 
+// reply is one authority's answer.
+type reply struct {
+	from   string
+	status int
+	data   []byte
+}
+
+// ask sends one request to one authority; an error means that it is
+// unreachable or unavailable.
+func (c *Client) ask(ctx context.Context, a Authority, method, path string, body []byte) (reply, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(a.URL, "/")+path, rd)
+	if err != nil {
+		return reply{}, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http(a).Do(req)
+	if err != nil {
+		return reply{}, &errUnreachable{a.URL, err}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	_ = resp.Body.Close()
+	if err != nil {
+		return reply{}, &errUnreachable{a.URL, err}
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return reply{}, &errUnreachable{a.URL, errors.New(http.StatusText(resp.StatusCode))}
+	}
+	return reply{from: a.URL, status: resp.StatusCode, data: data}, nil
+}
+
+// do sends a request to the first reachable authority.
 func (c *Client) do(ctx context.Context, method, path string, body []byte) (status int, data []byte, from string, err error) {
 	var errs []error
 	for _, a := range c.cfg.Authorities {
-		var rd io.Reader
-		if body != nil {
-			rd = bytes.NewReader(body)
-		}
-		req, rerr := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(a.URL, "/")+path, rd)
-		if rerr != nil {
-			return 0, nil, "", rerr
-		}
-		if body != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		resp, rerr := c.http(a).Do(req)
-		if rerr != nil {
-			errs = append(errs, &errUnreachable{a.URL, rerr})
+		r, err := c.ask(ctx, a, method, path, body)
+		var eu *errUnreachable
+		if errors.As(err, &eu) {
+			errs = append(errs, err)
 			continue
 		}
-		data, rerr = io.ReadAll(io.LimitReader(resp.Body, maxResponse))
-		_ = resp.Body.Close()
-		if rerr != nil {
-			errs = append(errs, &errUnreachable{a.URL, rerr})
-			continue
+		if err != nil {
+			return 0, nil, "", err
 		}
-		if resp.StatusCode == http.StatusServiceUnavailable {
-			errs = append(errs, &errUnreachable{a.URL, errors.New(http.StatusText(resp.StatusCode))})
-			continue
-		}
-		return resp.StatusCode, data, a.URL, nil
+		return r.status, r.data, r.from, nil
 	}
 	return 0, nil, "", fmt.Errorf("no authority reachable: %w", errors.Join(errs...))
+}
+
+// Reach tells which authorities answered a read.
+type Reach struct {
+	Asked       int
+	Answered    []string
+	Unreachable []error
+}
+
+// every reads path from every authority at once and returns the answers
+// of the reachable ones in configuration order; an error means that none
+// answered.
+func (c *Client) every(ctx context.Context, path string) ([]reply, Reach, error) {
+	replies := make([]reply, len(c.cfg.Authorities))
+	errs := make([]error, len(c.cfg.Authorities))
+	var wg sync.WaitGroup
+	for i, a := range c.cfg.Authorities {
+		wg.Go(func() { replies[i], errs[i] = c.ask(ctx, a, http.MethodGet, path, nil) })
+	}
+	wg.Wait()
+	reach := Reach{Asked: len(c.cfg.Authorities)}
+	var out []reply
+	for i, r := range replies {
+		var eu *errUnreachable
+		switch {
+		case errors.As(errs[i], &eu):
+			reach.Unreachable = append(reach.Unreachable, errs[i])
+		case errs[i] != nil:
+			return nil, reach, errs[i]
+		default:
+			out = append(out, r)
+			reach.Answered = append(reach.Answered, r.from)
+		}
+	}
+	if len(out) == 0 {
+		return nil, reach, fmt.Errorf("no authority reachable: %w", errors.Join(reach.Unreachable...))
+	}
+	return out, reach, nil
 }
 
 // maxResponse bounds an answer; the list of a few thousand bindings fits.
 const maxResponse = 16 << 20
 
-// List returns the projection of every identity and the approvals the
-// registry demands, from the first reachable authority.
-func (c *Client) List(ctx context.Context) (*journal.BindingList, string, error) {
-	status, data, from, err := c.do(ctx, http.MethodGet, protocol.PathBindings, nil)
+// ErrDisagree is returned when the reachable authorities answer a read
+// differently.
+var ErrDisagree = errors.New("the authorities disagree")
+
+// lists reads the list from every reachable authority; each must serve the
+// configured trust domain, and all must have the same approvals.
+func (c *Client) lists(ctx context.Context) ([]*journal.BindingList, []string, Reach, error) {
+	replies, reach, err := c.every(ctx, protocol.PathBindings)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, reach, err
 	}
-	if status != http.StatusOK {
-		return nil, from, fmt.Errorf("%s: %d %s", from, status, errorDetail(data))
+	var ls []*journal.BindingList
+	var from []string
+	for _, r := range replies {
+		if r.status != http.StatusOK {
+			return nil, nil, reach, fmt.Errorf("%s: %d %s", r.from, r.status, errorDetail(r.data))
+		}
+		var l journal.BindingList
+		if err := json.Unmarshal(r.data, &l); err != nil {
+			return nil, nil, reach, fmt.Errorf("%s: %w", r.from, err)
+		}
+		if err := l.Validate(); err != nil {
+			return nil, nil, reach, fmt.Errorf("%s: unusable answer: %w", r.from, err)
+		}
+		if l.TrustDomain != c.cfg.TrustDomain {
+			return nil, nil, reach, fmt.Errorf("%s serves trust domain %s, the configuration names %s", r.from, l.TrustDomain, c.cfg.TrustDomain)
+		}
+		if len(ls) > 0 && !reflect.DeepEqual(l.Approvals, ls[0].Approvals) {
+			return nil, nil, reach, fmt.Errorf("%w on the approvals (%s and %s): their registries differ", ErrDisagree, from[0], r.from)
+		}
+		ls = append(ls, &l)
+		from = append(from, r.from)
 	}
-	var l journal.BindingList
-	if err := json.Unmarshal(data, &l); err != nil {
-		return nil, from, fmt.Errorf("%s: %w", from, err)
-	}
-	if err := l.Validate(); err != nil {
-		return nil, from, fmt.Errorf("%s: unusable answer: %w", from, err)
-	}
-	return &l, from, nil
+	return ls, from, reach, nil
 }
 
-// Current returns the projection of identity at the first reachable
-// authority, with the administrators who approved it, or nil if it has
-// none.
-func (c *Client) Current(ctx context.Context, identity string) (*journal.Binding, error) {
-	status, data, from, err := c.do(ctx, http.MethodGet, protocol.PathBindings+"/"+identity, nil)
+// List returns the projection of every identity and the approvals the
+// registry demands, as the first reachable authority has them, and the
+// identities whose binding the reachable authorities disagree on, which
+// happens while replication catches up.
+func (c *Client) List(ctx context.Context) (*journal.BindingList, string, Reach, []string, error) {
+	ls, from, reach, err := c.lists(ctx)
+	if err != nil {
+		return nil, "", reach, nil, err
+	}
+	seen := map[string]bool{}
+	var differ []string
+	for _, l := range ls {
+		for _, b := range l.Bindings {
+			if seen[b.Identity] {
+				continue
+			}
+			seen[b.Identity] = true
+			for _, other := range ls {
+				if !same(find(other, b.Identity), b) {
+					differ = append(differ, b.Identity)
+					break
+				}
+			}
+		}
+	}
+	sort.Strings(differ)
+	return ls[0], from[0], reach, differ, nil
+}
+
+// State is what the reachable authorities agree on for one change: the
+// list with the approvals and the current binding of the identity.
+type State struct {
+	List    *journal.BindingList
+	From    string           // the first reachable authority
+	Current *journal.Binding // nil if the identity has none
+	Reach   Reach
+}
+
+// State reads the list from every authority and insists that the reachable
+// ones agree on the identity's binding.
+func (c *Client) State(ctx context.Context, identity string) (*State, error) {
+	ls, from, reach, err := c.lists(ctx)
 	if err != nil {
 		return nil, err
 	}
-	switch status {
+	bs := make([]*journal.Binding, len(ls))
+	for i, l := range ls {
+		bs[i] = find(l, identity)
+	}
+	if err := agree(identity, from, bs); err != nil {
+		return nil, err
+	}
+	return &State{List: ls[0], From: from[0], Current: bs[0], Reach: reach}, nil
+}
+
+// Current returns the projection of identity, with the administrators who
+// approved it, or nil if it has none, as every reachable authority has it.
+func (c *Client) Current(ctx context.Context, identity string) (*journal.Binding, Reach, error) {
+	replies, reach, err := c.every(ctx, protocol.PathBindings+"/"+identity)
+	if err != nil {
+		return nil, reach, err
+	}
+	var bs []*journal.Binding
+	var from []string
+	for _, r := range replies {
+		b, err := binding(r, identity)
+		if err != nil {
+			return nil, reach, err
+		}
+		bs = append(bs, b)
+		from = append(from, r.from)
+	}
+	if err := agree(identity, from, bs); err != nil {
+		return nil, reach, err
+	}
+	return bs[0], reach, nil
+}
+
+// binding decodes and checks one authority's answer for identity.
+func binding(r reply, identity string) (*journal.Binding, error) {
+	switch r.status {
 	case http.StatusOK:
 		var b journal.Binding
-		if err := json.Unmarshal(data, &b); err != nil {
-			return nil, fmt.Errorf("%s: %w", from, err)
+		if err := json.Unmarshal(r.data, &b); err != nil {
+			return nil, fmt.Errorf("%s: %w", r.from, err)
 		}
 		if err := b.Validate(); err != nil {
-			return nil, fmt.Errorf("%s: unusable answer: %w", from, err)
+			return nil, fmt.Errorf("%s: unusable answer: %w", r.from, err)
 		}
 		if b.Identity != identity {
-			return nil, fmt.Errorf("%s: unusable answer: asked for %s, got %s", from, identity, b.Identity)
+			return nil, fmt.Errorf("%s: unusable answer: asked for %s, got %s", r.from, identity, b.Identity)
 		}
 		return &b, nil
 	case http.StatusNotFound:
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("%s: %d %s", from, status, errorDetail(data))
+		return nil, fmt.Errorf("%s: %d %s", r.from, r.status, errorDetail(r.data))
 	}
+}
+
+// same reports whether two authorities have the same binding: the same
+// event wins at both, or neither has one.
+func same(a, b *journal.Binding) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Hash == b.Hash
+}
+
+// agree insists that every authority has the same binding.
+func agree(identity string, from []string, bs []*journal.Binding) error {
+	for i := 1; i < len(bs); i++ {
+		if !same(bs[0], bs[i]) {
+			return fmt.Errorf("%w on %s: %s has %s, %s has %s. Replication may be catching up: try again shortly. "+
+				"If it persists, one of them is wrong; compare them with \"ergosum show -authority URL -authority-key KEY %s\"",
+				ErrDisagree, identity, from[0], at(bs[0]), from[i], at(bs[i]), identity)
+		}
+	}
+	return nil
+}
+
+// at describes a binding for a comparison.
+func at(b *journal.Binding) string {
+	if b == nil {
+		return "no binding"
+	}
+	state := "bound"
+	if !b.Active() {
+		state = "revoked"
+	}
+	return fmt.Sprintf("epoch %d (%s, event %s/%d)", b.Epoch, state, b.Origin, b.Seq)
+}
+
+// Holds reports whether the authority at url has the event with hash as
+// the binding of identity: "" if it does, otherwise what it has instead.
+func (c *Client) Holds(ctx context.Context, url, identity, hash string) (string, error) {
+	for _, a := range c.cfg.Authorities {
+		if a.URL != url {
+			continue
+		}
+		r, err := c.ask(ctx, a, http.MethodGet, protocol.PathBindings+"/"+identity, nil)
+		if err != nil {
+			return "", err
+		}
+		b, err := binding(r, identity)
+		if err != nil {
+			return "", err
+		}
+		if b != nil && b.Hash == hash {
+			return "", nil
+		}
+		return at(b), nil
+	}
+	return "", fmt.Errorf("%s is not configured", url)
+}
+
+// Authorities returns the URLs of the configured authorities.
+func (c *Client) Authorities() []string {
+	out := make([]string, 0, len(c.cfg.Authorities))
+	for _, a := range c.cfg.Authorities {
+		out = append(out, a.URL)
+	}
+	return out
 }
 
 // SubmitError is an authority's refusal of an event.

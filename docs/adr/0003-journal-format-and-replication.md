@@ -232,6 +232,14 @@ without control characters and cut short. A value thus cannot add a line to
 a binding file or change what a terminal shows; the text to sign is shown
 last, right before the question to sign.
 
+Tooling reads from every authority of the trust domain and insists that the
+reachable ones agree on the trust domain, the approvals and the binding of
+the identity it changes, so that a single authority cannot make an
+administrator sign a change against a binding the others do not have (the
+epoch in the signed text binds the change to that state). A receipt must
+name the hash of the submitted event. After a change, tooling asks the
+other authorities whether they have it; that only informs.
+
 Bindings and administrator key fingerprints are no secret, and the
 per-identity read already showed every binding to whoever knew the name.
 The list saves the guessing; it shows the inventory to every machine that
