@@ -2,15 +2,18 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/jwt"
+	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/metrics"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
@@ -156,5 +159,60 @@ func TestInflight(t *testing.T) {
 	now = now.Add(protocol.EndedTTL + time.Second)
 	if got := f.status(id, a); got != protocol.StatusNoOpenRequest {
 		t.Fatalf("long ended request: %s", got)
+	}
+}
+
+// A key switch keeps the old key until a token is issued for the new one.
+// A refusal by every authority goes back to the old key and keeps the new
+// one waiting; an outage changes nothing.
+func TestKeySwitchSettles(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		Identity: "host1.example.com", StateDir: dir, TokenGroup: "-",
+		Authorities: []AuthorityConfig{{URL: "https://192.0.2.1:7432", Key: "SHA256:" + strings.Repeat("A", 43)}},
+	}
+	d, err := New(cfg, Options{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := d.Fingerprint()
+	next, err := d.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk := func(name string) string {
+		k, err := keys.Load(filepath.Join(dir, name))
+		if err != nil {
+			return ""
+		}
+		return keys.Fingerprint(&k.PublicKey)
+	}
+	refused := errors.Join(fmt.Errorf("a: %w", &RequestError{Status: 403, Code: "denied"}), fmt.Errorf("b: %w", &RequestError{Status: 403, Code: "denied"}))
+	outage := errors.Join(fmt.Errorf("a: %w", &RequestError{Status: 403}), errors.New("b: connection refused"))
+
+	if err := d.switchToPending(d.pending); err != nil {
+		t.Fatal(err)
+	}
+	if d.Fingerprint() != next || onDisk("identity.key") != next || onDisk("identity.key.old") != old || onDisk("identity.key.new") != "" {
+		t.Fatal("switch: current, old and next key not where expected")
+	}
+	d.settleKeySwitch(outage)
+	if d.Fingerprint() != next || onDisk("identity.key.old") != old {
+		t.Fatal("an outage changed the keys")
+	}
+	d.settleKeySwitch(refused)
+	if d.Fingerprint() != old || d.PendingFingerprint() != next || onDisk("identity.key") != old ||
+		onDisk("identity.key.new") != next || onDisk("identity.key.old") != "" {
+		t.Fatal("refused: not back on the old key with the new one waiting")
+	}
+	if !d.now().Before(d.holdPending) {
+		t.Fatal("no pause before the next switch")
+	}
+	if err := d.switchToPending(d.pending); err != nil {
+		t.Fatal(err)
+	}
+	d.settleKeySwitch(nil)
+	if d.Fingerprint() != next || onDisk("identity.key") != next || onDisk("identity.key.old") != "" {
+		t.Fatal("token for the new key: old key not deleted")
 	}
 }

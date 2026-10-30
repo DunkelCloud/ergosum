@@ -672,3 +672,35 @@ func (e *env) observations(t *testing.T, kind string) []authority.Observation {
 	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
 	return out
 }
+
+// TestKeySwitchNeedsEveryAuthority: one authority that already shows a
+// binding to the next key cannot make the daemon switch while another
+// still binds the current key; the daemon keeps its key and its token.
+func TestKeySwitchNeedsEveryAuthority(t *testing.T) {
+	sim := newSimNet()
+	admins := jt.NewAdmins(t, "alice", "bob", "carol")
+	a := newEnv(t, envOptions{instance: "authority-a", net: sim, admins: admins})
+	b := newEnv(t, envOptions{instance: "authority-b", net: sim, admins: admins})
+	m := a.machine(host1, machineOptions{targets: []string{at(host1Tailnet), at(host1IP)}, authorities: []*env{a, b}})
+	old := m.d.Fingerprint()
+	a.bind(host1, old, 1, tailnetCheck(host1Tailnet), ipCheck(host1IP))
+	b.bind(host1, old, 1, tailnetCheck(host1Tailnet), ipCheck(host1IP))
+	next, err := m.d.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.bind(host1, next, 2, tailnetCheck(host1Tailnet), ipCheck(host1IP)) // only A
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- m.d.Run(ctx) }()
+	eventually(t, "token", func() bool {
+		_, err := os.Stat(filepath.Join(m.tokenDir, "token"))
+		return err == nil
+	})
+	stop()
+	<-done
+	if m.d.Fingerprint() != old || m.d.PendingFingerprint() != next {
+		t.Fatalf("switched on the word of one authority: current %s, next %s", m.d.Fingerprint(), m.d.PendingFingerprint())
+	}
+	requireCount(t, b.auth, authority.ResultIssued, 1)
+}

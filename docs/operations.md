@@ -425,14 +425,18 @@ read side (`GET /v1/bindings`) and the write side share that listener.
 **Key change.** `ergosumd request -new-key` creates the next key next to the
 current one (`identity.key.new`) and writes a request for it; asked again,
 it names the same next key. The daemon keeps using the current key. Before
-each request it asks an authority for its binding (`GET
-/v1/bindings/<identity>`); once the binding names the next key, it switches,
-deletes the old key and requests with the new one. No request is refused on
-the way, so no `foreign_key` appears. `ergosum bind` shows the change as
-"key old -> new"; the old key is invalid from the moment the binding is
-recorded. `machine_identity_key_change_pending` is 1 while the next key
-waits. After a restore without the state directory there is no old key:
-`ergosumd request` creates a new one.
+each request it asks every authority for its binding (`GET
+/v1/bindings/<identity>`); once every authority that answers names the next
+key, it switches and requests with the new one. One authority alone cannot
+make it switch. The old key stays as `identity.key.old` until a token is
+issued for the new one, then it is deleted. If every authority refuses the
+new key (403), the daemon goes back to the old key, keeps the new one as
+`identity.key.new` and asks again after ten minutes; an outage changes
+nothing. No request is refused on the way, so no `foreign_key` appears.
+`ergosum bind` shows the change as "key old -> new"; the old key is invalid
+from the moment the binding is recorded. `machine_identity_key_change_pending`
+is 1 while the next key waits. After a restore without the state directory
+there is no old key: `ergosumd request` creates a new one.
 
 **Revocation.** `ergosum revoke NAME` shows what it ends, writes
 `NAME.revoke.txt` and continues as `ergosum bind`; another administrator
