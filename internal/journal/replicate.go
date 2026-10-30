@@ -26,6 +26,7 @@ var observationKinds = map[string]bool{
 	KindObservation + ".key_duplicate":  true,
 	KindObservation + ".wrong_location": true,
 	KindObservation + ".replay":         true,
+	KindObservation + ".misdirected":    true,
 }
 
 // AlwaysIngest reports the kinds that ingest stores even at or below the

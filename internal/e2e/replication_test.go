@@ -768,3 +768,24 @@ func fingerprintOf(t *testing.T) string {
 	}
 	return keys.Fingerprint(&k.PublicKey)
 }
+
+// TestRefusalsReplicate: every observation kind an instance journals
+// reaches the others; an unknown kind would stop replication from it.
+func TestRefusalsReplicate(t *testing.T) {
+	c := newCluster(t, []string{instA, instB}, clusterOptions{})
+	a, b := c.envs[instA], c.envs[instB]
+	m := a.machine(host1, machineOptions{targets: []string{at(host1Tailnet), at(host1IP)}})
+	a.bind(host1, m.d.Fingerprint(), 1, tailnetCheck(host1Tailnet), ipCheck(host1IP))
+	key, _, err := keys.LoadOrCreate(filepath.Join(m.stateDir, "identity.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := postRequestTo(t, a, key, host1, protocol.NewRequestID(), b.fingerprint()); status != http.StatusForbidden {
+		t.Fatalf("misdirected request: status %d", status)
+	}
+	eventually(t, "misdirected observation at B", func() bool {
+		return journalCount(t, b.auth, "observation.misdirected") == 1
+	})
+	// Nothing stays behind in A's outbox: B took every event.
+	eventually(t, "A's outbox empty", func() bool { return a.state().Peers[0].Pending == 0 })
+}
