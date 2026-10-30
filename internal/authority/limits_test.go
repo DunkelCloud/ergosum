@@ -1,6 +1,9 @@
 package authority
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -136,5 +139,25 @@ func TestRetiredPeer(t *testing.T) {
 	ps, err := cfg.peers()
 	if err != nil || len(ps) != 1 || !ps[0].retired {
 		t.Fatalf("retired instance: %+v %v", ps, err)
+	}
+}
+
+// TestKeyMode: a signing key that other users may read or change is
+// refused; 0600 and 0640 are fine.
+func TestKeyMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no mode bits on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "signing.key")
+	if err := os.WriteFile(path, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for mode, ok := range map[os.FileMode]bool{0o600: true, 0o640: true, 0o400: true, 0o644: false, 0o660: false, 0o604: false, 0o606: false} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkKeyMode(path); (err == nil) != ok {
+			t.Errorf("mode %04o: %v", mode, err)
+		}
 	}
 }

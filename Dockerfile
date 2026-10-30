@@ -21,16 +21,16 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath \
 
 # The state directory (journal, control socket) belongs to the unprivileged
 # user, so that a named volume mounted there inherits the ownership.
-RUN mkdir -p /out/var/lib/ergosum /out/etc/ergosum \
- && chown 65532:65532 /out/var/lib/ergosum \
- && chmod 0700 /out/var/lib/ergosum
+RUN mkdir -p /out/var/lib/ergosum-authority /out/etc/ergosum \
+ && chown 65532:65532 /out/var/lib/ergosum-authority \
+ && chmod 0700 /out/var/lib/ergosum-authority
 
 FROM scratch
 
 COPY --from=builder /out/ /
 
 USER 65532:65532
-VOLUME ["/var/lib/ergosum"]
+VOLUME ["/var/lib/ergosum-authority"]
 EXPOSE 7432 7434 7435
 
 ENTRYPOINT ["/usr/bin/ergosum"]

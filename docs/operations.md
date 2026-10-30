@@ -6,19 +6,29 @@ All addresses below are documentation examples (RFC 5737, RFC 3849).
 
 | Path | Owner, mode | Content |
 | --- | --- | --- |
-| `/etc/ergosum/` | root, 0755 | `ergosumd.yaml`, `serve.yaml`, `signing.key` (0640, group `ergosum`) |
-| `/var/lib/ergosum/` | `ergosum`, 0700 | daemon: `identity.key` (0600); authority: `journal.db`, `control.sock`, optionally `archive/` |
+| `/etc/ergosum/` | root, 0755 | `ergosumd.yaml`, `serve.yaml`, `signing.key` (0640, group `ergosum-authority`) |
+| `/var/lib/ergosum/` | `ergosum`, 0700 | daemon: `identity.key` (0600) |
+| `/var/lib/ergosum-authority/` | `ergosum-authority`, 0700 | authority: `journal.db`, `control.sock`, optionally `archive/` |
 | `/run/ergosum/token` | `ergosum`:`ergosum-token`, 0640 | identity token, read by Vault Agent |
 
-Create the user and groups with `deploy/sysusers.d/ergosum.conf`
-(systemd), or on Alpine:
+The daemon runs as `ergosum`, the authority as `ergosum-authority`: on a
+host with both, a daemon that is taken over reaches neither the signing
+key nor the journal. Create the users and groups with
+`deploy/sysusers.d/ergosum.conf` (systemd), or on Alpine:
 
 ```sh
 addgroup -S ergosum-token
 adduser -S -D -H -h /var/lib/ergosum -s /sbin/nologin ergosum
 addgroup ergosum ergosum-token
 addgroup vault ergosum-token   # the user Vault Agent runs as
+adduser -S -D -H -h /var/lib/ergosum-authority -s /sbin/nologin ergosum-authority   # authorities only
 ```
+
+Upgrading an authority that ran as `ergosum`: stop it, move
+`/var/lib/ergosum/journal.db*` (and the archive) to
+`/var/lib/ergosum-authority/`, `chown -R ergosum-authority:` that directory,
+give `signing.key` to the group `ergosum-authority`, and adjust `journal`,
+`control_socket` and `archive` in `serve.yaml` if they name the old place.
 
 Service definitions: `deploy/systemd/` and `deploy/openrc/` (Alpine,
 `supervise-daemon`). Both binaries run in the foreground and log JSON lines
@@ -77,8 +87,11 @@ mode 0600 for the user who runs it; hand it to the service user before the
 first start:
 
 ```sh
-chgrp ergosum /etc/ergosum/signing.key && chmod 0640 /etc/ergosum/signing.key
+chgrp ergosum-authority /etc/ergosum/signing.key && chmod 0640 /etc/ergosum/signing.key
 ```
+
+The authority refuses to start with a key file that other users may read or
+anyone but its owner may change (mode bits beyond 0640).
 
 With an encrypted key the instance starts **sealed** after every start: it
 serves only metrics, health and its public key, and issues nothing until an
@@ -88,7 +101,8 @@ operator runs, on the same host,
 ergosum unseal                       # reads the passphrase from the terminal or stdin
 ```
 
-The control socket (`/var/lib/ergosum/control.sock`, mode 0600) is the only
+The control socket (`/var/lib/ergosum-authority/control.sock`, mode 0600, run
+`ergosum unseal` as `ergosum-authority` or root) is the only
 way in; it is not reachable over the network. A sealed instance does not
 restart into service on its own; another instance keeps issuing meanwhile.
 `machine_identity_authority_sealed` is 1 while sealed — alert on it.
@@ -123,7 +137,7 @@ on a host of its own or on a shared host.
 
   ```sh
   docker run -d --name ergosum --read-only \
-    -v ergosum-state:/var/lib/ergosum \
+    -v ergosum-state:/var/lib/ergosum-authority \
     -v /etc/ergosum:/etc/ergosum:ro \
     --network host \
     ghcr.io/example/ergosum:latest
@@ -131,7 +145,9 @@ on a host of its own or on a shared host.
   ```
 
   Host networking keeps source addresses and attached networks as on the
-  host; with bridged networking `net` checks see only the bridge.
+  host; with bridged networking `net` checks see only the bridge. The
+  signing key must be readable by 65532 and by no other user:
+  `chown 65532 /etc/ergosum/signing.key`, mode 0600.
 
 ### Callback rules
 
@@ -287,7 +303,7 @@ compaction:
     observations: 2160h     # 90 days; 0 keeps them
     key_duplicate: 0s       # evidence of a copied key: kept
     bindings: 0s            # binding history: kept; the winners live on in the checkpoint
-  archive: /var/lib/ergosum/archive   # optional
+  archive: /var/lib/ergosum-authority/archive   # optional
 ```
 
 With an archive, compaction first writes the events not yet archived to a

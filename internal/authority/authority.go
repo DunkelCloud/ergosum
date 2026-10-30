@@ -135,6 +135,9 @@ func New(cfg Config, opts Options) (*Authority, error) {
 		a.net = &SystemNetwork{TailnetPrefixes: rs.overlay, Timeout: cfg.Callbacks.Timeout}
 	}
 
+	if err := checkKeyMode(cfg.SigningKey); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(cfg.SigningKey)
 	if err != nil {
 		return nil, fmt.Errorf("signing key: %w", err)

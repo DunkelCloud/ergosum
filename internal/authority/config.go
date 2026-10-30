@@ -35,7 +35,7 @@ type Config struct {
 	// SigningKey is the PEM file with the instance key, optionally
 	// passphrase-encrypted (then the instance starts sealed).
 	SigningKey string `yaml:"signing_key"`
-	// Journal is the SQLite file. Default: /var/lib/ergosum/journal.db.
+	// Journal is the SQLite file. Default: /var/lib/ergosum-authority/journal.db.
 	Journal string `yaml:"journal"`
 	// Listen is the TLS listener for token requests and binding writes,
 	// normally the instance's overlay address with port 7432. It is
@@ -50,7 +50,7 @@ type Config struct {
 	// ControlSocket is the local Unix socket for "ergosum unseal" and
 	// "ergosum journal". It lives in the state directory, so that it needs
 	// no runtime directory of its own. Default:
-	// /var/lib/ergosum/control.sock.
+	// /var/lib/ergosum-authority/control.sock.
 	ControlSocket string `yaml:"control_socket"`
 	// Callbacks configures how callbacks leave this instance.
 	Callbacks CallbackConfig `yaml:"callbacks"`
@@ -242,13 +242,13 @@ func (c *Config) SetDefaults() {
 		c.ClockSkew = 2 * time.Minute
 	}
 	if c.Journal == "" {
-		c.Journal = "/var/lib/ergosum/journal.db"
+		c.Journal = "/var/lib/ergosum-authority/journal.db"
 	}
 	if c.OpsListen == "" {
 		c.OpsListen = fmt.Sprintf("127.0.0.1:%d", protocol.DefaultOpsPort)
 	}
 	if c.ControlSocket == "" {
-		c.ControlSocket = "/var/lib/ergosum/control.sock"
+		c.ControlSocket = "/var/lib/ergosum-authority/control.sock"
 	}
 	if c.Replication.MaxPageMiB == 0 {
 		c.Replication.MaxPageMiB = 32
