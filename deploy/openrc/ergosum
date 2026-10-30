@@ -9,7 +9,9 @@ description="ergosum authority"
 supervisor="supervise-daemon"
 command="/usr/bin/ergosum"
 command_args="serve --config ${ERGOSUM_CONFIG}"
-command_user="ergosum:ergosum"
+# A user of its own: on a shared host the daemon (user ergosum) must not
+# reach the signing key or the journal.
+command_user="ergosum-authority:ergosum-authority"
 umask="077"
 output_logger="logger -t ergosum -p daemon.info"
 error_logger="logger -t ergosum -p daemon.err"
@@ -24,5 +26,5 @@ depend() {
 }
 
 start_pre() {
-	checkpath --directory --owner ergosum:ergosum --mode 0700 /var/lib/ergosum
+	checkpath --directory --owner ergosum-authority:ergosum-authority --mode 0700 /var/lib/ergosum-authority
 }

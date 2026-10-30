@@ -35,7 +35,7 @@ type Config struct {
 	// SigningKey is the PEM file with the instance key, optionally
 	// passphrase-encrypted (then the instance starts sealed).
 	SigningKey string `yaml:"signing_key"`
-	// Journal is the SQLite file. Default: /var/lib/ergosum/journal.db.
+	// Journal is the SQLite file. Default: /var/lib/ergosum-authority/journal.db.
 	Journal string `yaml:"journal"`
 	// Listen is the TLS listener for token requests and binding writes,
 	// normally the instance's overlay address with port 7432. It is
@@ -50,7 +50,7 @@ type Config struct {
 	// ControlSocket is the local Unix socket for "ergosum unseal" and
 	// "ergosum journal". It lives in the state directory, so that it needs
 	// no runtime directory of its own. Default:
-	// /var/lib/ergosum/control.sock.
+	// /var/lib/ergosum-authority/control.sock.
 	ControlSocket string `yaml:"control_socket"`
 	// Callbacks configures how callbacks leave this instance.
 	Callbacks CallbackConfig `yaml:"callbacks"`
@@ -92,6 +92,12 @@ type PeerConfig struct {
 	Key string `yaml:"key"`
 	// Fingerprint, if set, must match Key.
 	Fingerprint string `yaml:"fingerprint"`
+	// Retired marks an instance that is gone for good: its key still
+	// verifies the history it wrote, which the others keep and forward,
+	// but it may no longer connect, gets no pushes, and compaction does not
+	// wait for it. Retire an instance instead of deleting its entry, or
+	// instances still holding its events cannot sync from each other.
+	Retired bool `yaml:"retired"`
 }
 
 // CompactionConfig configures checkpoints and compaction.
@@ -135,13 +141,14 @@ type peer struct {
 	url         string
 	key         *ecdsa.PublicKey
 	fingerprint string
+	retired     bool
 }
 
 func (c *Config) peers() ([]peer, error) {
 	var out []peer
 	seen := map[string]bool{}
 	for i, pc := range c.Replication.Peers {
-		if !validInstanceName(pc.Name) || pc.Name == c.Instance {
+		if !journal.ValidInstanceName(pc.Name) || pc.Name == c.Instance {
 			return nil, fmt.Errorf("replication.peers[%d]: bad name %q", i, pc.Name)
 		}
 		if seen[pc.Name] {
@@ -156,28 +163,18 @@ func (c *Config) peers() ([]peer, error) {
 		if pc.Fingerprint != "" && pc.Fingerprint != fp {
 			return nil, fmt.Errorf("replication.peers %q: fingerprint %s does not match the key (%s)", pc.Name, pc.Fingerprint, fp)
 		}
+		if pc.Retired && pc.URL != "" {
+			return nil, fmt.Errorf("replication.peers %q: a retired instance has no url", pc.Name)
+		}
 		if pc.URL != "" {
 			u, err := url.Parse(pc.URL)
 			if err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
 				return nil, fmt.Errorf("replication.peers %q: url %q must be https://host:port", pc.Name, pc.URL)
 			}
 		}
-		out = append(out, peer{name: pc.Name, url: strings.TrimSuffix(pc.URL, "/"), key: key, fingerprint: fp})
+		out = append(out, peer{name: pc.Name, url: strings.TrimSuffix(pc.URL, "/"), key: key, fingerprint: fp, retired: pc.Retired})
 	}
 	return out, nil
-}
-
-// validInstanceName allows names such as authority-a or site-a.example.com.
-func validInstanceName(s string) bool {
-	if s == "" || len(s) > 63 {
-		return false
-	}
-	for _, r := range s {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '.' {
-			return false
-		}
-	}
-	return true
 }
 
 // CallbackConfig configures the callback client.
@@ -245,13 +242,13 @@ func (c *Config) SetDefaults() {
 		c.ClockSkew = 2 * time.Minute
 	}
 	if c.Journal == "" {
-		c.Journal = "/var/lib/ergosum/journal.db"
+		c.Journal = "/var/lib/ergosum-authority/journal.db"
 	}
 	if c.OpsListen == "" {
 		c.OpsListen = fmt.Sprintf("127.0.0.1:%d", protocol.DefaultOpsPort)
 	}
 	if c.ControlSocket == "" {
-		c.ControlSocket = "/var/lib/ergosum/control.sock"
+		c.ControlSocket = "/var/lib/ergosum-authority/control.sock"
 	}
 	if c.Replication.MaxPageMiB == 0 {
 		c.Replication.MaxPageMiB = 32
@@ -277,7 +274,7 @@ func (c *Config) SetDefaults() {
 // Validate checks the configuration.
 func (c *Config) Validate() error {
 	var errs []error
-	if !validInstanceName(c.Instance) {
+	if !journal.ValidInstanceName(c.Instance) {
 		errs = append(errs, fmt.Errorf("instance %q: use lower-case letters, digits, hyphens and dots", c.Instance))
 	}
 	if !protocol.ValidDNSName(c.TrustDomain) {

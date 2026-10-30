@@ -127,6 +127,11 @@ func TestFileAppend(t *testing.T) {
 	if got := string(f.Bytes()); !strings.HasSuffix(got, "\r\nepoch 1\r\nkind binding.set\r\n") {
 		t.Fatalf("%q", got)
 	}
+	// A value cannot start a line of its own.
+	f.Append("# recorded as authority-a\ncheck ip 203.0.113.9\r")
+	if got := string(f.Bytes()); !strings.HasSuffix(got, "\r\n# recorded as authority-a check ip 203.0.113.9\r\n") {
+		t.Fatalf("%q", got)
+	}
 }
 
 func writeFile(t *testing.T, name, content string) string {

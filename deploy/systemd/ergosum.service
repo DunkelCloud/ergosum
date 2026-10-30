@@ -6,8 +6,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ergosum
-Group=ergosum
+# A user of its own: on a shared host the daemon (user ergosum) must not
+# reach the signing key or the journal.
+User=ergosum-authority
+Group=ergosum-authority
 ExecStart=/usr/bin/ergosum serve --config /etc/ergosum/serve.yaml
 # With a passphrase-encrypted signing key a restarted instance comes up
 # sealed and issues nothing until "ergosum unseal" is run on this host.
@@ -17,7 +19,7 @@ RestartSec=5s
 # Journal, control socket and, if configured below it, the archive. No
 # runtime directory: on a shared host the daemon owns /run/ergosum. An
 # archive elsewhere needs ReadWritePaths=.
-StateDirectory=ergosum
+StateDirectory=ergosum-authority
 StateDirectoryMode=0700
 UMask=0077
 

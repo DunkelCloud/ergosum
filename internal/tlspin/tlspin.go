@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/keys"
@@ -118,6 +119,12 @@ func ClientConfig(cert *tls.Certificate, server Pins) *tls.Config {
 	}
 	return c
 }
+
+// NoRedirect is the CheckRedirect of every client that talks to a pinned
+// peer: a redirect would carry a signed request to a host nobody pinned,
+// possibly in plain text, so the client returns the redirect response
+// instead of following it.
+func NoRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // ServerConfig returns a server configuration presenting cert. With
 // client != nil, a client certificate with a pinned key is required.

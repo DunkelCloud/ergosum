@@ -35,6 +35,10 @@ const (
 	OutcomeOtherKey        = "other_key"
 	OutcomeInvalidResponse = "invalid_response"
 	OutcomeNoAddress       = "no_address"
+	// OutcomeEnded: the daemon gave up on the request, or restarted after
+	// it was made. The instance discards the request like one whose
+	// requester went away.
+	OutcomeEnded = "ended"
 )
 
 // CheckOutcome records one check of a request for audit and observations.
@@ -139,6 +143,13 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		a.deny(ctx, w, ResultForeignKey, obs, "request signature does not verify")
 		return
 	}
+	// A request addressed to another instance gets no callback: the daemon
+	// has it in flight to that instance and would answer "no open request",
+	// which must remain proof of a second key.
+	if req.To != keys.Fingerprint(a.public) {
+		a.deny(ctx, w, ResultMisdirected, obs, "request addressed to "+req.To)
+		return
+	}
 	// The daemon never reuses a request ID. A repeat comes from a second
 	// holder of the key replaying an ID it has seen; it gets no callbacks.
 	if !a.seen.first(req.Identity+" "+req.RequestID, now) {
@@ -160,6 +171,15 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		// the journal.
 		a.log.Info("request abandoned by the requester", "identity", req.Identity, "request_id", req.RequestID)
 		return
+	}
+	for _, o := range outcomes {
+		if o.Outcome == OutcomeEnded {
+			// The daemon says it gave up on this request, or a restarted
+			// daemon cannot tell: discarded like an abandoned request.
+			a.log.Info("request ended at the machine", "identity", req.Identity, "request_id", req.RequestID, "detail", o.Detail)
+			a.writeError(w, http.StatusForbidden, protocol.ErrDenied, "")
+			return
+		}
 	}
 	obs.Checks = outcomes
 
@@ -204,6 +224,9 @@ func validateRequest(req *protocol.TokenRequest) (*ecdsa.PublicKey, []netip.Addr
 	}
 	if !protocol.ValidRequestID(req.RequestID) {
 		return nil, nil, errors.New("bad request_id")
+	}
+	if !keys.ValidFingerprint(req.To) {
+		return nil, nil, errors.New("bad to")
 	}
 	spki, err := base64.StdEncoding.DecodeString(req.Key)
 	if err != nil {
@@ -295,11 +318,12 @@ func (a *Authority) callback(ctx context.Context, pc plannedCheck, host string, 
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return a.net.Dial(ctx, pc.route, address)
 		},
-		TLSClientConfig:   tlspin.ClientConfig(&cert, tlspin.Fingerprints(keys.Fingerprint(pub))),
-		DisableKeepAlives: true,
+		TLSClientConfig:        tlspin.ClientConfig(&cert, tlspin.Fingerprints(keys.Fingerprint(pub))),
+		DisableKeepAlives:      true,
+		MaxResponseHeaderBytes: 16 << 10,
 	}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: a.cfg.Callbacks.Timeout}
+	client := &http.Client{Transport: transport, Timeout: a.cfg.Callbacks.Timeout, CheckRedirect: tlspin.NoRedirect}
 
 	cb := protocol.Callback{
 		V: protocol.Version, Type: protocol.TypeCallback, RequestID: req.RequestID,
@@ -344,16 +368,34 @@ func (a *Authority) callback(ctx context.Context, pc plannedCheck, host string, 
 		res.Outcome, res.Detail = OutcomeInvalidResponse, "response does not match the callback"
 		return res
 	}
-	switch cr.Status {
-	case protocol.StatusConfirmed:
-		res.Outcome = OutcomeConfirmed
-	case protocol.StatusNoOpenRequest:
-		res.Outcome = OutcomeNoOpenRequest
+	res.Outcome, res.Detail = classify(cr, req.Timestamp)
+	if res.Outcome == OutcomeNoOpenRequest {
 		res.Evidence = &env
-	default:
-		res.Outcome, res.Detail = OutcomeInvalidResponse, "unknown status"
 	}
 	return res
+}
+
+// classify turns a verified callback response into an outcome. "No open
+// request" is proof of a second key only from a daemon process that already
+// ran when the request was made: a process started later knows nothing of
+// requests its predecessor made. Both times come from the machine's clock;
+// a second key holder can choose the request's timestamp, but gains only
+// within the clock-skew window after a restart of the real machine, and
+// even then gets no token.
+func classify(cr protocol.CallbackResponse, requested time.Time) (outcome, detail string) {
+	switch cr.Status {
+	case protocol.StatusConfirmed:
+		return OutcomeConfirmed, ""
+	case protocol.StatusEnded:
+		return OutcomeEnded, "the daemon gave up on the request"
+	case protocol.StatusNoOpenRequest:
+		if cr.Started.IsZero() || cr.Started.After(requested) {
+			return OutcomeEnded, "the daemon started after the request; no proof"
+		}
+		return OutcomeNoOpenRequest, ""
+	default:
+		return OutcomeInvalidResponse, "unknown status"
+	}
 }
 
 func (a *Authority) issue(key *ecdsa.PrivateKey, b *journal.Binding, outcomes []CheckOutcome) (string, jwt.Claims, error) {
@@ -409,7 +451,7 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 				"identity", obs.Identity, "key", obs.Key, "remote", obs.Remote, "reason", obs.Reason)
 		}
 		return
-	case result == ResultWrongLocation || result == ResultReplay:
+	case result == ResultWrongLocation || result == ResultReplay || result == ResultMisdirected:
 		if !a.limiter.allow(result+" "+obs.Identity, now) {
 			return
 		}
@@ -437,6 +479,9 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 		// copy of a disk image: as serious as a proven duplicate.
 		level = slog.LevelError
 		attrs = append(attrs, "alert", "request ID replayed: a second holder of the bound key reused an ID the machine had sent")
+	case ResultMisdirected:
+		level = slog.LevelError
+		attrs = append(attrs, "alert", "request addressed to another instance: an instance or a relay forwarded a signed request")
 	case ResultWrongLocation:
 		level = slog.LevelWarn
 	}

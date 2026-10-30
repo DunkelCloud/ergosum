@@ -134,4 +134,14 @@ func TestCoverageClaims(t *testing.T) {
 	if _, err := ingest(t, a.rep, "b", ev("b", replication.MaxSeq+1, kindNote, "far")); !errors.Is(err, replication.ErrRejected) {
 		t.Fatalf("sequence number above MaxSeq: %v", err)
 	}
+	// A pulled checkpoint must leave the puller room to write: its own
+	// coverage stays well below MaxSeq.
+	own := b.store.local(kindCheckpoint, checkpointBody(map[string]int64{"c": replication.MaxSeq}))
+	b.store.frontCP, b.store.compacted = &replication.Stored{Pos: 3, Event: own}, 3
+	if _, err := nodes["c"].rep.Pull(ctx, "b"); !errors.Is(err, replication.ErrRejected) {
+		t.Fatalf("own coverage at MaxSeq: %v", err)
+	}
+	if nodes["c"].store.cov["c"] != 0 {
+		t.Fatalf("own coverage raised: %v", nodes["c"].store.cov)
+	}
 }

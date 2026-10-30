@@ -50,6 +50,9 @@ func NewRegistry(cfg RegistryConfig) (*Registry, error) {
 	r := &Registry{admins: map[string]ssh.PublicKey{}, approvals: map[string]ApprovalConfig{}}
 	fps := map[string]string{}
 	for name, line := range cfg.Admins {
+		if !ValidAdminName(name) {
+			return nil, fmt.Errorf("registry: admin %q: use letters, digits, and . _ @ - (at most 64)", name)
+		}
 		pub, err := sshsig.ParseAuthorizedKey(line)
 		if err != nil {
 			return nil, fmt.Errorf("registry: admin %q: %w", name, err)

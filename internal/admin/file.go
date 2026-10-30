@@ -150,7 +150,9 @@ func (f *File) Event() *journal.BindingEvent {
 	}
 }
 
-// Append adds lines at the end, in the file's line ending.
+// Append adds lines at the end, in the file's line ending. Each argument is
+// one line: control characters in it become spaces, so that no value can
+// start a line of its own.
 func (f *File) Append(lines ...string) {
 	var b strings.Builder
 	b.WriteString(f.text)
@@ -158,7 +160,7 @@ func (f *File) Append(lines ...string) {
 		b.WriteString(f.eol)
 	}
 	for _, l := range lines {
-		b.WriteString(strings.ReplaceAll(strings.TrimRight(l, "\n"), "\n", f.eol))
+		b.WriteString(printable(l, len(l)))
 		b.WriteString(f.eol)
 	}
 	f.text = b.String()

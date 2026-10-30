@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/DunkelCloud/ergosum/internal/keys"
@@ -65,5 +68,24 @@ func TestMutualPinning(t *testing.T) {
 	serr, _ = handshake(t, ServerConfig(scert, Fingerprints(cfp)), ClientConfig(nil, Fingerprints(sfp)))
 	if serr == nil {
 		t.Fatal("client without certificate accepted")
+	}
+}
+
+// A client with NoRedirect hands a redirect back instead of following it.
+func TestNoRedirect(t *testing.T) {
+	followed := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/b", http.StatusTemporaryRedirect) })
+	mux.HandleFunc("/b", func(http.ResponseWriter, *http.Request) { followed = true })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := &http.Client{CheckRedirect: NoRedirect}
+	resp, err := c.Post(srv.URL+"/a", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect || followed {
+		t.Fatalf("status %d, followed %v", resp.StatusCode, followed)
 	}
 }

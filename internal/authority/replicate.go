@@ -32,6 +32,7 @@ type replicationState struct {
 // journalMetrics groups the metrics of journal replication and compaction.
 type journalMetrics struct {
 	rejected      *metrics.Vec
+	equivocations *metrics.Vec
 	outboxEvents  *metrics.Vec
 	outboxAge     *metrics.Vec
 	coverage      *metrics.Vec
@@ -51,15 +52,24 @@ func (a *Authority) setupReplication(ps []peer) error {
 		if p.fingerprint == keys.Fingerprint(a.public) {
 			return fmt.Errorf("replication.peers %q has this instance's key", p.name)
 		}
-		r.byFP[p.fingerprint] = p.name
 		instanceKeys[p.name] = p.key
 		rpeers = append(rpeers, replication.Peer{Name: p.name, URL: p.url})
+		if p.retired {
+			continue // its key verifies history, but it may not connect
+		}
+		r.byFP[p.fingerprint] = p.name
 	}
 	a.store.SetInstanceKeys(instanceKeys)
+	peerNames := make([]string, 0, len(rpeers))
+	for _, p := range rpeers {
+		peerNames = append(peerNames, p.Name)
+	}
 	m := a.metrics
 	a.jm = &journalMetrics{
 		rejected: m.Counter("machine_identity_journal_rejected_total",
-			"Events that ingest rejected, by the peer that sent them. Each one stops replication from that peer.", "peer"),
+			"Events that ingest rejected, by the peer that sent them. Each one stops replication from that peer.", "peer", peerNames...),
+		equivocations: m.Counter("machine_identity_journal_equivocations_total",
+			"Events whose origin signed a contradicting event before; they are skipped.", "origin", peerNames...),
 		outboxEvents: m.GaugeVec("machine_identity_journal_outbox_events",
 			"Events a peer has not acknowledged yet.", "peer"),
 		outboxAge: m.GaugeVec("machine_identity_journal_outbox_oldest_age_seconds",
@@ -93,6 +103,7 @@ func (a *Authority) setupReplication(ps []peer) error {
 		Client:             a.peerClient,
 		Authenticate:       r.authenticate,
 		OnReject:           a.onReject,
+		OnEquivocation:     a.onEquivocation,
 		Logger:             a.log.With("component", "replication"),
 		MaxBody:            int64(a.cfg.Replication.MaxPageMiB) << 20,
 		RetryMin:           a.opts.RetryMin,
@@ -120,7 +131,9 @@ func (r *replicationState) authenticate(req *http.Request) (string, bool) {
 func (r *replicationState) pins() tlspin.Pins {
 	fps := make([]string, 0, len(r.peers))
 	for _, p := range r.peers {
-		fps = append(fps, p.fingerprint)
+		if !p.retired {
+			fps = append(fps, p.fingerprint)
+		}
 	}
 	return tlspin.Fingerprints(fps...)
 }
@@ -147,7 +160,7 @@ func (a *Authority) peerClient(name string) *http.Client {
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     time.Minute,
 	}
-	c := &http.Client{Transport: tr, Timeout: 2 * time.Minute}
+	c := &http.Client{Transport: tr, Timeout: 2 * time.Minute, CheckRedirect: tlspin.NoRedirect}
 	if !a.Sealed() {
 		r.client[name] = c // without a key the client cannot authenticate yet
 	}
@@ -157,6 +170,17 @@ func (a *Authority) peerClient(name string) *http.Client {
 // onReject raises the alarm for an event that ingest refused: it stops
 // replication from that peer until the cause is fixed, for example a stale
 // registry here or a forged event there.
+// onEquivocation reports an origin that signed contradicting events. The
+// event is skipped and replication goes on; the origin's key is no longer
+// trustworthy.
+func (a *Authority) onEquivocation(peer string, e replication.Event, stored string, err error) {
+	a.jm.equivocations.Inc(e.Origin)
+	a.audit.Error("journal equivocation", "event", "journal_ingest", "peer", peer,
+		"origin", e.Origin, "seq", e.Seq, "kind", e.Kind, "hash", e.Hash, "stored_hash", stored,
+		"sig", e.Sig, "reason", err.Error(),
+		"alert", "an instance signed two contradicting events; the event is skipped, take the instance out of service")
+}
+
 func (a *Authority) onReject(peer string, e replication.Event, err error) {
 	a.jm.rejected.Inc(peer)
 	a.audit.Error("journal event rejected", "event", "journal_ingest", "peer", peer,

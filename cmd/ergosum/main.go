@@ -23,7 +23,7 @@ import (
 
 const (
 	defaultConfig = "/etc/ergosum/serve.yaml"
-	defaultSocket = "/var/lib/ergosum/control.sock"
+	defaultSocket = "/var/lib/ergosum-authority/control.sock"
 )
 
 func usage() {

@@ -6,19 +6,29 @@ All addresses below are documentation examples (RFC 5737, RFC 3849).
 
 | Path | Owner, mode | Content |
 | --- | --- | --- |
-| `/etc/ergosum/` | root, 0755 | `ergosumd.yaml`, `serve.yaml`, `signing.key` (0640, group `ergosum`) |
-| `/var/lib/ergosum/` | `ergosum`, 0700 | daemon: `identity.key` (0600); authority: `journal.db`, `control.sock`, optionally `archive/` |
+| `/etc/ergosum/` | root, 0755 | `ergosumd.yaml`, `serve.yaml`, `signing.key` (0640, group `ergosum-authority`) |
+| `/var/lib/ergosum/` | `ergosum`, 0700 | daemon: `identity.key` (0600) |
+| `/var/lib/ergosum-authority/` | `ergosum-authority`, 0700 | authority: `journal.db`, `control.sock`, optionally `archive/` |
 | `/run/ergosum/token` | `ergosum`:`ergosum-token`, 0640 | identity token, read by Vault Agent |
 
-Create the user and groups with `deploy/sysusers.d/ergosum.conf`
-(systemd), or on Alpine:
+The daemon runs as `ergosum`, the authority as `ergosum-authority`: on a
+host with both, a daemon that is taken over reaches neither the signing
+key nor the journal. Create the users and groups with
+`deploy/sysusers.d/ergosum.conf` (systemd), or on Alpine:
 
 ```sh
 addgroup -S ergosum-token
 adduser -S -D -H -h /var/lib/ergosum -s /sbin/nologin ergosum
 addgroup ergosum ergosum-token
 addgroup vault ergosum-token   # the user Vault Agent runs as
+adduser -S -D -H -h /var/lib/ergosum-authority -s /sbin/nologin ergosum-authority   # authorities only
 ```
+
+Upgrading an authority that ran as `ergosum`: stop it, move
+`/var/lib/ergosum/journal.db*` (and the archive) to
+`/var/lib/ergosum-authority/`, `chown -R ergosum-authority:` that directory,
+give `signing.key` to the group `ergosum-authority`, and adjust `journal`,
+`control_socket` and `archive` in `serve.yaml` if they name the old place.
 
 Service definitions: `deploy/systemd/` and `deploy/openrc/` (Alpine,
 `supervise-daemon`). Both binaries run in the foreground and log JSON lines
@@ -57,7 +67,7 @@ Metrics (node_exporter textfile collector, `metrics_file`):
 | `machine_identity_last_success_timestamp_seconds` | last successful request |
 | `machine_identity_last_error_timestamp_seconds` | last failed request |
 | `machine_identity_clock_skew_seconds` | authority clock minus local clock, estimated from request rounds of at most 10 s |
-| `machine_identity_callbacks_total{status}` | callbacks answered; any `no_open_request` means the key is used elsewhere |
+| `machine_identity_callbacks_total{status}` | callbacks answered: `confirmed`, `ended` (a late callback for a request this daemon gave up), `no_open_request` (the key is used elsewhere) |
 | `machine_identity_key_change_pending` | 1 while a new key waits for its binding |
 
 Short token lifetimes need synchronized clocks.
@@ -77,8 +87,11 @@ mode 0600 for the user who runs it; hand it to the service user before the
 first start:
 
 ```sh
-chgrp ergosum /etc/ergosum/signing.key && chmod 0640 /etc/ergosum/signing.key
+chgrp ergosum-authority /etc/ergosum/signing.key && chmod 0640 /etc/ergosum/signing.key
 ```
+
+The authority refuses to start with a key file that other users may read or
+anyone but its owner may change (mode bits beyond 0640).
 
 With an encrypted key the instance starts **sealed** after every start: it
 serves only metrics, health and its public key, and issues nothing until an
@@ -88,7 +101,8 @@ operator runs, on the same host,
 ergosum unseal                       # reads the passphrase from the terminal or stdin
 ```
 
-The control socket (`/var/lib/ergosum/control.sock`, mode 0600) is the only
+The control socket (`/var/lib/ergosum-authority/control.sock`, mode 0600, run
+`ergosum unseal` as `ergosum-authority` or root) is the only
 way in; it is not reachable over the network. A sealed instance does not
 restart into service on its own; another instance keeps issuing meanwhile.
 `machine_identity_authority_sealed` is 1 while sealed — alert on it.
@@ -123,7 +137,7 @@ on a host of its own or on a shared host.
 
   ```sh
   docker run -d --name ergosum --read-only \
-    -v ergosum-state:/var/lib/ergosum \
+    -v ergosum-state:/var/lib/ergosum-authority \
     -v /etc/ergosum:/etc/ergosum:ro \
     --network host \
     ghcr.io/example/ergosum:latest
@@ -131,7 +145,9 @@ on a host of its own or on a shared host.
   ```
 
   Host networking keeps source addresses and attached networks as on the
-  host; with bridged networking `net` checks see only the bridge.
+  host; with bridged networking `net` checks see only the bridge. The
+  signing key must be readable by 65532 and by no other user:
+  `chown 65532 /etc/ergosum/signing.key`, mode 0600.
 
 ### Callback rules
 
@@ -148,12 +164,13 @@ on a host of its own or on a shared host.
 
 | Metric | Meaning |
 | --- | --- |
-| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `foreign_key`, `unknown_identity` |
+| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `misdirected`, `foreign_key`, `unknown_identity` |
 | `machine_identity_authority_sealed` | 1 while sealed |
 | `machine_identity_binding_events_total{outcome}` | write API: `accepted`, `rejected` |
 | `machine_identity_journal_outbox_events{peer}` | events a peer has not acknowledged |
 | `machine_identity_journal_outbox_oldest_age_seconds{peer}` | age of the oldest of them; 0 if none |
 | `machine_identity_journal_rejected_total{peer}` | events from a peer that ingest rejected |
+| `machine_identity_journal_equivocations_total{origin}` | events skipped because their origin signed a contradicting event; take that instance out of service |
 | `machine_identity_journal_coverage{origin}` | sequence number up to which every event of an origin is here |
 | `machine_identity_journal_compaction_frontier{origin}` | sequence number up to which events of an origin may be deleted |
 | `machine_identity_journal_checkpoint_age_seconds` | age of the latest own checkpoint; -1 before the first |
@@ -162,8 +179,10 @@ on a host of its own or on a shared host.
 `key_duplicate` is proof that a machine key exists twice and deserves a
 critical alert. `replay` means that someone with the machine key reused a
 request ID the machine had sent, typically a copy from a disk image; treat
-it like `key_duplicate`. Both are logged at level `error` with an `alert`
-field. `wrong_location` is a warning.
+it like `key_duplicate`. `misdirected` means that a request signed by the
+machine but addressed to another instance arrived here: that instance, or
+whoever relayed the request, passed it on. All three are logged at level
+`error` with an `alert` field. `wrong_location` is a warning.
 
 Audit entries are JSON log lines with `"log_type":"audit"` on stdout — one
 per token request (result, identity, request ID, presented key, per-check
@@ -245,9 +264,26 @@ a coverage that makes the instance skip other instances' observations.
 
 ### Removing an instance
 
-Remove it from `replication.peers` on every other instance. Compaction
-waits for every peer with a `url`; a peer that is gone for good keeps the
-journal growing until it is removed.
+Retire it on every other instance: keep its entry in `replication.peers`
+with `retired: true` and without `url`.
+
+```yaml
+    - name: authority-old
+      retired: true      # its events stay valid; it may not connect any more
+      key: |
+        -----BEGIN PUBLIC KEY-----
+        ...
+```
+
+A retired instance's key still verifies the events it wrote, which the
+others keep and forward, so that a sync between them, or a new instance
+built from one of them, still takes its history. It can no longer connect
+(its key is no longer accepted on the replication listener), gets no
+pushes, and compaction does not wait for it. Do not delete the entry while
+any instance still holds events of that origin: the others would refuse
+those events in a sync. Checkpoints only cover origins with a configured
+key, and the coverage of an origin that is not configured at all is left
+out when a checkpoint is checked.
 
 ## Checkpoints, compaction and export
 
@@ -267,7 +303,7 @@ compaction:
     observations: 2160h     # 90 days; 0 keeps them
     key_duplicate: 0s       # evidence of a copied key: kept
     bindings: 0s            # binding history: kept; the winners live on in the checkpoint
-  archive: /var/lib/ergosum/archive   # optional
+  archive: /var/lib/ergosum-authority/archive   # optional
 ```
 
 With an archive, compaction first writes the events not yet archived to a
@@ -369,12 +405,26 @@ The tool refuses what would otherwise fail later or go unnoticed:
 ```yaml
 # ~/.config/ergosum/admin.yaml, on Windows %AppData%\ergosum\admin.yaml
 # (or $ERGOSUM_ADMIN_CONFIG)
+trust_domain: example.com         # the authorities' trust domain
 sign_key: ~/.ssh/id_ed25519.pub   # the administrator's key, see below
-authorities:                      # tried in order
+authorities:                      # every instance of the trust domain
   - url: https://100.64.0.10:7432
     key: SHA256:...               # instance fingerprint, from "ergosum keygen"
-trust_domain: example.com         # optional: must match the authorities'
+  - url: https://100.64.0.11:7432
+    key: SHA256:...
 ```
+
+The tool reads from every configured authority and insists that those that
+answer agree: on the trust domain (it must be the configured one), on the
+approvals, and on the binding of the identity at hand. If they disagree,
+`bind`, `revoke` and `show` stop and name both answers; that happens for a
+moment while replication carries a change, and otherwise means that one
+authority is wrong. `list` names the identities they disagree on. If only
+one authority answers, the tool says that it could compare its answers with
+none. A change goes to the first reachable authority; the tool then asks the
+others for a few seconds whether they have it, and says which do not yet.
+`-trust-domain`, `-authority` and `-authority-key` replace the configured
+values.
 
 `sign_key` is a public key (a file, or the key line itself) whose private
 key the SSH agent holds: `ssh-agent` through `SSH_AUTH_SOCK`, on Windows
@@ -386,8 +436,9 @@ one, which asks for the passphrase or the touch of a security key; a
 private key file as `sign_key` is signed that way, too. `-sign-key`
 overrides the configuration, `-yes` signs without asking.
 
-The administrator's machine needs TCP 7432 to at least one authority: the
-read side (`GET /v1/bindings`) and the write side share that listener.
+The administrator's machine needs TCP 7432 to every authority: the read
+side (`GET /v1/bindings`) and the write side share that listener. With one
+reachable the tool still works, but cannot compare.
 
 ### Routine cases
 
@@ -405,14 +456,18 @@ read side (`GET /v1/bindings`) and the write side share that listener.
 **Key change.** `ergosumd request -new-key` creates the next key next to the
 current one (`identity.key.new`) and writes a request for it; asked again,
 it names the same next key. The daemon keeps using the current key. Before
-each request it asks an authority for its binding (`GET
-/v1/bindings/<identity>`); once the binding names the next key, it switches,
-deletes the old key and requests with the new one. No request is refused on
-the way, so no `foreign_key` appears. `ergosum bind` shows the change as
-"key old -> new"; the old key is invalid from the moment the binding is
-recorded. `machine_identity_key_change_pending` is 1 while the next key
-waits. After a restore without the state directory there is no old key:
-`ergosumd request` creates a new one.
+each request it asks every authority for its binding (`GET
+/v1/bindings/<identity>`); once every authority that answers names the next
+key, it switches and requests with the new one. One authority alone cannot
+make it switch. The old key stays as `identity.key.old` until a token is
+issued for the new one, then it is deleted. If every authority refuses the
+new key (403), the daemon goes back to the old key, keeps the new one as
+`identity.key.new` and asks again after ten minutes; an outage changes
+nothing. No request is refused on the way, so no `foreign_key` appears.
+`ergosum bind` shows the change as "key old -> new"; the old key is invalid
+from the moment the binding is recorded. `machine_identity_key_change_pending`
+is 1 while the next key waits. After a restore without the state directory
+there is no old key: `ergosumd request` creates a new one.
 
 **Revocation.** `ergosum revoke NAME` shows what it ends, writes
 `NAME.revoke.txt` and continues as `ergosum bind`; another administrator

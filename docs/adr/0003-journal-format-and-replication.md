@@ -95,10 +95,17 @@ Wire form (write API body and journal body):
 
 - `identity` and `tailnet` targets are lower-case DNS names; `ip` targets
   are IP addresses in canonical form, optionally with `:port` (IPv6 as
-  `[addr]:port`); `net` targets are masked prefixes.
+  `[addr]:port`); `net` targets are masked prefixes. Every target has one
+  spelling only: a port is plain decimal without sign or leading zeros,
+  and brackets go around IPv6 addresses only.
 - `binding.set` needs at least one check; checks are unique.
 - `binding.revoked` carries neither key nor checks.
-- `epoch` starts at 1.
+- `epoch` starts at 1 and stays at or below 2^53, so that a revocation can
+  always follow.
+- Ingest stores a binding event's body as this instance would write it.
+  The position signature covers the hash of the canonical text, not the
+  body, so a relay could respell the JSON (say, a duplicate key in other
+  case) in a way other readers of an export would understand differently.
 
 ### Canonical form
 
@@ -138,8 +145,9 @@ deployment is worthless in another that trusts the same administrator keys.
   text and merged into one event before it is written. Instances never hold
   half-approved events.
 - The **registry** is static configuration on every instance and the trust
-  root. It names administrator keys and, per event kind, a threshold and the
-  allowed keys:
+  root. It names administrator keys (names of letters, digits and `. _ @ -`,
+  starting with a letter or digit, at most 64 characters) and, per event
+  kind, a threshold and the allowed keys:
 
   ```yaml
   registry:
@@ -215,6 +223,23 @@ On the same listener, for administrator tooling and for daemons:
   }
   ```
 
+Tooling checks every answer before it shows it or writes it into a file:
+each field must have its plain form, as in a valid event (identities and
+trust domain as DNS names, checks as in the canonical text, origins as
+instance names, administrator names as in the registry, hashes as hex), and
+an answer that does not is refused. An authority's error text is shown
+without control characters and cut short. A value thus cannot add a line to
+a binding file or change what a terminal shows; the text to sign is shown
+last, right before the question to sign.
+
+Tooling reads from every authority of the trust domain and insists that the
+reachable ones agree on the trust domain, the approvals and the binding of
+the identity it changes, so that a single authority cannot make an
+administrator sign a change against a binding the others do not have (the
+epoch in the signed text binds the change to that state). A receipt must
+name the hash of the submitted event. After a change, tooling asks the
+other authorities whether they have it; that only informs.
+
 Bindings and administrator key fingerprints are no secret, and the
 per-identity read already showed every binding to whoever knew the name.
 The list saves the guessing; it shows the inventory to every machine that
@@ -224,7 +249,8 @@ reaches the listener.
 
 An instance records the outcome of a token request that verifies against
 a bound key as `observation.issued`, `observation.key_duplicate`,
-`observation.wrong_location` or `observation.replay`. The body is a signed
+`observation.wrong_location`, `observation.replay` or
+`observation.misdirected`. The body is a signed
 envelope (ADR 0001,
 context `ergosum/v1/observation`) made with the instance key, containing
 instance, kid, identity, epoch, request ID, presented key, remote address,
@@ -240,8 +266,8 @@ verify that way (`unknown_identity`, `foreign_key`) can be caused by anyone
 with any number of names; they count in the metric and reach the audit log
 within an overall limit (60 lines per minute), but never the journal.
 Rejected binding writes share that limit.
-`wrong_location` and `replay` can be repeated at will by a holder of the key
-and are journaled once per identity and minute; `issued` and
+`wrong_location`, `replay` and `misdirected` can be repeated at will by a
+holder of the key and are journaled once per identity and minute; `issued` and
 `key_duplicate` always.
 
 ### Checkpoints and compaction
@@ -454,7 +480,9 @@ leader, no quorum.
   event under another instance's `(origin, seq)`, and the genuine event at
   that position would conflict at every instance and cut that instance off
   from replication in both directions. Sequence numbers and coverage above
-  2^53 are rejected, so that no counter derived from them can overflow.
+  2^53 are rejected, so that no counter derived from them can overflow. A
+  sync raises the own sequence counter at most to 2^32 below that, so that
+  a peer cannot leave the instance without numbers to write with.
 - **Push**: `POST /v1/journal/ingest` with a page. The peer answers
   `{"v": 1, "accepted": <position>}`, with `200` if it took the whole page
   and `422` and an `error` if it stopped at a rejected event; the cursor
@@ -478,6 +506,17 @@ leader, no quorum.
   gaps. Events of the instance's own origin that it no longer holds are
   acknowledged if compaction removed them; a rebuilt instance stores the
   others and continues its sequence numbers after them.
+- **Equivocation**: an event at a position that holds another event, or a
+  binding event its origin recorded under another sequence number, that
+  verifies as well proves that its origin signed contradicting events. It is
+  proof against the origin, not against the sender: ingest acknowledges and
+  skips it, keeps the event it has, and raises an alarm (audit line with
+  both hashes and the signature, metric per origin). Stopping there instead
+  would let one compromised instance halt replication between all honest
+  ones, revocations included. Instances may then hold different events of
+  that origin at that position; for observations that only weakens the
+  record, and binding events converge through the checkpoints. An
+  equivocating instance must be taken out of service.
 - **Rejection**: only an event that fails verification is rejected. Ingest
   stops at the first rejected event and acknowledges
   only what came before it, so the coverage of that origin stops there. The
@@ -558,7 +597,12 @@ leader, no quorum.
   instance when the event arrives there, bounded by the token lifetime
   afterwards.
 - Compaction waits for every configured peer. A peer that is gone for good
-  must be removed from the configuration, or the journal keeps growing.
+  must be retired (its key stays to verify the history it wrote, it may no
+  longer connect, and nobody waits for it), or the journal keeps growing.
+  Checkpoints carry the coverage only of configured origins, and ingest
+  ignores the coverage of an origin it does not know: refusing it would
+  stop replication between all instances that once saw that origin's
+  events.
 - One rejected event stops replication from that peer until the cause is
   fixed (a stale registry here, a forged event there); later events wait
   behind it, also those of other origins the peer forwards.

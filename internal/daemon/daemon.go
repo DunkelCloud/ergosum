@@ -54,11 +54,15 @@ type Daemon struct {
 	listen      func(network, address string) (net.Listener, error)
 	tailnetName func(context.Context) (string, error)
 	inflight    *inflight
+	started     time.Time // reported in callback responses
 
-	kmu     sync.RWMutex
-	key     *ecdsa.PrivateKey
-	cert    tls.Certificate
-	pending *ecdsa.PrivateKey // the next key, until a binding names it
+	kmu      sync.RWMutex
+	key      *ecdsa.PrivateKey
+	cert     tls.Certificate
+	pending  *ecdsa.PrivateKey // the next key, until a binding names it
+	previous *ecdsa.PrivateKey // the old key, until a token for the new one
+
+	holdPending time.Time // no switch before this, after going back
 
 	authorities []*authorityClient
 	preferred   int
@@ -94,7 +98,7 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	}
 	overlay, _ := protocol.ParsePrefixes(cfg.OverlayPrefixes) // checked by Validate
 	d := &Daemon{cfg: cfg, log: opts.Logger, now: opts.Now, listen: opts.Listen, tailnetName: opts.TailnetName,
-		tokenGID: -1, inflight: newInflight(), overlay: overlay}
+		tokenGID: -1, overlay: overlay}
 	if d.tailnetName == nil {
 		d.tailnetName = tailnetName
 	}
@@ -104,6 +108,8 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	if d.now == nil {
 		d.now = time.Now
 	}
+	d.started = d.now().UTC()
+	d.inflight = newInflight(d.now)
 	if d.listen == nil {
 		d.listen = net.Listen
 	}
@@ -124,12 +130,16 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	if d.pending, err = keys.Load(d.keyPath() + pendingSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
 		d.log.Warn("cannot read the next key; keeping the current key", "err", err)
 	}
+	if d.previous, err = keys.Load(d.keyPath() + previousSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+		d.log.Warn("cannot read the old key", "err", err)
+	}
 	for _, a := range cfg.Authorities {
 		d.authorities = append(d.authorities, &authorityClient{
 			url: a.URL,
 			pin: a.Key,
 			client: &http.Client{
-				Timeout: cfg.RequestTimeout,
+				Timeout:       cfg.RequestTimeout,
+				CheckRedirect: tlspin.NoRedirect,
 				Transport: &http.Transport{
 					TLSClientConfig: tlspin.ClientConfig(nil, tlspin.Fingerprints(a.Key)),
 					Proxy:           nil,
@@ -150,7 +160,7 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	d.mError = d.metrics.Gauge("machine_identity_last_error_timestamp_seconds", "Time of the last failed token request.")
 	d.mClockSkew = d.metrics.Gauge("machine_identity_clock_skew_seconds", "Authority clock minus local clock, estimated per request.")
 	d.mCallbacks = d.metrics.Counter("machine_identity_callbacks_total", "Callbacks answered by status.", "status",
-		protocol.StatusConfirmed, protocol.StatusNoOpenRequest)
+		protocol.StatusConfirmed, protocol.StatusNoOpenRequest, protocol.StatusEnded)
 	d.mPending = d.metrics.Gauge("machine_identity_key_change_pending", "1 while a new key waits for its binding.")
 	if d.pending != nil {
 		d.mPending.Set("", 1)
@@ -158,8 +168,16 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	return d, nil
 }
 
-// pendingSuffix names the next key next to the current one.
-const pendingSuffix = ".new"
+// pendingSuffix names the next key next to the current one, previousSuffix
+// the old key during a switch.
+const (
+	pendingSuffix  = ".new"
+	previousSuffix = ".old"
+)
+
+// holdAfterRevert is how long the daemon keeps its old key after going
+// back from a refused new one, before it tries the new key again.
+const holdAfterRevert = 10 * time.Minute
 
 func (d *Daemon) keyPath() string { return filepath.Join(d.cfg.StateDir, "identity.key") }
 
@@ -238,46 +256,131 @@ func (d *Daemon) loadPendingKey() *ecdsa.PrivateKey {
 // current key, so that it never sends a request that the authorities refuse
 // as foreign_key.
 func (d *Daemon) adoptPendingKey(ctx context.Context) {
+	if d.now().Before(d.holdPending) {
+		return // just went back from this key
+	}
 	next := d.loadPendingKey()
 	if next == nil {
 		return
 	}
 	want := keys.Fingerprint(&next.PublicKey)
-	bound, err := d.boundKey(ctx)
+	bound, err := d.boundKeys(ctx)
 	if err != nil {
 		d.log.Warn("cannot read the binding; keeping the current key", "err", err)
 		return
 	}
-	if bound != want {
-		d.log.Info("the next key waits for its binding", "next", want, "bound", bound)
+	for url, key := range bound {
+		if key != want {
+			d.log.Info("the next key waits for its binding", "next", want, "authority", url, "bound", key)
+			return
+		}
+	}
+	if err := d.switchToPending(next); err != nil {
+		d.log.Error("switching keys failed", "err", err)
 		return
 	}
+	d.log.Info("switched to the next key, which every reachable authority binds now", "fingerprint", want)
+}
+
+// switchToPending makes next the current key. The current key stays as
+// identity.key.old until a token has been issued for the next one, so that
+// the daemon can go back if every authority refuses it after all.
+func (d *Daemon) switchToPending(next *ecdsa.PrivateKey) error {
 	cert, err := tlspin.Certificate(next)
 	if err != nil {
-		d.log.Error("switching keys failed", "err", err)
-		return
+		return err
+	}
+	cur, _ := d.identity()
+	old, err := keys.MarshalPrivatePEM(cur)
+	if err != nil {
+		return err
+	}
+	if err := keys.WriteFileAtomic(d.keyPath()+previousSuffix, old, 0o600); err != nil {
+		return err
 	}
 	if err := os.Rename(d.keyPath()+pendingSuffix, d.keyPath()); err != nil {
-		d.log.Error("switching keys failed", "err", err)
+		return err
+	}
+	d.kmu.Lock()
+	d.key, d.cert, d.pending, d.previous = next, cert, nil, cur
+	d.kmu.Unlock()
+	d.mPending.Set("", 0)
+	return nil
+}
+
+// settleKeySwitch ends a key switch after the first request with the next
+// key: a token deletes the old key; a refusal by every authority, while the
+// old key is still at hand, goes back to it and keeps the next key waiting.
+func (d *Daemon) settleKeySwitch(err error) {
+	d.kmu.RLock()
+	prev := d.previous
+	d.kmu.RUnlock()
+	if prev == nil {
+		return
+	}
+	if err == nil {
+		if rerr := os.Remove(d.keyPath() + previousSuffix); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			d.log.Warn("deleting the old key failed", "err", rerr)
+			return
+		}
+		d.kmu.Lock()
+		d.previous = nil
+		d.kmu.Unlock()
+		d.log.Info("token issued for the new key; the old key is deleted")
+		return
+	}
+	if !allRefused(err) {
+		return // an outage proves nothing about the key
+	}
+	cur, _ := d.identity()
+	next, perr := keys.MarshalPrivatePEM(cur)
+	if perr == nil {
+		perr = keys.WriteFileAtomic(d.keyPath()+pendingSuffix, next, 0o600)
+	}
+	if perr == nil {
+		perr = os.Rename(d.keyPath()+previousSuffix, d.keyPath())
+	}
+	cert, cerr := tlspin.Certificate(prev)
+	if perr != nil || cerr != nil {
+		d.log.Error("going back to the old key failed", "err", errors.Join(perr, cerr))
 		return
 	}
 	d.kmu.Lock()
-	d.key, d.cert, d.pending = next, cert, nil
+	d.key, d.cert, d.pending, d.previous = prev, cert, cur, nil
 	d.kmu.Unlock()
-	d.mPending.Set("", 0)
-	d.log.Info("switched to the next key, which the binding names now; the old key is deleted", "fingerprint", want)
+	d.mPending.Set("", 1)
+	d.holdPending = d.now().Add(holdAfterRevert)
+	d.log.Error("every authority refuses the new key; back to the old key, the new one waits again",
+		"fingerprint", keys.Fingerprint(&prev.PublicKey), "next", keys.Fingerprint(&cur.PublicKey))
 }
 
-// boundKey returns the key of the identity's active binding, as the first
-// reachable authority shows it, or "" if it has none.
-func (d *Daemon) boundKey(ctx context.Context) (string, error) {
+// allRefused reports whether every authority answered and refused (403).
+func allRefused(err error) bool {
 	var errs []error
-	n := len(d.authorities)
-	for i := 0; i < n; i++ {
-		a := d.authorities[(d.preferred+i)%n]
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		errs = j.Unwrap()
+	} else {
+		errs = []error{err}
+	}
+	for _, e := range errs {
+		var re *RequestError
+		if !errors.As(e, &re) || re.Status != http.StatusForbidden {
+			return false
+		}
+	}
+	return len(errs) > 0
+}
+
+// boundKeys returns, per reachable authority, the key of the identity's
+// active binding, "" for none. Unreachable authorities are left out; an
+// error means that none answered.
+func (d *Daemon) boundKeys(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	var errs []error
+	for _, a := range d.authorities {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.url+protocol.PathBindings+"/"+d.cfg.Identity, http.NoBody)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		resp, err := a.client.Do(req)
 		if err != nil {
@@ -290,7 +393,7 @@ func (d *Daemon) boundKey(ctx context.Context) (string, error) {
 		case err != nil:
 			errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
 		case resp.StatusCode == http.StatusNotFound:
-			return "", nil
+			out[a.url] = ""
 		case resp.StatusCode != http.StatusOK:
 			errs = append(errs, fmt.Errorf("%s: %s", a.url, resp.Status))
 		default:
@@ -300,12 +403,15 @@ func (d *Daemon) boundKey(ctx context.Context) (string, error) {
 				continue
 			}
 			if b.Kind != "binding.set" {
-				return "", nil
+				b.Key = ""
 			}
-			return b.Key, nil
+			out[a.url] = b.Key
 		}
 	}
-	return "", errors.Join(errs...)
+	if len(out) == 0 {
+		return nil, errors.Join(errs...)
+	}
+	return out, nil
 }
 
 // CallbackCount returns how many callbacks were answered with status.
@@ -319,6 +425,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for {
 		d.adoptPendingKey(ctx)
 		token, claims, err := d.Obtain(ctx)
+		if ctx.Err() == nil {
+			d.settleKeySwitch(err)
+		}
 		var wait time.Duration
 		if err == nil {
 			if werr := d.writeToken(token); werr != nil {
@@ -434,7 +543,7 @@ func (d *Daemon) request(ctx context.Context, a *authorityClient) (string, jwt.C
 	req := protocol.TokenRequest{
 		V: protocol.Version, Type: protocol.TypeTokenRequest, Identity: d.cfg.Identity,
 		RequestID: id, Timestamp: d.now().UTC(), Addresses: d.addresses(),
-		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&key.PublicKey)),
+		Key: base64.StdEncoding.EncodeToString(keys.SPKI(&key.PublicKey)), To: a.pin,
 	}
 	env, err := protocol.Seal(key, protocol.ContextRequest, req)
 	if err != nil {
@@ -672,14 +781,11 @@ func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid callback", http.StatusBadRequest)
 		return
 	}
-	status := protocol.StatusNoOpenRequest
-	if d.inflight.confirms(cb.RequestID, keys.Fingerprint(peer)) {
-		status = protocol.StatusConfirmed
-	}
+	status := d.inflight.status(cb.RequestID, keys.Fingerprint(peer))
 	resp := protocol.CallbackResponse{
 		V: protocol.Version, Type: protocol.TypeCallbackResponse, Status: status,
 		RequestID: cb.RequestID, Nonce: cb.Nonce, Target: cb.Target, Authority: cb.Authority,
-		Timestamp: d.now().UTC(),
+		Timestamp: d.now().UTC(), Started: d.started,
 	}
 	key, _ := d.identity()
 	env, err := protocol.Seal(key, protocol.ContextCallbackResponse, resp)
@@ -688,10 +794,13 @@ func (d *Daemon) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.mCallbacks.Inc(status)
-	if status == protocol.StatusNoOpenRequest {
+	switch status {
+	case protocol.StatusNoOpenRequest:
 		d.log.Error("callback for a request this machine did not make: the identity key is in use elsewhere",
 			"request_id", cb.RequestID, "target", cb.Target, "authority", cb.Authority)
-	} else {
+	case protocol.StatusEnded:
+		d.log.Info("late callback for a request this machine has given up", "request_id", cb.RequestID, "target", cb.Target)
+	default:
 		d.log.Info("callback confirmed", "request_id", cb.RequestID, "target", cb.Target)
 	}
 	w.Header().Set("Content-Type", "application/json")

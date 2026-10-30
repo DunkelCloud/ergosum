@@ -26,6 +26,7 @@ var observationKinds = map[string]bool{
 	KindObservation + ".key_duplicate":  true,
 	KindObservation + ".wrong_location": true,
 	KindObservation + ".replay":         true,
+	KindObservation + ".misdirected":    true,
 }
 
 // AlwaysIngest reports the kinds that ingest stores even at or below the
@@ -86,7 +87,7 @@ func (s *Store) Verify(ctx context.Context, e replication.Event) error {
 		var seq int64
 		err = s.db.QueryRowContext(ctx, `SELECT seq FROM events WHERE origin = ? AND hash = ? AND kind LIKE 'binding.%' AND seq <> ?`, e.Origin, e.Hash, e.Seq).Scan(&seq)
 		if err == nil {
-			return unverified("%s recorded this binding event already as %d", e.Origin, seq)
+			return fmt.Errorf("%w: %s recorded this binding event already as %d", replication.ErrEquivocation, e.Origin, seq)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -178,7 +179,20 @@ func (s *Store) CheckpointCoverage(e replication.Event) (map[string]int64, error
 	if err != nil {
 		return nil, err
 	}
+	s.knownOrigins(cp.Coverage)
 	return cp.Coverage, nil
+}
+
+// knownOrigins drops the coverage of origins without a configured key: an
+// instance taken out of the configuration altogether. Its coverage means
+// nothing here, and refusing it would stop replication between all
+// instances that once saw its events.
+func (s *Store) knownOrigins(cov map[string]int64) {
+	for o := range cov {
+		if o != s.origin && s.instanceKey(o) == nil {
+			delete(cov, o)
+		}
+	}
 }
 
 // Read implements replication.Store.
@@ -321,6 +335,13 @@ func (s *Store) Append(ctx context.Context, e replication.Event) error {
 	case AlwaysIngest(e.Kind):
 		var be BindingEvent
 		if err := json.Unmarshal(e.Body, &be); err != nil {
+			return err
+		}
+		// Stored as this instance would write it: a relayed body may spell
+		// fields in ways (duplicate keys in other case) that other readers
+		// of an export would understand differently. The position signature
+		// covers the hash of the canonical text, not the body.
+		if e.Body, err = json.Marshal(&be); err != nil {
 			return err
 		}
 		identity, epoch = be.Identity, be.Epoch

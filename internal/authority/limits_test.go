@@ -1,10 +1,15 @@
 package authority
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
+	"github.com/DunkelCloud/ergosum/internal/keys"
+	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
 
 func validConfig(t *testing.T) Config {
@@ -94,5 +99,65 @@ func TestWindow(t *testing.T) {
 	}
 	if !w.allow(now.Add(time.Minute)) {
 		t.Fatal("new window refused")
+	}
+}
+
+// "No open request" proves a second key only from a daemon that ran when the
+// request was made; "ended" and a later process start prove nothing.
+func TestClassify(t *testing.T) {
+	requested := time.Unix(1_800_000_000, 0)
+	before := requested.Add(-time.Hour)
+	for _, c := range []struct {
+		status  string
+		started time.Time
+		want    string
+	}{
+		{protocol.StatusConfirmed, before, OutcomeConfirmed},
+		{protocol.StatusNoOpenRequest, before, OutcomeNoOpenRequest},
+		{protocol.StatusNoOpenRequest, requested.Add(time.Second), OutcomeEnded},
+		{protocol.StatusNoOpenRequest, time.Time{}, OutcomeEnded},
+		{protocol.StatusEnded, before, OutcomeEnded},
+		{"maybe", before, OutcomeInvalidResponse},
+	} {
+		got, _ := classify(protocol.CallbackResponse{Status: c.status, Started: c.started}, requested)
+		if got != c.want {
+			t.Errorf("%s started %s: %s, want %s", c.status, c.started, got, c.want)
+		}
+	}
+}
+
+// A retired instance keeps its key for verifying history but has no URL.
+func TestRetiredPeer(t *testing.T) {
+	cfg := validConfig(t)
+	k, _ := keys.Generate()
+	pem := string(keys.MarshalPublicPEM(&k.PublicKey))
+	cfg.Replication.Peers = []PeerConfig{{Name: "old", Key: pem, Retired: true, URL: "https://192.0.2.9:7435"}}
+	if _, err := cfg.peers(); err == nil {
+		t.Fatal("a retired instance with a URL was accepted")
+	}
+	cfg.Replication.Peers[0].URL = ""
+	ps, err := cfg.peers()
+	if err != nil || len(ps) != 1 || !ps[0].retired {
+		t.Fatalf("retired instance: %+v %v", ps, err)
+	}
+}
+
+// TestKeyMode: a signing key that other users may read or change is
+// refused; 0600 and 0640 are fine.
+func TestKeyMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no mode bits on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "signing.key")
+	if err := os.WriteFile(path, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for mode, ok := range map[os.FileMode]bool{0o600: true, 0o640: true, 0o400: true, 0o644: false, 0o660: false, 0o604: false, 0o606: false} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkKeyMode(path); (err == nil) != ok {
+			t.Errorf("mode %04o: %v", mode, err)
+		}
 	}
 }

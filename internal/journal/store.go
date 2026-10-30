@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -312,6 +313,105 @@ type Receipt struct {
 	Hash      string `json:"hash"`
 	Duplicate bool   `json:"duplicate,omitempty"`
 }
+
+// Validate checks a binding as the read API reports it. Tools that show it
+// or write it into a file rely on every field having its plain form, also
+// when an authority answers otherwise.
+func (b *Binding) Validate() error {
+	if err := validateContent(b.Kind, b.Identity, b.Epoch, b.Key, b.Checks); err != nil {
+		return err
+	}
+	switch {
+	case !hashRe.MatchString(b.Hash):
+		return invalid("bad hash %q", b.Hash)
+	case !ValidInstanceName(b.Origin):
+		return invalid("bad origin %q", b.Origin)
+	case b.Seq < 1:
+		return invalid("bad sequence number %d", b.Seq)
+	}
+	for _, name := range b.SignedBy {
+		// A key the registry no longer knows is named by its fingerprint.
+		if !ValidAdminName(name) && !keys.ValidFingerprint(name) {
+			return invalid("bad administrator name %q", name)
+		}
+	}
+	return nil
+}
+
+// Validate checks the answer of the list endpoint, like Binding.Validate.
+func (l *BindingList) Validate() error {
+	if l.V != 1 {
+		return invalid("unsupported version %d", l.V)
+	}
+	if !protocol.ValidDNSName(l.TrustDomain) {
+		return invalid("bad trust domain %q", l.TrustDomain)
+	}
+	for kind, ap := range l.Approvals {
+		if kind != KindBindingSet && kind != KindBindingRevoked {
+			return invalid("approvals for unknown kind %q", kind)
+		}
+		if ap.Threshold < 1 || ap.Threshold > len(ap.Admins) {
+			return invalid("%s: threshold %d with %d administrators", kind, ap.Threshold, len(ap.Admins))
+		}
+		for name, fp := range ap.Admins {
+			if !ValidAdminName(name) || !keys.ValidFingerprint(fp) {
+				return invalid("%s: bad administrator %q with key %q", kind, name, fp)
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, b := range l.Bindings {
+		if b == nil {
+			return invalid("empty binding")
+		}
+		if err := b.Validate(); err != nil {
+			return err
+		}
+		if seen[b.Identity] {
+			return invalid("%s is listed twice", b.Identity)
+		}
+		seen[b.Identity] = true
+	}
+	return nil
+}
+
+// Validate checks a receipt, like Binding.Validate.
+func (r *Receipt) Validate() error {
+	switch {
+	case !ValidInstanceName(r.Origin):
+		return invalid("bad origin %q", r.Origin)
+	case r.Seq < 1:
+		return invalid("bad sequence number %d", r.Seq)
+	case !hashRe.MatchString(r.Hash):
+		return invalid("bad hash %q", r.Hash)
+	}
+	return nil
+}
+
+// ValidInstanceName reports whether s names an instance, the origin of
+// journal events: lower-case letters, digits, hyphens and dots, such as
+// authority-a or site-a.example.com.
+func ValidInstanceName(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidAdminName reports whether s names an administrator in the registry:
+// letters, digits, and . _ @ -, starting with a letter or digit, at most 64
+// characters.
+func ValidAdminName(s string) bool { return adminNameRe.MatchString(s) }
+
+var (
+	adminNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$`)
+	hashRe      = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
 
 // Errors returned by AppendBinding besides the registry errors.
 var (

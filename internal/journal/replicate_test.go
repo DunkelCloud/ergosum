@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,5 +194,85 @@ func TestPeerCheckpointsAreNoChange(t *testing.T) {
 	copyEvents(t, a, b, pos)
 	if changed, err := b.ChangedSinceCheckpoint(ctx); err != nil || !changed {
 		t.Fatalf("after a peer's binding event: changed %v, %v", changed, err)
+	}
+}
+
+// TestRemovedOrigin: an instance taken out of the configuration leaves its
+// coverage in the checkpoints of instances that saw its events. Those
+// checkpoints still verify, and new checkpoints no longer mention it.
+func TestRemovedOrigin(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice")
+	ka, kb, kc := newKey(t), newKey(t), newKey(t)
+	a := openInstance(t, admins, 1, "instance-a", ka)
+	b := openInstance(t, admins, 1, "instance-b", kb)
+	c := openInstance(t, admins, 1, "instance-c", kc)
+	all := map[string]*ecdsa.PublicKey{"instance-a": &ka.PublicKey, "instance-b": &kb.PublicKey, "instance-c": &kc.PublicKey}
+	for _, s := range []*journal.Store{a, b, c} {
+		s.SetInstanceKeys(all)
+	}
+	if _, err := c.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")); err != nil {
+		t.Fatal(err)
+	}
+	copyEvents(t, c, a, 0)
+	if _, err := a.WriteCheckpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, events, _, err := a.Read(ctx, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := events[len(events)-1].Event
+	if cov, _ := a.CheckpointCoverage(cp); cov["instance-c"] == 0 {
+		t.Fatalf("checkpoint without C's coverage: %v", cov)
+	}
+	// C leaves the configuration of A and B.
+	ab := map[string]*ecdsa.PublicKey{"instance-a": &ka.PublicKey, "instance-b": &kb.PublicKey}
+	a.SetInstanceKeys(ab)
+	b.SetInstanceKeys(ab)
+	if err := b.Verify(ctx, cp); err != nil {
+		t.Fatalf("a checkpoint covering a removed instance: %v", err)
+	}
+	if cov, _ := b.CheckpointCoverage(cp); cov["instance-c"] != 0 {
+		t.Fatalf("coverage of a removed instance taken over: %v", cov)
+	}
+	if _, err := a.WriteCheckpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, events, _, _ = a.Read(ctx, 0, 100)
+	if cov, _ := a.CheckpointCoverage(events[len(events)-1].Event); cov["instance-c"] != 0 {
+		t.Fatalf("new checkpoint covers a removed instance: %v", cov)
+	}
+}
+
+// TestRelayedBodyStoredCanonically: the position signature covers the hash
+// of the canonical text, not the body, so a relay may respell the body. A
+// binding event is stored as this instance would write it.
+func TestRelayedBodyStoredCanonically(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice")
+	a, b := pair(t, admins)
+	if _, err := a.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")); err != nil {
+		t.Fatal(err)
+	}
+	_, events, _, err := a.Read(ctx, 0, 10)
+	if err != nil || len(events) != 1 {
+		t.Fatal(events, err)
+	}
+	e := events[0].Event
+	canonical := string(e.Body)
+	e.Body = []byte(strings.Replace(canonical, `"identity":`, `"IDENTITY":"host1.example.com","identity":`, 1))
+	if err := b.Verify(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Append(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	bodies, err := b.EventBodies(ctx, journal.KindBindingSet)
+	if err != nil || len(bodies) != 1 {
+		t.Fatal(bodies, err)
+	}
+	if string(bodies[0]) != canonical {
+		t.Fatalf("stored body %s, want %s", bodies[0], canonical)
 	}
 }

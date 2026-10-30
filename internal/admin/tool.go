@@ -26,8 +26,6 @@ type Tool struct {
 	Client *Client
 	// Key signs; nil if no key is configured.
 	Key *SignKey
-	// TrustDomain, if set, must be the authorities' trust domain.
-	TrustDomain string
 	// Out receives what the administrator reads.
 	Out io.Writer
 	// Confirm asks before signing; nil signs without asking.
@@ -76,11 +74,12 @@ func (t *Tool) bind(ctx context.Context, path, textOut string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	list, from, err := t.Client.List(ctx)
+	st, err := t.Client.State(ctx, f.Identity)
 	if err != nil {
 		return err
 	}
-	cur := find(list, f.Identity)
+	t.reach(st.Reach)
+	list, from, cur := st.List, st.From, st.Current
 	added, err := t.complete(f, list, from, cur)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
@@ -122,8 +121,10 @@ func (t *Tool) bind(ctx context.Context, path, textOut string) error {
 		return nil
 	}
 
-	t.describe(e, cur, canonical)
+	// The text to sign comes last, right before the question.
+	t.describe(e, cur)
 	t.printf("\nApprovals for %s: %d of %d%s. Allowed: %s.\n", e.Kind, len(signed), ap.Threshold, nameList(signed), strings.Join(sortedKeys(ap.Admins), ", "))
+	t.printf("\nText to sign:\n%s", indent(canonical))
 
 	if len(signed) < ap.Threshold {
 		done, err := t.sign(ctx, path, f, e, added, names, signed)
@@ -148,13 +149,86 @@ func (t *Tool) bind(ctx context.Context, path, textOut string) error {
 	if err != nil {
 		return err
 	}
+	if r.Hash != hash {
+		return fmt.Errorf("%s answered with a receipt for another event (%s, not %s): ask the other authorities with \"ergosum show %s\"", at, r.Hash, hash, e.Identity)
+	}
 	f.Append(fmt.Sprintf("# recorded by %s as %s/%d at %s", at, r.Origin, r.Seq, t.now()))
 	if err := t.write(path, f, nil); err != nil {
 		return err
 	}
 	t.printf("\nRecorded by %s as %s/%d.\n", at, r.Origin, r.Seq)
+	t.readBack(ctx, at, e.Identity, hash)
 	t.next(e, cur, list.TrustDomain)
 	return nil
+}
+
+// readBackWait is how long a recorded change waits for the other
+// authorities to show it.
+var readBackWait = 10 * time.Second
+
+// readBack asks the other authorities whether they have the recorded event
+// yet. It only informs: replication brings the event to every instance in
+// time, and an authority that has not got it keeps the binding it had.
+func (t *Tool) readBack(ctx context.Context, at, identity, hash string) {
+	state := map[string]string{} // authority -> what it has instead, "" once it has the event
+	done := map[string]bool{}    // it has the event, or did not answer
+	var others []string
+	for _, u := range t.Client.Authorities() {
+		if u != at {
+			others = append(others, u)
+		}
+	}
+	if len(others) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, readBackWait)
+	defer cancel()
+	for {
+		waiting := 0
+		for _, u := range others {
+			if done[u] {
+				continue
+			}
+			s, err := t.Client.Holds(ctx, u, identity, hash)
+			if err != nil {
+				s = "no answer (" + printable(err.Error(), maxDetail) + ")"
+			}
+			state[u], done[u] = s, s == "" || err != nil
+			if !done[u] {
+				waiting++
+			}
+		}
+		if waiting == 0 || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	for _, u := range others {
+		if state[u] == "" {
+			t.printf("    %s has it.\n", u)
+		} else {
+			t.printf("    %s does not have it yet: %s. Replication brings it there; until then, that authority keeps the binding it has.\n", u, state[u])
+		}
+	}
+}
+
+// reach notes authorities that did not answer a read: what the others
+// agree on is all the tool could compare.
+func (t *Tool) reach(r Reach) {
+	switch {
+	case r.Asked == 1:
+		t.printf("Only one authority is configured: its answers cannot be compared with another's.\n")
+	case len(r.Answered) == 1:
+		t.printf("Warning: only %s answered, of %d authorities; its answers cannot be compared with another's.\n", r.Answered[0], r.Asked)
+	case len(r.Unreachable) > 0:
+		t.printf("%d of %d authorities answered.\n", len(r.Answered), r.Asked)
+	}
+	for _, err := range r.Unreachable {
+		t.printf("    %s\n", printable(err.Error(), maxDetail))
+	}
 }
 
 // sign adds the administrator's signature. done reports that there was
@@ -231,9 +305,6 @@ func find(l *journal.BindingList, identity string) *journal.Binding {
 // unless the file says otherwise), the trust domain and the next epoch. It
 // returns the lines to add to the file.
 func (t *Tool) complete(f *File, l *journal.BindingList, from string, cur *journal.Binding) ([]string, error) {
-	if t.TrustDomain != "" && t.TrustDomain != l.TrustDomain {
-		return nil, fmt.Errorf("the configured trust domain %s differs from %s at %s", t.TrustDomain, l.TrustDomain, from)
-	}
 	var add []string
 	if f.Kind == "" {
 		if f.Key == "" {
@@ -345,7 +416,7 @@ func checksText(cs []journal.Check) string {
 }
 
 // describe shows what the event changes.
-func (t *Tool) describe(e *journal.BindingEvent, cur *journal.Binding, canonical []byte) {
+func (t *Tool) describe(e *journal.BindingEvent, cur *journal.Binding) {
 	switch {
 	case e.Kind == journal.KindBindingRevoked && cur.Active():
 		t.printf("\nRevoke %s at epoch %d. It ends the binding of epoch %d:\n    key %s\n", e.Identity, e.Epoch, cur.Epoch, cur.Key)
@@ -393,7 +464,6 @@ func (t *Tool) describe(e *journal.BindingEvent, cur *journal.Binding, canonical
 			t.printf("  - %s\n", CheckLine(c))
 		}
 	}
-	t.printf("\nText to sign:\n%s", indent(canonical))
 }
 
 // next tells the administrator what follows a recorded event.
@@ -417,10 +487,11 @@ func (t *Tool) next(e *journal.BindingEvent, cur *journal.Binding, trustDomain s
 // Show writes the current binding of identity in the file format, ready
 // to be edited and bound again.
 func (t *Tool) Show(ctx context.Context, identity string, w io.Writer) error {
-	b, err := t.Client.Current(ctx, identity)
+	b, reach, err := t.Client.Current(ctx, identity)
 	if err != nil {
 		return err
 	}
+	t.reach(reach)
 	if b == nil {
 		return fmt.Errorf("%s is not bound", identity)
 	}
@@ -447,10 +518,11 @@ func (t *Tool) Show(ctx context.Context, identity string, w io.Writer) error {
 
 // List writes every binding as a table.
 func (t *Tool) List(ctx context.Context, w io.Writer) error {
-	l, from, err := t.Client.List(ctx)
+	l, from, reach, differ, err := t.Client.List(ctx)
 	if err != nil {
 		return err
 	}
+	t.reach(reach)
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "IDENTITY\tEPOCH\tSTATE\tKEY\tCHECKS")
 	for _, b := range l.Bindings {
@@ -473,13 +545,16 @@ func (t *Tool) List(ctx context.Context, w io.Writer) error {
 		t.printf(" %s needs %d of %s.", kind, ap.Threshold, strings.Join(sortedKeys(ap.Admins), ", "))
 	}
 	t.printf("\n")
+	if len(differ) > 0 {
+		t.printf("The authorities disagree on %s: replication may be catching up; \"ergosum show NAME\" compares them.\n", strings.Join(differ, ", "))
+	}
 	return nil
 }
 
 // Revoke writes a revocation file for identity at path (default
 // IDENTITY.revoke.txt), shows what it ends and continues as Bind.
 func (t *Tool) Revoke(ctx context.Context, identity, path string) error {
-	b, err := t.Client.Current(ctx, identity)
+	b, _, err := t.Client.Current(ctx, identity)
 	if err != nil {
 		return err
 	}

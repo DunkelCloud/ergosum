@@ -17,9 +17,9 @@ clock_skew: 2m
 # An encrypted key keeps the instance sealed after every start until
 # "ergosum unseal" is run on this host.
 signing_key: /etc/ergosum/signing.key
-journal: /var/lib/ergosum/journal.db
+journal: /var/lib/ergosum-authority/journal.db
 # Local socket for "ergosum unseal" and "ergosum journal" (mode 0600).
-control_socket: /var/lib/ergosum/control.sock
+control_socket: /var/lib/ergosum-authority/control.sock
 
 # Token requests and binding writes (TLS with the instance key). Required:
 # the instance's overlay address. Binding all interfaces (":7432") needs
@@ -81,7 +81,8 @@ replication:
         bbQp94Nl0sHkl8VEUr8Luu9ddfSg8noe/RblLEjy0EiDssHIrktAEuBgbg==
         -----END PUBLIC KEY-----
     # Without url: known, but reached only through the other peers. It gets
-    # no pushes from here, and compaction does not wait for it.
+    # no pushes from here, and compaction does not wait for it. An instance
+    # that is gone for good stays listed with "retired: true" and no url.
     - name: authority-c
       key: |
         -----BEGIN PUBLIC KEY-----
@@ -103,5 +104,5 @@ compaction:
     # key_duplicate: 0s   # 0 keeps them
     # bindings: 0s
   # Export events here (JSON lines) before they are deleted. Under systemd
-  # a directory outside /var/lib/ergosum needs ReadWritePaths=.
-  # archive: /var/lib/ergosum/archive
+  # a directory outside /var/lib/ergosum-authority needs ReadWritePaths=.
+  # archive: /var/lib/ergosum-authority/archive

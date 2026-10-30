@@ -501,9 +501,35 @@ func TestIngestRejectsForeignObservations(t *testing.T) {
 	if status, ack := b.postPage(cc, page(instC, observationEvent(t, a.key, instA, instA, 1))); status != http.StatusOK || ack.Accepted != 1 {
 		t.Fatalf("forwarded observation: %d %+v", status, ack)
 	}
-	// The same origin and sequence number with another content conflicts.
-	if status, _ := b.postPage(a, page(instA, observationEvent(t, a.key, instA, instA, 1))); status != http.StatusUnprocessableEntity {
-		t.Fatalf("conflicting event: %d", status)
+	// Another event at the same position, its position signed by C: forged,
+	// rejected.
+	if status, _ := b.postPage(a, page(instA, signedAt(t, cc.key, observationEvent(t, a.key, instA, instA, 1)))); status != http.StatusUnprocessableEntity {
+		t.Fatalf("forged conflicting event: %d", status)
+	}
+}
+
+// TestEquivocationDoesNotStall: an instance that signs two different events
+// for one position is reported, and the second event is skipped instead of
+// stopping replication; what follows it still arrives.
+func TestEquivocationDoesNotStall(t *testing.T) {
+	c := newCluster(t, []string{instA, instB, instC}, clusterOptions{})
+	a, b, cc := c.envs[instA], c.envs[instB], c.envs[instC]
+	first := observationEvent(t, a.key, instA, instA, 1)
+	if status, ack := b.postPage(cc, page(instC, first)); status != http.StatusOK || ack.Accepted != 1 {
+		t.Fatalf("first event: %d %+v", status, ack)
+	}
+	// A's other event for the same position, then its next one.
+	second := observationEvent(t, a.key, instA, instA, 1)
+	next := observationEvent(t, a.key, instA, instA, 2)
+	status, ack := b.postPage(cc, page(instC, second, next))
+	if status != http.StatusOK || ack.Accepted != 2 {
+		t.Fatalf("equivocation stopped the page: %d %+v", status, ack)
+	}
+	if n := b.auth.EquivocationCount(instA); n != 1 {
+		t.Fatalf("equivocations of A: %v", n)
+	}
+	if n := journalCount(t, b.auth, "observation.issued"); n != 2 {
+		t.Fatalf("observations at B: %d, want the first and the next", n)
 	}
 }
 
@@ -767,4 +793,25 @@ func fingerprintOf(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return keys.Fingerprint(&k.PublicKey)
+}
+
+// TestRefusalsReplicate: every observation kind an instance journals
+// reaches the others; an unknown kind would stop replication from it.
+func TestRefusalsReplicate(t *testing.T) {
+	c := newCluster(t, []string{instA, instB}, clusterOptions{})
+	a, b := c.envs[instA], c.envs[instB]
+	m := a.machine(host1, machineOptions{targets: []string{at(host1Tailnet), at(host1IP)}})
+	a.bind(host1, m.d.Fingerprint(), 1, tailnetCheck(host1Tailnet), ipCheck(host1IP))
+	key, _, err := keys.LoadOrCreate(filepath.Join(m.stateDir, "identity.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := postRequestTo(t, a, key, host1, protocol.NewRequestID(), b.fingerprint()); status != http.StatusForbidden {
+		t.Fatalf("misdirected request: status %d", status)
+	}
+	eventually(t, "misdirected observation at B", func() bool {
+		return journalCount(t, b.auth, "observation.misdirected") == 1
+	})
+	// Nothing stays behind in A's outbox: B took every event.
+	eventually(t, "A's outbox empty", func() bool { return a.state().Peers[0].Pending == 0 })
 }
