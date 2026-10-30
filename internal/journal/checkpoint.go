@@ -86,9 +86,6 @@ func (s *Store) verifyCheckpoint(origin string, payload []byte) (*Checkpoint, er
 		if n < 0 || n > replication.MaxSeq {
 			return nil, unverified("checkpoint coverage %d of %q", n, o)
 		}
-		if o != s.origin && s.instanceKey(o) == nil {
-			return nil, unverified("checkpoint coverage of unknown origin %q", o)
-		}
 	}
 	seen := map[string]bool{}
 	lines := make([]string, 0, len(cp.Bindings))
@@ -179,6 +176,7 @@ func (s *Store) WriteCheckpoint(ctx context.Context) (Receipt, error) {
 	if err != nil {
 		return Receipt{}, err
 	}
+	s.knownOrigins(cov)
 	cp := Checkpoint{
 		V: 1, Type: checkpointType, TrustDomain: s.trustDomain, Instance: s.origin,
 		Kid: keys.Thumbprint(&key.PublicKey), CreatedAt: s.now().UTC(), Coverage: cov,

@@ -570,7 +570,12 @@ leader, no quorum.
   instance when the event arrives there, bounded by the token lifetime
   afterwards.
 - Compaction waits for every configured peer. A peer that is gone for good
-  must be removed from the configuration, or the journal keeps growing.
+  must be retired (its key stays to verify the history it wrote, it may no
+  longer connect, and nobody waits for it), or the journal keeps growing.
+  Checkpoints carry the coverage only of configured origins, and ingest
+  ignores the coverage of an origin it does not know: refusing it would
+  stop replication between all instances that once saw that origin's
+  events.
 - One rejected event stops replication from that peer until the cause is
   fixed (a stale registry here, a forged event there); later events wait
   behind it, also those of other origins the peer forwards.

@@ -52,9 +52,12 @@ func (a *Authority) setupReplication(ps []peer) error {
 		if p.fingerprint == keys.Fingerprint(a.public) {
 			return fmt.Errorf("replication.peers %q has this instance's key", p.name)
 		}
-		r.byFP[p.fingerprint] = p.name
 		instanceKeys[p.name] = p.key
 		rpeers = append(rpeers, replication.Peer{Name: p.name, URL: p.url})
+		if p.retired {
+			continue // its key verifies history, but it may not connect
+		}
+		r.byFP[p.fingerprint] = p.name
 	}
 	a.store.SetInstanceKeys(instanceKeys)
 	peerNames := make([]string, 0, len(rpeers))
@@ -128,7 +131,9 @@ func (r *replicationState) authenticate(req *http.Request) (string, bool) {
 func (r *replicationState) pins() tlspin.Pins {
 	fps := make([]string, 0, len(r.peers))
 	for _, p := range r.peers {
-		fps = append(fps, p.fingerprint)
+		if !p.retired {
+			fps = append(fps, p.fingerprint)
+		}
 	}
 	return tlspin.Fingerprints(fps...)
 }

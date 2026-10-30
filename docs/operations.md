@@ -248,9 +248,26 @@ a coverage that makes the instance skip other instances' observations.
 
 ### Removing an instance
 
-Remove it from `replication.peers` on every other instance. Compaction
-waits for every peer with a `url`; a peer that is gone for good keeps the
-journal growing until it is removed.
+Retire it on every other instance: keep its entry in `replication.peers`
+with `retired: true` and without `url`.
+
+```yaml
+    - name: authority-old
+      retired: true      # its events stay valid; it may not connect any more
+      key: |
+        -----BEGIN PUBLIC KEY-----
+        ...
+```
+
+A retired instance's key still verifies the events it wrote, which the
+others keep and forward, so that a sync between them, or a new instance
+built from one of them, still takes its history. It can no longer connect
+(its key is no longer accepted on the replication listener), gets no
+pushes, and compaction does not wait for it. Do not delete the entry while
+any instance still holds events of that origin: the others would refuse
+those events in a sync. Checkpoints only cover origins with a configured
+key, and the coverage of an origin that is not configured at all is left
+out when a checkpoint is checked.
 
 ## Checkpoints, compaction and export
 

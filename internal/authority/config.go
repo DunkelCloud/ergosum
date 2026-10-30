@@ -92,6 +92,12 @@ type PeerConfig struct {
 	Key string `yaml:"key"`
 	// Fingerprint, if set, must match Key.
 	Fingerprint string `yaml:"fingerprint"`
+	// Retired marks an instance that is gone for good: its key still
+	// verifies the history it wrote, which the others keep and forward,
+	// but it may no longer connect, gets no pushes, and compaction does not
+	// wait for it. Retire an instance instead of deleting its entry, or
+	// instances still holding its events cannot sync from each other.
+	Retired bool `yaml:"retired"`
 }
 
 // CompactionConfig configures checkpoints and compaction.
@@ -135,6 +141,7 @@ type peer struct {
 	url         string
 	key         *ecdsa.PublicKey
 	fingerprint string
+	retired     bool
 }
 
 func (c *Config) peers() ([]peer, error) {
@@ -156,13 +163,16 @@ func (c *Config) peers() ([]peer, error) {
 		if pc.Fingerprint != "" && pc.Fingerprint != fp {
 			return nil, fmt.Errorf("replication.peers %q: fingerprint %s does not match the key (%s)", pc.Name, pc.Fingerprint, fp)
 		}
+		if pc.Retired && pc.URL != "" {
+			return nil, fmt.Errorf("replication.peers %q: a retired instance has no url", pc.Name)
+		}
 		if pc.URL != "" {
 			u, err := url.Parse(pc.URL)
 			if err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
 				return nil, fmt.Errorf("replication.peers %q: url %q must be https://host:port", pc.Name, pc.URL)
 			}
 		}
-		out = append(out, peer{name: pc.Name, url: strings.TrimSuffix(pc.URL, "/"), key: key, fingerprint: fp})
+		out = append(out, peer{name: pc.Name, url: strings.TrimSuffix(pc.URL, "/"), key: key, fingerprint: fp, retired: pc.Retired})
 	}
 	return out, nil
 }

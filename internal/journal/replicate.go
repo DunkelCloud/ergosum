@@ -179,7 +179,20 @@ func (s *Store) CheckpointCoverage(e replication.Event) (map[string]int64, error
 	if err != nil {
 		return nil, err
 	}
+	s.knownOrigins(cp.Coverage)
 	return cp.Coverage, nil
+}
+
+// knownOrigins drops the coverage of origins without a configured key: an
+// instance taken out of the configuration altogether. Its coverage means
+// nothing here, and refusing it would stop replication between all
+// instances that once saw its events.
+func (s *Store) knownOrigins(cov map[string]int64) {
+	for o := range cov {
+		if o != s.origin && s.instanceKey(o) == nil {
+			delete(cov, o)
+		}
+	}
 }
 
 // Read implements replication.Store.

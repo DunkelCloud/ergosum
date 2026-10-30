@@ -183,7 +183,7 @@ type Config struct {
 	// for one position, or Verify reports ErrEquivocation; stored is the
 	// hash already stored at that position, if any. The event is skipped.
 	OnEquivocation func(peer string, e Event, stored string, err error)
-	Logger   *slog.Logger
+	Logger         *slog.Logger
 
 	// BatchSize is the most events per page. Default 256.
 	BatchSize int

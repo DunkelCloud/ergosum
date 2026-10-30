@@ -81,7 +81,8 @@ replication:
         bbQp94Nl0sHkl8VEUr8Luu9ddfSg8noe/RblLEjy0EiDssHIrktAEuBgbg==
         -----END PUBLIC KEY-----
     # Without url: known, but reached only through the other peers. It gets
-    # no pushes from here, and compaction does not wait for it.
+    # no pushes from here, and compaction does not wait for it. An instance
+    # that is gone for good stays listed with "retired: true" and no url.
     - name: authority-c
       key: |
         -----BEGIN PUBLIC KEY-----

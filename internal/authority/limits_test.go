@@ -5,6 +5,7 @@ import (
 	"time"
 
 	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
+	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
 )
 
@@ -119,5 +120,21 @@ func TestClassify(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s started %s: %s, want %s", c.status, c.started, got, c.want)
 		}
+	}
+}
+
+// A retired instance keeps its key for verifying history but has no URL.
+func TestRetiredPeer(t *testing.T) {
+	cfg := validConfig(t)
+	k, _ := keys.Generate()
+	pem := string(keys.MarshalPublicPEM(&k.PublicKey))
+	cfg.Replication.Peers = []PeerConfig{{Name: "old", Key: pem, Retired: true, URL: "https://192.0.2.9:7435"}}
+	if _, err := cfg.peers(); err == nil {
+		t.Fatal("a retired instance with a URL was accepted")
+	}
+	cfg.Replication.Peers[0].URL = ""
+	ps, err := cfg.peers()
+	if err != nil || len(ps) != 1 || !ps[0].retired {
+		t.Fatalf("retired instance: %+v %v", ps, err)
 	}
 }
