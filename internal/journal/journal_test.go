@@ -431,6 +431,14 @@ func TestRegistryValidation(t *testing.T) {
 	if _, err := journal.NewRegistry(cfg); err != nil {
 		t.Fatalf("2048-bit RSA admin key rejected: %v", err)
 	}
+	// Names are shown to administrators: no line breaks or escapes.
+	for _, name := range []string{"", "\x1b[2Jmallory", "alice\nbob", "-alice", "\u202ealice", strings.Repeat("a", 65)} {
+		cfg := admins.Registry(1)
+		cfg.Admins[name] = rsaKeyLine(t, 2048)
+		if _, err := journal.NewRegistry(cfg); err == nil {
+			t.Errorf("admin name %q accepted", name)
+		}
+	}
 }
 
 func dsaKeyLine(t *testing.T) string {

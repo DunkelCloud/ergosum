@@ -71,22 +71,28 @@ func (e *BindingEvent) Validate() error {
 	if !protocol.ValidDNSName(e.TrustDomain) {
 		return invalid("bad trust domain %q", e.TrustDomain)
 	}
-	if !protocol.ValidDNSName(e.Identity) {
-		return invalid("bad identity %q", e.Identity)
+	return validateContent(e.Kind, e.Identity, e.Epoch, e.Key, e.Checks)
+}
+
+// validateContent checks what a binding event and the binding it projects
+// to have in common.
+func validateContent(kind, identity string, epoch uint64, key string, checks []Check) error {
+	if !protocol.ValidDNSName(identity) {
+		return invalid("bad identity %q", identity)
 	}
-	if e.Epoch < 1 || e.Epoch > MaxEpoch {
+	if epoch < 1 || epoch > MaxEpoch {
 		return invalid("epoch must be between 1 and 2^53")
 	}
-	switch e.Kind {
+	switch kind {
 	case KindBindingSet:
-		if !keys.ValidFingerprint(e.Key) {
-			return invalid("bad key fingerprint %q", e.Key)
+		if !keys.ValidFingerprint(key) {
+			return invalid("bad key fingerprint %q", key)
 		}
-		if len(e.Checks) == 0 {
+		if len(checks) == 0 {
 			return invalid("binding.set needs at least one callback check")
 		}
 		seen := map[Check]bool{}
-		for _, c := range e.Checks {
+		for _, c := range checks {
 			if err := validateCheck(c); err != nil {
 				return err
 			}
@@ -96,11 +102,11 @@ func (e *BindingEvent) Validate() error {
 			seen[c] = true
 		}
 	case KindBindingRevoked:
-		if e.Key != "" || len(e.Checks) != 0 {
+		if key != "" || len(checks) != 0 {
 			return invalid("binding.revoked carries no key and no checks")
 		}
 	default:
-		return invalid("unknown kind %q", e.Kind)
+		return invalid("unknown kind %q", kind)
 	}
 	return nil
 }

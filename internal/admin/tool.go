@@ -122,8 +122,10 @@ func (t *Tool) bind(ctx context.Context, path, textOut string) error {
 		return nil
 	}
 
-	t.describe(e, cur, canonical)
+	// The text to sign comes last, right before the question.
+	t.describe(e, cur)
 	t.printf("\nApprovals for %s: %d of %d%s. Allowed: %s.\n", e.Kind, len(signed), ap.Threshold, nameList(signed), strings.Join(sortedKeys(ap.Admins), ", "))
+	t.printf("\nText to sign:\n%s", indent(canonical))
 
 	if len(signed) < ap.Threshold {
 		done, err := t.sign(ctx, path, f, e, added, names, signed)
@@ -345,7 +347,7 @@ func checksText(cs []journal.Check) string {
 }
 
 // describe shows what the event changes.
-func (t *Tool) describe(e *journal.BindingEvent, cur *journal.Binding, canonical []byte) {
+func (t *Tool) describe(e *journal.BindingEvent, cur *journal.Binding) {
 	switch {
 	case e.Kind == journal.KindBindingRevoked && cur.Active():
 		t.printf("\nRevoke %s at epoch %d. It ends the binding of epoch %d:\n    key %s\n", e.Identity, e.Epoch, cur.Epoch, cur.Key)
@@ -393,7 +395,6 @@ func (t *Tool) describe(e *journal.BindingEvent, cur *journal.Binding, canonical
 			t.printf("  - %s\n", CheckLine(c))
 		}
 	}
-	t.printf("\nText to sign:\n%s", indent(canonical))
 }
 
 // next tells the administrator what follows a recorded event.

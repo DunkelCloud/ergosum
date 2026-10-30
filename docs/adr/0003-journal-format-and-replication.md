@@ -145,8 +145,9 @@ deployment is worthless in another that trusts the same administrator keys.
   text and merged into one event before it is written. Instances never hold
   half-approved events.
 - The **registry** is static configuration on every instance and the trust
-  root. It names administrator keys and, per event kind, a threshold and the
-  allowed keys:
+  root. It names administrator keys (names of letters, digits and `. _ @ -`,
+  starting with a letter or digit, at most 64 characters) and, per event
+  kind, a threshold and the allowed keys:
 
   ```yaml
   registry:
@@ -221,6 +222,15 @@ On the same listener, for administrator tooling and for daemons:
     ]
   }
   ```
+
+Tooling checks every answer before it shows it or writes it into a file:
+each field must have its plain form, as in a valid event (identities and
+trust domain as DNS names, checks as in the canonical text, origins as
+instance names, administrator names as in the registry, hashes as hex), and
+an answer that does not is refused. An authority's error text is shown
+without control characters and cut short. A value thus cannot add a line to
+a binding file or change what a terminal shows; the text to sign is shown
+last, right before the question to sign.
 
 Bindings and administrator key fingerprints are no secret, and the
 per-identity read already showed every binding to whoever knew the name.

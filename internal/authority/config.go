@@ -148,7 +148,7 @@ func (c *Config) peers() ([]peer, error) {
 	var out []peer
 	seen := map[string]bool{}
 	for i, pc := range c.Replication.Peers {
-		if !validInstanceName(pc.Name) || pc.Name == c.Instance {
+		if !journal.ValidInstanceName(pc.Name) || pc.Name == c.Instance {
 			return nil, fmt.Errorf("replication.peers[%d]: bad name %q", i, pc.Name)
 		}
 		if seen[pc.Name] {
@@ -175,19 +175,6 @@ func (c *Config) peers() ([]peer, error) {
 		out = append(out, peer{name: pc.Name, url: strings.TrimSuffix(pc.URL, "/"), key: key, fingerprint: fp, retired: pc.Retired})
 	}
 	return out, nil
-}
-
-// validInstanceName allows names such as authority-a or site-a.example.com.
-func validInstanceName(s string) bool {
-	if s == "" || len(s) > 63 {
-		return false
-	}
-	for _, r := range s {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '.' {
-			return false
-		}
-	}
-	return true
 }
 
 // CallbackConfig configures the callback client.
@@ -287,7 +274,7 @@ func (c *Config) SetDefaults() {
 // Validate checks the configuration.
 func (c *Config) Validate() error {
 	var errs []error
-	if !validInstanceName(c.Instance) {
+	if !journal.ValidInstanceName(c.Instance) {
 		errs = append(errs, fmt.Errorf("instance %q: use lower-case letters, digits, hyphens and dots", c.Instance))
 	}
 	if !protocol.ValidDNSName(c.TrustDomain) {

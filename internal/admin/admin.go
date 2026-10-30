@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 
@@ -133,7 +134,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) (stat
 			continue
 		}
 		if resp.StatusCode == http.StatusServiceUnavailable {
-			errs = append(errs, &errUnreachable{a.URL, errors.New(resp.Status)})
+			errs = append(errs, &errUnreachable{a.URL, errors.New(http.StatusText(resp.StatusCode))})
 			continue
 		}
 		return resp.StatusCode, data, a.URL, nil
@@ -158,6 +159,9 @@ func (c *Client) List(ctx context.Context) (*journal.BindingList, string, error)
 	if err := json.Unmarshal(data, &l); err != nil {
 		return nil, from, fmt.Errorf("%s: %w", from, err)
 	}
+	if err := l.Validate(); err != nil {
+		return nil, from, fmt.Errorf("%s: unusable answer: %w", from, err)
+	}
 	return &l, from, nil
 }
 
@@ -174,6 +178,12 @@ func (c *Client) Current(ctx context.Context, identity string) (*journal.Binding
 		var b journal.Binding
 		if err := json.Unmarshal(data, &b); err != nil {
 			return nil, fmt.Errorf("%s: %w", from, err)
+		}
+		if err := b.Validate(); err != nil {
+			return nil, fmt.Errorf("%s: unusable answer: %w", from, err)
+		}
+		if b.Identity != identity {
+			return nil, fmt.Errorf("%s: unusable answer: asked for %s, got %s", from, identity, b.Identity)
 		}
 		return &b, nil
 	case http.StatusNotFound:
@@ -208,11 +218,14 @@ func (c *Client) Submit(ctx context.Context, e *journal.BindingEvent) (journal.R
 	if status != http.StatusCreated && status != http.StatusOK {
 		var er protocol.ErrorResponse
 		_ = json.Unmarshal(data, &er)
-		return journal.Receipt{}, from, &SubmitError{Authority: from, Status: status, Code: er.Error, Detail: er.Detail}
+		return journal.Receipt{}, from, &SubmitError{Authority: from, Status: status, Code: printable(er.Error, 64), Detail: printable(er.Detail, maxDetail)}
 	}
 	var r journal.Receipt
 	if err := json.Unmarshal(data, &r); err != nil {
 		return r, from, fmt.Errorf("%s: %w", from, err)
+	}
+	if err := r.Validate(); err != nil {
+		return journal.Receipt{}, from, fmt.Errorf("%s: unusable receipt: %w", from, err)
 	}
 	return r, from, nil
 }
@@ -220,9 +233,33 @@ func (c *Client) Submit(ctx context.Context, e *journal.BindingEvent) (journal.R
 func errorDetail(data []byte) string {
 	var er protocol.ErrorResponse
 	if json.Unmarshal(data, &er) == nil && er.Error != "" {
-		return strings.TrimSpace(er.Error + " " + er.Detail)
+		return printable(er.Error+" "+er.Detail, maxDetail)
 	}
-	return strings.TrimSpace(string(data))
+	return printable(string(data), maxDetail)
+}
+
+// maxDetail bounds an authority's error text as shown.
+const maxDetail = 300
+
+// printable makes text from an authority safe to show on a terminal:
+// control characters (escape sequences, line breaks) and bidirectional
+// overrides become spaces, invalid UTF-8 the replacement character, and the
+// text is cut after max characters.
+func printable(s string, max int) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n == max {
+			b.WriteString("...")
+			break
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			r = ' '
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // Signer signs canonical text. SSHKeygen is the implementation for
