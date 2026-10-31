@@ -33,6 +33,8 @@ type replicationState struct {
 type journalMetrics struct {
 	rejected      *metrics.Vec
 	equivocations *metrics.Vec
+	skipped       *metrics.Vec
+	originBytes   *metrics.Vec
 	outboxEvents  *metrics.Vec
 	outboxAge     *metrics.Vec
 	coverage      *metrics.Vec
@@ -60,6 +62,7 @@ func (a *Authority) setupReplication(ps []peer) error {
 		r.byFP[p.fingerprint] = p.name
 	}
 	a.store.SetInstanceKeys(instanceKeys)
+	a.store.SetQuota(int64(a.cfg.Replication.OriginQuotaMiB) << 20)
 	peerNames := make([]string, 0, len(rpeers))
 	for _, p := range rpeers {
 		peerNames = append(peerNames, p.Name)
@@ -70,6 +73,10 @@ func (a *Authority) setupReplication(ps []peer) error {
 			"Events that ingest rejected, by the peer that sent them. Each one stops replication from that peer.", "peer", peerNames...),
 		equivocations: m.Counter("machine_identity_journal_equivocations_total",
 			"Events whose origin signed a contradicting event before; they are skipped.", "origin", peerNames...),
+		skipped: m.Counter("machine_identity_journal_skipped_total",
+			"Observations and checkpoints of an origin skipped over its quota or too far above its coverage.", "origin", peerNames...),
+		originBytes: m.GaugeVec("machine_identity_journal_origin_bytes",
+			"Bytes that the observations and checkpoints of another origin take, against replication.origin_quota_mib.", "origin"),
 		outboxEvents: m.GaugeVec("machine_identity_journal_outbox_events",
 			"Events a peer has not acknowledged yet.", "peer"),
 		outboxAge: m.GaugeVec("machine_identity_journal_outbox_oldest_age_seconds",
@@ -104,6 +111,8 @@ func (a *Authority) setupReplication(ps []peer) error {
 		Authenticate:       r.authenticate,
 		OnReject:           a.onReject,
 		OnEquivocation:     a.onEquivocation,
+		Admit:              a.store.Admit,
+		OnSkip:             a.onSkip,
 		Logger:             a.log.With("component", "replication"),
 		MaxBody:            int64(a.cfg.Replication.MaxPageMiB) << 20,
 		RetryMin:           a.opts.RetryMin,
@@ -179,6 +188,17 @@ func (a *Authority) onEquivocation(peer string, e replication.Event, stored stri
 		"origin", e.Origin, "seq", e.Seq, "kind", e.Kind, "hash", e.Hash, "stored_hash", stored,
 		"sig", e.Sig, "reason", err.Error(),
 		"alert", "an instance signed two contradicting events; the event is skipped, take the instance out of service")
+}
+
+// onSkip reports an event over its origin's quota. Skipping goes on for
+// every event beyond the quota, so the log line is limited per origin.
+func (a *Authority) onSkip(peer string, e replication.Event, err error) {
+	a.jm.skipped.Inc(e.Origin)
+	if a.limiter.allow("skipped "+e.Origin, a.now()) {
+		a.audit.Error("journal events skipped", "event", "journal_ingest", "peer", peer,
+			"origin", e.Origin, "seq", e.Seq, "kind", e.Kind, "reason", err.Error(),
+			"alert", "an instance wrote more than its quota or left gaps; its events are skipped, check that instance")
+	}
 }
 
 func (a *Authority) onReject(peer string, e replication.Event, err error) {
@@ -398,6 +418,9 @@ func (a *Authority) collectJournalMetrics() {
 	}
 	for o, n := range st.Frontier {
 		a.jm.frontier.Set(o, float64(n))
+	}
+	for o, n := range a.store.OriginBytes() {
+		a.jm.originBytes.Set(o, float64(n))
 	}
 	age := -1.0
 	if st.LastCheckpoint != nil {

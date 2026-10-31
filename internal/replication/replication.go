@@ -188,7 +188,16 @@ type Config struct {
 	// for one position, or Verify reports ErrEquivocation; stored is the
 	// hash already stored at that position, if any. The event is skipped.
 	OnEquivocation func(peer string, e Event, stored string, err error)
-	Logger         *slog.Logger
+	// Admit decides whether a verified event of another origin above that
+	// origin's coverage is stored; nil stores every one. An error that
+	// wraps ErrSkipped declines it: the event is acknowledged without being
+	// stored, and if it is the next one of its origin the coverage moves
+	// over it, as over a duplicate. Any other error is temporary. Kinds of
+	// AlwaysIngest are never declined.
+	Admit func(ctx context.Context, e Event, coverage int64) error
+	// OnSkip is called for every event that Admit declined.
+	OnSkip func(peer string, e Event, err error)
+	Logger *slog.Logger
 
 	// BatchSize is the most events per page. Default 256.
 	BatchSize int
@@ -211,6 +220,7 @@ var (
 	ErrConflict     = fmt.Errorf("%w: same origin and sequence number with another hash", ErrRejected)
 	ErrInvalid      = errors.New("invalid event")
 	ErrEquivocation = errors.New("origin signed contradicting events")
+	ErrSkipped      = errors.New("event skipped")
 )
 
 // Replicator pushes, ingests and pulls events.
@@ -431,8 +441,32 @@ func (r *Replicator) ingest(ctx context.Context, peer string, e Event) (stored b
 		}
 		return false, err
 	}
+	if skip, err := r.admit(ctx, peer, e, cov); skip || err != nil {
+		return false, err
+	}
 	if err := st.Append(ctx, e); err != nil {
 		return false, err
+	}
+	return true, nil
+}
+
+// admit asks Admit about a verified event above the coverage of its
+// origin. A declined event is skipped like a duplicate rather than
+// rejected: the honest instances that forward it would otherwise stop
+// replicating to each other behind it.
+func (r *Replicator) admit(ctx context.Context, peer string, e Event, cov int64) (skip bool, err error) {
+	if r.cfg.Admit == nil || e.Origin == r.cfg.Self || (r.cfg.AlwaysIngest != nil && r.cfg.AlwaysIngest(e.Kind)) {
+		return false, nil
+	}
+	err = r.cfg.Admit(ctx, e, cov)
+	if err == nil || !errors.Is(err, ErrSkipped) {
+		return false, err
+	}
+	if r.cfg.OnSkip != nil {
+		r.cfg.OnSkip(peer, e, err)
+	}
+	if e.Seq == cov+1 {
+		return true, r.cfg.Store.RaiseCoverage(ctx, map[string]int64{e.Origin: e.Seq})
 	}
 	return true, nil
 }

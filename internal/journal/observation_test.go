@@ -126,3 +126,78 @@ func TestMaxChecks(t *testing.T) {
 		t.Fatalf("%d checks accepted", len(checks))
 	}
 }
+
+// TestAdmit: observations and checkpoints of another origin are declined
+// once they would exceed its quota, and above a gap once MaxUncovered
+// events lie there; binding events and the own origin are never declined.
+func TestAdmit(t *testing.T) {
+	ctx := context.Background()
+	ka, kb := newKey(t), newKey(t)
+	admins := jt.NewAdmins(t, "alice")
+	both := map[string]*ecdsa.PublicKey{"instance-a": &ka.PublicKey, "instance-b": &kb.PublicKey}
+	obs := func(seq int64) replication.Event {
+		o := journal.Observation{
+			V: 1, Kind: "observation.wrong_location", Instance: "instance-a", Kid: keys.Thumbprint(&ka.PublicKey),
+			Identity: "host1.example.com", Epoch: 1, RequestID: protocol.NewRequestID(), Key: fingerprint(t),
+			Time: time.Unix(1_800_000_000, 0).UTC(),
+		}
+		return observationAt(t, ka, "instance-a", o.Kind, seq, o)
+	}
+	store := func(s *journal.Store, e replication.Event) error {
+		t.Helper()
+		cov, err := s.Coverage(ctx, e.Origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Verify(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Admit(ctx, e, cov); err != nil {
+			return err
+		}
+		return s.Append(ctx, e)
+	}
+
+	b := openInstance(t, admins, 1, "instance-b", kb)
+	b.SetInstanceKeys(both)
+	size := int64(len(obs(1).Body))
+	b.SetQuota(3*size + size/2)
+	var seq int64
+	for {
+		seq++
+		err := store(b, obs(seq))
+		if errors.Is(err, journal.ErrQuota) && errors.Is(err, replication.ErrSkipped) {
+			break
+		}
+		if err != nil || seq > 10 {
+			t.Fatalf("event %d: %v", seq, err)
+		}
+	}
+	if seq != 4 {
+		t.Fatalf("quota reached at event %d, want 4", seq)
+	}
+	if used := b.OriginBytes()["instance-a"]; used > 3*size+size/2 {
+		t.Fatalf("%d bytes stored over the quota", used)
+	}
+	if err := b.Admit(ctx, replication.Event{Origin: "instance-a", Seq: 9, Kind: journal.KindBindingSet}, 3); err != nil {
+		t.Fatalf("binding event declined: %v", err)
+	}
+	if err := b.Admit(ctx, replication.Event{Origin: "instance-b", Seq: 9, Kind: "observation.issued"}, 0); err != nil {
+		t.Fatalf("own event declined: %v", err)
+	}
+
+	c := openInstance(t, admins, 1, "instance-c", newKey(t))
+	c.SetInstanceKeys(both)
+	journal.SetMaxUncoveredForTest(c, 2)
+	for _, n := range []int64{5, 6} {
+		if err := store(c, obs(n)); err != nil {
+			t.Fatalf("event %d above the coverage: %v", n, err)
+		}
+	}
+	if err := store(c, obs(7)); !errors.Is(err, journal.ErrUncovered) {
+		t.Fatalf("third event above the gap: %v", err)
+	}
+	if err := store(c, obs(1)); err != nil {
+		t.Fatalf("next event of the origin: %v", err)
+	}
+}

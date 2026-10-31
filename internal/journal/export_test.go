@@ -30,6 +30,9 @@ func DeleteForTest(s *Store, origin string, seq int64) error {
 	return err
 }
 
+// SetMaxUncoveredForTest lowers MaxUncovered for one store.
+func SetMaxUncoveredForTest(s *Store, n int) { s.maxUncovered = n }
+
 // SetFrontierForTest raises the compaction frontier of an origin directly.
 func SetFrontierForTest(s *Store, origin string, seq int64) error {
 	_, err := s.db.ExecContext(context.Background(), `INSERT INTO compaction (origin, seq) VALUES (?, ?)

@@ -327,7 +327,11 @@ func (s *Store) Compact(ctx context.Context, o CompactOptions) (int64, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE `+compactable, args...); err != nil {
 		return 0, err
 	}
-	return n, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.forgetUsage()
+	return n, nil
 }
 
 // ArchiveLine is one event in an export: JSON lines that need no trust in

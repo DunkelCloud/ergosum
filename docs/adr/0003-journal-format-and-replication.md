@@ -529,6 +529,19 @@ leader, no quorum.
   that origin at that position; for observations that only weakens the
   record, and binding events converge through the checkpoints. An
   equivocating instance must be taken out of service.
+- **Quotas**: what another instance's observations and checkpoints take
+  in a journal is bounded per origin (`replication.origin_quota_mib`,
+  default 1 GiB), and at most 10 000 events of an origin are stored above
+  its coverage. Beyond either, a verified observation or checkpoint of that
+  origin is skipped like a duplicate: acknowledged without being stored,
+  with an alarm (metric per origin, audit line); if it is the next one of
+  its origin, the coverage moves over it. Rejecting it instead would stop
+  the honest instances that forward it from replicating to each other.
+  Binding events are never skipped. An honest origin stays far below both:
+  its events arrive in order, and what it writes within the observation
+  retention fits the quota. A compromised instance can fill no more than
+  its quota on the others, and cannot keep its later events out of
+  compaction by never sending one sequence number.
 - **Rejection**: only an event that fails verification is rejected. Ingest
   stops at the first rejected event and acknowledges
   only what came before it, so the coverage of that origin stops there. The
@@ -615,6 +628,11 @@ leader, no quorum.
   ignores the coverage of an origin it does not know: refusing it would
   stop replication between all instances that once saw that origin's
   events.
+- Skipped events weaken the record of their origin on that instance, and
+  the coverage of an origin stops below a skipped event that was not the
+  next one; its later events then stay until the next sync raises the
+  coverage. Size the quota above what the busiest instance writes within
+  the observation retention.
 - One rejected event stops replication from that peer until the cause is
   fixed (a stale registry here, a forged event there); later events wait
   behind it, also those of other origins the peer forwards.

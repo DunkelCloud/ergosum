@@ -80,6 +80,11 @@ type ReplicationConfig struct {
 	// sends to one, in MiB. A checkpoint must fit into one page, about
 	// 1.6 KB per identity; set the same value on every instance. Default 32.
 	MaxPageMiB int `yaml:"max_page_mib"`
+	// OriginQuotaMiB is how much the observations and checkpoints of each
+	// other instance may take in this journal, in MiB; beyond it, they are
+	// skipped. Size it above what an instance writes within the
+	// observation retention. Default 1024.
+	OriginQuotaMiB int `yaml:"origin_quota_mib"`
 }
 
 // PeerConfig is another instance.
@@ -258,6 +263,9 @@ func (c *Config) SetDefaults() {
 	if c.Replication.MaxPageMiB == 0 {
 		c.Replication.MaxPageMiB = 32
 	}
+	if c.Replication.OriginQuotaMiB == 0 {
+		c.Replication.OriginQuotaMiB = 1024
+	}
 	if c.Compaction.CheckpointInterval == 0 {
 		c.Compaction.CheckpointInterval = 24 * time.Hour
 	}
@@ -324,6 +332,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Replication.MaxPageMiB < 1 || c.Replication.MaxPageMiB > 1024 {
 		errs = append(errs, fmt.Errorf("replication.max_page_mib %d out of range (1 to 1024)", c.Replication.MaxPageMiB))
+	}
+	if c.Replication.OriginQuotaMiB < 2*c.Replication.MaxPageMiB || c.Replication.OriginQuotaMiB > 1<<20 {
+		errs = append(errs, fmt.Errorf("replication.origin_quota_mib %d out of range (twice max_page_mib to 1048576)", c.Replication.OriginQuotaMiB))
 	}
 	if c.Compaction.CheckpointInterval < time.Minute || c.Compaction.Interval < time.Second {
 		errs = append(errs, errors.New("compaction: checkpoint_interval must be at least 1m and interval at least 1s"))

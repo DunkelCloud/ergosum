@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -143,5 +144,51 @@ func TestCoverageClaims(t *testing.T) {
 	}
 	if nodes["c"].store.cov["c"] != 0 {
 		t.Fatalf("own coverage raised: %v", nodes["c"].store.cov)
+	}
+}
+
+// TestAdmitSkips: an event that Admit declines is acknowledged without being
+// stored, the coverage moves over it when it is the next one of its
+// origin, and what follows it still arrives; rules are never declined, and
+// a temporary error acknowledges nothing.
+func TestAdmitSkips(t *testing.T) {
+	var skipped []string
+	nodes := cluster(t, []string{"a", "b", "c"}, nil, func(c *replication.Config) {
+		c.Admit = func(_ context.Context, e replication.Event, _ int64) error {
+			switch {
+			case strings.HasPrefix(string(e.Body), "over"):
+				return fmt.Errorf("%w: quota", replication.ErrSkipped)
+			case strings.HasPrefix(string(e.Body), "busy"):
+				return errors.New("database busy")
+			}
+			return nil
+		}
+		c.OnSkip = func(_ string, e replication.Event, _ error) { skipped = append(skipped, string(e.Body)) }
+	})
+	a := nodes["a"]
+	acc, err := ingest(t, a.rep, "c",
+		ev("b", 1, kindNote, "fine"), ev("b", 2, kindNote, "over one"), ev("b", 3, kindNote, "fine three"),
+		ev("b", 4, kindRule, "over, but a rule"), ev("c", 1, kindNote, "from c"))
+	if err != nil || acc != 5 {
+		t.Fatalf("accepted %d, %v", acc, err)
+	}
+	if a.store.has("b", 2) || !a.store.has("b", 3) || !a.store.has("b", 4) || !a.store.has("c", 1) {
+		t.Fatal("declined event stored, or what follows dropped")
+	}
+	if c, _ := a.store.Coverage(context.Background(), "b"); c != 4 {
+		t.Fatalf("coverage of b %d, want 4", c)
+	}
+	// Above a gap the coverage cannot move.
+	if _, err := ingest(t, a.rep, "c", ev("b", 7, kindNote, "over seven")); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := a.store.Coverage(context.Background(), "b"); c != 4 || a.store.has("b", 7) {
+		t.Fatalf("coverage of b %d after a declined event above a gap", c)
+	}
+	if acc, err := ingest(t, a.rep, "c", ev("b", 5, kindNote, "busy")); err == nil || errors.Is(err, replication.ErrRejected) || acc != 0 {
+		t.Fatalf("temporary error: accepted %d, %v", acc, err)
+	}
+	if len(skipped) != 2 {
+		t.Fatalf("skipped %v", skipped)
 	}
 }
