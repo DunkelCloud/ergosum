@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no cgo
@@ -106,6 +107,7 @@ type Store struct {
 	registry    *Registry
 	mu          sync.Mutex // serializes writes
 	now         func() time.Time
+	projection  atomic.Uint64 // committed changes of the projection
 
 	keysMu sync.RWMutex
 	keys   map[string]*ecdsa.PublicKey // instance keys by origin
@@ -499,8 +501,14 @@ func (s *Store) AppendBinding(ctx context.Context, e *BindingEvent) (Receipt, er
 	if err := tx.Commit(); err != nil {
 		return Receipt{}, err
 	}
+	s.projection.Add(1)
 	return Receipt{Origin: s.origin, Seq: seq, Hash: hash}, nil
 }
+
+// ProjectionVersion changes after every committed change of the projection:
+// what a reader built from the projection stays current while it returns
+// the same value.
+func (s *Store) ProjectionVersion() uint64 { return s.projection.Load() }
 
 // Wins reports whether binding a takes precedence over b: the higher epoch
 // wins; at equal epochs a revocation wins, otherwise the smaller hash.

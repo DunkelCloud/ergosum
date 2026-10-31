@@ -276,3 +276,29 @@ func TestRelayedBodyStoredCanonically(t *testing.T) {
 		t.Fatalf("stored body %s, want %s", bodies[0], canonical)
 	}
 }
+
+// TestProjectionVersion: the version changes with every change of the
+// projection, written here or ingested, and not with observations.
+func TestProjectionVersion(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice")
+	a, b := pair(t, admins)
+	if _, err := a.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "alice")); err != nil {
+		t.Fatal(err)
+	}
+	if a.ProjectionVersion() == 0 {
+		t.Fatal("a binding written here left the version")
+	}
+	before := b.ProjectionVersion()
+	copyEvents(t, a, b, 0)
+	if b.ProjectionVersion() == before {
+		t.Fatal("an ingested binding left the version")
+	}
+	before = a.ProjectionVersion()
+	if _, err := a.AppendObservation(ctx, journal.KindObservation+".issued", "host1.example.com", strings.Repeat("0", 64), []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if a.ProjectionVersion() != before {
+		t.Fatal("an observation changed the version")
+	}
+}
