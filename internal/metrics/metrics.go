@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -29,6 +30,7 @@ type Vec struct {
 	help   string
 	typ    string
 	label  string
+	fixed  string // labels of an Info metric, formatted
 	values map[string]float64
 }
 
@@ -63,6 +65,23 @@ func (r *Registry) Gauge(name, help string) *Vec {
 // GaugeVec registers a gauge with one label.
 func (r *Registry) GaugeVec(name, help, label string) *Vec {
 	return r.add(name, help, "gauge", label, nil)
+}
+
+// Info registers a gauge with the constant value 1 and fixed labels, given
+// as name and value pairs, such as the version of the running binary.
+func (r *Registry) Info(name, help string, pairs ...string) *Vec {
+	var b strings.Builder
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%s=%q", pairs[i], pairs[i+1])
+	}
+	v := &Vec{r: r, name: name, help: help, typ: "gauge", fixed: b.String(), values: map[string]float64{"": 1}}
+	r.mu.Lock()
+	r.families = append(r.families, v)
+	r.mu.Unlock()
+	return v
 }
 
 // OnCollect registers a function that updates gauges before every
@@ -116,9 +135,12 @@ func (r *Registry) Write(w io.Writer) error {
 		}
 		sort.Strings(labels)
 		for _, l := range labels {
-			if f.label == "" {
+			switch {
+			case f.fixed != "":
+				fmt.Fprintf(&b, "%s{%s} %s\n", f.name, f.fixed, format(f.values[l]))
+			case f.label == "":
 				fmt.Fprintf(&b, "%s %s\n", f.name, format(f.values[l]))
-			} else {
+			default:
 				fmt.Fprintf(&b, "%s{%s=%q} %s\n", f.name, f.label, l, format(f.values[l]))
 			}
 		}

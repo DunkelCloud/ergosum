@@ -69,6 +69,7 @@ Metrics (node_exporter textfile collector, `metrics_file`):
 | `machine_identity_clock_skew_seconds` | authority clock minus local clock, estimated from request rounds of at most 10 s |
 | `machine_identity_callbacks_total{status}` | callbacks answered: `confirmed`, `ended` (a late callback for a request this daemon gave up), `no_open_request` (the key is used elsewhere) |
 | `machine_identity_key_change_pending` | 1 while a new key waits for its binding |
+| `machine_identity_build_info{version,commit}` | 1; version and commit of the running binary |
 
 Short token lifetimes need synchronized clocks.
 
@@ -140,9 +141,12 @@ on a host of its own or on a shared host.
     -v ergosum-state:/var/lib/ergosum-authority \
     -v /etc/ergosum:/etc/ergosum:ro \
     --network host \
-    ghcr.io/example/ergosum:latest
+    ghcr.io/example/ergosum@sha256:...
   docker exec -it ergosum ergosum unseal
   ```
+
+  Name the image by digest, not by a tag such as `latest`: a tag can
+  move, and the authority must run exactly the binary that was checked.
 
   Host networking keeps source addresses and attached networks as on the
   host; with bridged networking `net` checks see only the bridge. The
@@ -166,6 +170,7 @@ on a host of its own or on a shared host.
 | --- | --- |
 | `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `misdirected`, `foreign_key`, `unknown_identity` |
 | `machine_identity_authority_sealed` | 1 while sealed |
+| `machine_identity_build_info{version,commit}` | 1; version and commit of the running binary |
 | `machine_identity_binding_events_total{outcome}` | write API: `accepted`, `rejected` |
 | `machine_identity_journal_outbox_events{peer}` | events a peer has not acknowledged |
 | `machine_identity_journal_outbox_oldest_age_seconds{peer}` | age of the oldest of them; 0 if none |

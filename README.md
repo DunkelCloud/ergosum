@@ -54,6 +54,12 @@ read-only root filesystem.
 ## Building
 
 ```sh
-CGO_ENABLED=0 go build -o dist/ ./cmd/...
+scripts/build.sh dist
 go test ./...
 ```
+
+`scripts/build.sh` builds with the toolchain named in `go.mod`, which Go
+fetches if needed. `GOOS` and `GOARCH` select the target; `VERSION` and
+`COMMIT` are stamped into the binaries. The same commit and settings give
+the same bytes on Linux, macOS and Windows (in Git Bash), so anyone can
+rebuild a published binary and compare it.

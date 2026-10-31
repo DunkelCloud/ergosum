@@ -150,6 +150,9 @@ echo "$metrics" | grep '^machine_identity_requests_total'
 echo "$metrics" | grep -q 'result="issued"} [1-9]' || fail "no issuance counted"
 echo "$metrics" | grep -q 'result="wrong_location"} [2-9]' || fail "clone attempts not counted as wrong_location"
 echo "$metrics" | grep -q 'result="key_duplicate"} 0' || fail "unexpected key_duplicate"
+version=$("$BIN/ergosum" version | cut -d' ' -f2)
+echo "$metrics" | grep "^machine_identity_build_info{version=\"$version\"," || fail "authority reports no build_info for $version"
+grep -q "^machine_identity_build_info{version=\"$version\"," "$W/host1/run/ergosum.prom" || fail "daemon reports no build_info for $version"
 grep -q '"log_type":"audit"\|log_type=audit' "$W/authority.log" || fail "no audit entries"
 
 log "OK"

@@ -23,6 +23,7 @@ import (
 	"github.com/DunkelCloud/ergosum/internal/metrics"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
 	"github.com/DunkelCloud/ergosum/internal/tlspin"
+	"github.com/DunkelCloud/ergosum/internal/version"
 )
 
 // Results of a token request, as exported in
@@ -159,6 +160,8 @@ func New(cfg Config, opts Options) (*Authority, error) {
 	}
 
 	a.metrics = metrics.NewRegistry()
+	a.metrics.Info("machine_identity_build_info", "Version and commit of the running binary.",
+		"version", version.Version, "commit", version.Commit)
 	a.requests = a.metrics.Counter("machine_identity_requests_total",
 		"Token requests by result.", "result",
 		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity, ResultReplay, ResultMisdirected)

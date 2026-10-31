@@ -1,4 +1,8 @@
-.git
-.github
-dist
-*.test
+# Only what the image build reads. Everything else, such as local builds,
+# keys or the git history, stays out of the build context.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+!scripts/build.sh
