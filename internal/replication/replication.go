@@ -139,8 +139,9 @@ type Store interface {
 	// Outbox counts the events above position after and returns the time
 	// the oldest of them was stored.
 	Outbox(ctx context.Context, after int64) (n int64, oldest time.Time, err error)
-	// Latest returns the stored events of one origin and kind, newest first.
-	Latest(ctx context.Context, origin, kind string) ([]Stored, error)
+	// LatestAt returns the newest stored event of one origin and kind at or
+	// below position pos, or nil.
+	LatestAt(ctx context.Context, origin, kind string, pos int64) (*Stored, error)
 	// SetFrontier raises the compaction frontier to a checkpoint's coverage.
 	// The checkpoint becomes the Start of pages that reach below it.
 	SetFrontier(ctx context.Context, checkpoint Stored, frontier map[string]int64) error
@@ -460,24 +461,20 @@ func (r *Replicator) Frontier(ctx context.Context) (*Stored, error) {
 		}
 		acked = min(acked, c)
 	}
-	cps, err := st.Latest(ctx, r.cfg.Self, r.cfg.CheckpointKind)
+	// Only the one checkpoint is read: while a peer does not acknowledge,
+	// the own checkpoints pile up, each as large as the projection.
+	cp, err := st.LatestAt(ctx, r.cfg.Self, r.cfg.CheckpointKind, acked)
+	if err != nil || cp == nil {
+		return nil, err
+	}
+	cov, err := r.cfg.CheckpointCoverage(cp.Event)
 	if err != nil {
 		return nil, err
 	}
-	for _, cp := range cps {
-		if cp.Pos > acked {
-			continue
-		}
-		cov, err := r.cfg.CheckpointCoverage(cp.Event)
-		if err != nil {
-			return nil, err
-		}
-		if err := st.SetFrontier(ctx, cp, cov); err != nil {
-			return nil, err
-		}
-		return &cp, nil
+	if err := st.SetFrontier(ctx, *cp, cov); err != nil {
+		return nil, err
 	}
-	return nil, nil
+	return cp, nil
 }
 
 // PeerStatus is the outbox of one peer.

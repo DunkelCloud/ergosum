@@ -65,9 +65,10 @@ func stateHash(lines []string) string {
 
 // verifyCheckpoint checks a checkpoint payload whose envelope verified with
 // the instance key of origin: every contained binding event is verified
-// against the local registry and trust domain like a write; one failure
-// rejects the whole checkpoint.
-func (s *Store) verifyCheckpoint(origin string, payload []byte) (*Checkpoint, error) {
+// against the local registry and trust domain like a write, unless this
+// instance holds it already (verifyBinding); one failure rejects the whole
+// checkpoint.
+func (s *Store) verifyCheckpoint(ctx context.Context, origin string, payload []byte) (*Checkpoint, error) {
 	var cp Checkpoint
 	if err := strictDecode(payload, &cp); err != nil {
 		return nil, unverified("checkpoint: %v", err)
@@ -90,7 +91,7 @@ func (s *Store) verifyCheckpoint(origin string, payload []byte) (*Checkpoint, er
 	seen := map[string]bool{}
 	lines := make([]string, 0, len(cp.Bindings))
 	for i, raw := range cp.Bindings {
-		be, err := s.verifyBinding(raw)
+		be, err := s.verifyBinding(ctx, raw)
 		if err != nil {
 			return nil, fmt.Errorf("checkpoint binding %d: %w", i+1, err)
 		}
