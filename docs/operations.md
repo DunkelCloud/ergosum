@@ -195,7 +195,7 @@ on a host of its own or on a shared host.
 
 | Metric | Meaning |
 | --- | --- |
-| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `misdirected`, `foreign_key`, `unknown_identity` |
+| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `misdirected`, `rate_limited`, `foreign_key`, `unknown_identity` |
 | `machine_identity_authority_sealed` | 1 while sealed |
 | `machine_identity_build_info{version,commit}` | 1; version and commit of the running binary |
 | `machine_identity_binding_events_total{outcome}` | write API: `accepted`, `rejected` |
@@ -203,6 +203,8 @@ on a host of its own or on a shared host.
 | `machine_identity_journal_outbox_oldest_age_seconds{peer}` | age of the oldest of them; 0 if none |
 | `machine_identity_journal_rejected_total{peer}` | events from a peer that ingest rejected |
 | `machine_identity_journal_equivocations_total{origin}` | events skipped because their origin signed a contradicting event; take that instance out of service |
+| `machine_identity_journal_skipped_total{origin}` | observations and checkpoints skipped over the quota of their origin, or too far above its coverage; check that instance |
+| `machine_identity_journal_origin_bytes{origin}` | what the observations and checkpoints of another origin take here, against `origin_quota_mib` |
 | `machine_identity_journal_coverage{origin}` | sequence number up to which every event of an origin is here |
 | `machine_identity_journal_compaction_frontier{origin}` | sequence number up to which events of an origin may be deleted |
 | `machine_identity_journal_checkpoint_age_seconds` | age of the latest own checkpoint; -1 before the first |
@@ -215,6 +217,10 @@ it like `key_duplicate`. `misdirected` means that a request signed by the
 machine but addressed to another instance arrived here: that instance, or
 whoever relayed the request, passed it on. All three are logged at level
 `error` with an `alert` field. `wrong_location` is a warning.
+`rate_limited` counts requests of an identity beyond 10 and then one per
+minute, or while another of its requests is in flight; a daemon renewing
+every quarter of an hour never gets there. Many of them come from a copy
+of the machine key, usually together with `key_duplicate`.
 
 Audit entries are JSON log lines with `"log_type":"audit"` on stdout — one
 per token request (result, identity, request ID, presented key, per-check
@@ -241,6 +247,7 @@ replication:
         -----BEGIN PUBLIC KEY-----
         ...
   max_page_mib: 32                 # largest page sent and accepted; the same everywhere
+  origin_quota_mib: 1024           # what another instance's observations may take here
 ```
 
 Allow TCP 7435 between the instances only. A peer without `url` is known
@@ -256,6 +263,14 @@ about 1.6 KB per identity. A page that is too large is refused with `413`
 and logged on the sender ("page larger than max_body"); raise the value on
 every instance before a checkpoint reaches it (32 MiB hold about 20 000
 identities).
+
+`origin_quota_mib` bounds what the observations and checkpoints of each
+other instance take in this journal; beyond it they are skipped, with the
+alert `ErgosumJournalEventsSkipped`. An observation takes about 1.5 KB, and
+an instance writes one per token request it answers: 100 machines renewing
+every quarter of an hour at one instance make about 15 MB a day, 1.3 GB
+over a retention of 90 days. Size the quota above that for the busiest
+instance, with `machine_identity_journal_origin_bytes` as the measure.
 
 `GET /v1/journal/state` on the ops listener reports the state hash, the
 coverage and compaction frontier per origin, and the outbox of every peer.

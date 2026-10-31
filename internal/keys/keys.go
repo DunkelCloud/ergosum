@@ -208,6 +208,8 @@ func ParsePublicPEM(data []byte) (*ecdsa.PublicKey, error) {
 	return ParseSPKI(block.Bytes)
 }
 
+var errNotP256 = errors.New("keys: not an ECDSA P-256 private key")
+
 func parsePKCS8(der []byte) (*ecdsa.PrivateKey, error) {
 	k, err := x509.ParsePKCS8PrivateKey(der)
 	if err != nil {
@@ -215,7 +217,7 @@ func parsePKCS8(der []byte) (*ecdsa.PrivateKey, error) {
 	}
 	key, ok := k.(*ecdsa.PrivateKey)
 	if !ok || key.Curve != elliptic.P256() {
-		return nil, errors.New("keys: not an ECDSA P-256 private key")
+		return nil, errNotP256
 	}
 	return key, nil
 }

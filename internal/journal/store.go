@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no cgo
@@ -106,10 +107,17 @@ type Store struct {
 	registry    *Registry
 	mu          sync.Mutex // serializes writes
 	now         func() time.Time
+	projection  atomic.Uint64 // committed changes of the projection
 
 	keysMu sync.RWMutex
 	keys   map[string]*ecdsa.PublicKey // instance keys by origin
 	signer *ecdsa.PrivateKey           // own instance key, once unsealed
+
+	quotaMu      sync.Mutex
+	quota        int64            // bytes per other origin, 0 for none
+	used         map[string]int64 // bytes stored per other origin, as far as known
+	usedGen      uint64           // counts forgetUsage
+	maxUncovered int
 }
 
 // timeFormat is RFC 3339 with a fixed number of fractional digits, so that
@@ -139,7 +147,8 @@ func Open(path, origin, trustDomain string, registry *Registry) (*Store, error) 
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db, origin: origin, trustDomain: trustDomain, registry: registry, now: time.Now, keys: map[string]*ecdsa.PublicKey{}}, nil
+	return &Store{db: db, origin: origin, trustDomain: trustDomain, registry: registry, now: time.Now,
+		keys: map[string]*ecdsa.PublicKey{}, maxUncovered: MaxUncovered}, nil
 }
 
 func prepare(ctx context.Context, db *sql.DB, origin, trustDomain string) error {
@@ -499,8 +508,14 @@ func (s *Store) AppendBinding(ctx context.Context, e *BindingEvent) (Receipt, er
 	if err := tx.Commit(); err != nil {
 		return Receipt{}, err
 	}
+	s.projection.Add(1)
 	return Receipt{Origin: s.origin, Seq: seq, Hash: hash}, nil
 }
+
+// ProjectionVersion changes after every committed change of the projection:
+// what a reader built from the projection stays current while it returns
+// the same value.
+func (s *Store) ProjectionVersion() uint64 { return s.projection.Load() }
 
 // Wins reports whether binding a takes precedence over b: the higher epoch
 // wins; at equal epochs a revocation wins, otherwise the smaller hash.

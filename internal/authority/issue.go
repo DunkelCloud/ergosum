@@ -27,45 +27,22 @@ import (
 	"github.com/DunkelCloud/ergosum/internal/tlspin"
 )
 
-// Outcomes of a single callback.
+// Outcomes of a single callback (see journal.Outcome...).
 const (
-	OutcomeConfirmed       = "confirmed"
-	OutcomeNoOpenRequest   = "no_open_request"
-	OutcomeUnreachable     = "unreachable"
-	OutcomeOtherKey        = "other_key"
-	OutcomeInvalidResponse = "invalid_response"
-	OutcomeNoAddress       = "no_address"
-	// OutcomeEnded: the daemon gave up on the request, or restarted after
-	// it was made. The instance discards the request like one whose
-	// requester went away.
-	OutcomeEnded = "ended"
+	OutcomeConfirmed       = journal.OutcomeConfirmed
+	OutcomeNoOpenRequest   = journal.OutcomeNoOpenRequest
+	OutcomeUnreachable     = journal.OutcomeUnreachable
+	OutcomeOtherKey        = journal.OutcomeOtherKey
+	OutcomeInvalidResponse = journal.OutcomeInvalidResponse
+	OutcomeNoAddress       = journal.OutcomeNoAddress
+	OutcomeEnded           = journal.OutcomeEnded
 )
 
 // CheckOutcome records one check of a request for audit and observations.
-type CheckOutcome struct {
-	Type     string             `json:"type"`
-	Target   string             `json:"target"`
-	Outcome  string             `json:"outcome"`
-	Detail   string             `json:"detail,omitempty"`
-	Evidence *protocol.Envelope `json:"evidence,omitempty"` // signed no_open_request
-}
+type CheckOutcome = journal.CheckOutcome
 
 // Observation is the payload of an instance-signed journal observation.
-type Observation struct {
-	V         int            `json:"v"`
-	Kind      string         `json:"kind"`
-	Instance  string         `json:"instance"`
-	Kid       string         `json:"kid"`
-	Identity  string         `json:"identity"`
-	Epoch     uint64         `json:"epoch,omitempty"`
-	RequestID string         `json:"request_id"`
-	Key       string         `json:"key,omitempty"`
-	Remote    string         `json:"remote,omitempty"`
-	Checks    []CheckOutcome `json:"checks,omitempty"`
-	TokenID   string         `json:"jti,omitempty"`
-	Reason    string         `json:"reason,omitempty"`
-	Time      time.Time      `json:"time"`
-}
+type Observation = journal.Observation
 
 type plannedCheck struct {
 	check   string
@@ -150,6 +127,19 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		a.deny(ctx, w, ResultMisdirected, obs, "request addressed to "+req.To)
 		return
 	}
+	// What a holder of the bound key can make the instance do is bounded:
+	// callbacks, journal entries, audit lines and the replay cache.
+	release, ok := a.perID.acquire(req.Identity, now)
+	if !ok {
+		a.requests.Inc(ResultRateLimited)
+		if a.limiter.allow(ResultRateLimited+" "+req.Identity, now) {
+			a.audit.Warn("token request "+ResultRateLimited, "event", "token_request", "result", ResultRateLimited,
+				"identity", req.Identity, "key", obs.Key, "remote", obs.Remote)
+		}
+		a.writeError(w, http.StatusTooManyRequests, protocol.ErrRateLimited, "")
+		return
+	}
+	defer release()
 	// The daemon never reuses a request ID. A repeat comes from a second
 	// holder of the key replaying an ID it has seen; it gets no callbacks.
 	if !a.seen.first(req.Identity+" "+req.RequestID, now) {
@@ -487,6 +477,17 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 	}
 	a.audit.Log(ctx, level, "token request "+result, attrs...)
 
+	// Peers accept only observations of a bounded shape; free texts are
+	// clipped to it, and anything else would stop replication there.
+	obs.Remote = journal.Clip(obs.Remote, journal.MaxRemote)
+	obs.Reason = journal.Clip(obs.Reason, journal.MaxReason)
+	for i := range obs.Checks {
+		obs.Checks[i].Detail = journal.Clip(obs.Checks[i].Detail, journal.MaxDetail)
+	}
+	if err := obs.Validate(); err != nil {
+		a.log.Error("observation not journaled", "err", err, "identity", obs.Identity, "request_id", obs.RequestID)
+		return
+	}
 	key, _ := a.signingKey()
 	env, err := protocol.Seal(key, protocol.ContextObservation, obs)
 	if err != nil {

@@ -452,6 +452,49 @@ func TestUnverifiedRefusalsStayOutOfJournal(t *testing.T) {
 	}
 }
 
+// TestRequestsPerIdentityLimited: a copy of a bound key that sends request
+// after request gets a burst of them processed, then refusals that cost no
+// callback and no journal entry; the real machine's identity is the only
+// one it can keep from a token.
+func TestRequestsPerIdentityLimited(t *testing.T) {
+	sim := newSimNet()
+	e := newEnv(t, envOptions{net: sim})
+	real := e.machine(host1, machineOptions{targets: []string{at(host1Tailnet)}})
+	e.bind(host1, real.d.Fingerprint(), 1, tailnetCheck(host1Tailnet))
+	other := e.machine(host2, machineOptions{targets: []string{at(host2Tailnet)}})
+	e.bind(host2, other.d.Fingerprint(), 1, tailnetCheck(host2Tailnet))
+	release, err := real.d.HoldCallbackListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	copied, _, err := keys.LoadOrCreate(filepath.Join(real.stateDir, "identity.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sent, burst = 25, 10
+	for i := range sent {
+		want := http.StatusForbidden
+		if i >= burst {
+			want = http.StatusTooManyRequests
+		}
+		if status := postRequest(t, e, copied, host1, protocol.NewRequestID()); status != want {
+			t.Fatalf("request %d: status %d, want %d", i+1, status, want)
+		}
+	}
+	requireCount(t, e.auth, authority.ResultKeyDuplicate, burst)
+	requireCount(t, e.auth, authority.ResultRateLimited, sent-burst)
+	if n := len(e.observations(t, "observation.key_duplicate")); n != burst {
+		t.Fatalf("%d key_duplicate observations, want %d", n, burst)
+	}
+	if n := real.d.CallbackCount(protocol.StatusNoOpenRequest); n != burst {
+		t.Fatalf("%v callbacks, want %d", n, burst)
+	}
+	if _, _, err := other.d.Obtain(context.Background()); err != nil {
+		t.Fatalf("another machine: %v", err)
+	}
+}
+
 // postRequest sends a token request signed with key, as a daemon would, and
 // returns the HTTP status.
 func postRequest(t *testing.T, e *env, key *ecdsa.PrivateKey, identity, requestID string) int {

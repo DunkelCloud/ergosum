@@ -71,8 +71,11 @@ func (s *Store) Verify(ctx context.Context, e replication.Event) error {
 		return unverified("the position %s/%d is not signed by %s", e.Origin, e.Seq, e.Origin)
 	}
 	switch {
+	case AlwaysIngest(e.Kind) && len(e.Body) > maxBindingBody,
+		observationKinds[e.Kind] && len(e.Body) > maxObservationBody:
+		return unverified("%s body of %d bytes", e.Kind, len(e.Body))
 	case AlwaysIngest(e.Kind):
-		be, err := s.verifyBinding(e.Body)
+		be, err := s.verifyBinding(ctx, e.Body)
 		if err != nil {
 			return err
 		}
@@ -98,12 +101,15 @@ func (s *Store) Verify(ctx context.Context, e replication.Event) error {
 		if err != nil {
 			return err
 		}
-		var h observationHeader
-		if err := json.Unmarshal(payload, &h); err != nil {
+		var o Observation
+		if err := strictDecode(payload, &o); err != nil {
 			return unverified("observation: %v", err)
 		}
-		if h.Kind != e.Kind || h.Instance != e.Origin || !protocol.ValidDNSName(h.Identity) {
-			return unverified("observation header (%s, %s, %q) does not match", h.Kind, h.Instance, h.Identity)
+		if err := o.Validate(); err != nil {
+			return err
+		}
+		if o.Kind != e.Kind || o.Instance != e.Origin {
+			return unverified("observation of %s by %s stored as %s by %s", o.Kind, o.Instance, e.Kind, e.Origin)
 		}
 		return nil
 	case e.Kind == KindCheckpoint:
@@ -111,23 +117,20 @@ func (s *Store) Verify(ctx context.Context, e replication.Event) error {
 		if err != nil {
 			return err
 		}
-		_, err = s.verifyCheckpoint(e.Origin, payload)
+		_, err = s.verifyCheckpoint(ctx, e.Origin, payload)
 		return err
 	default:
 		return unverified("unknown kind %q", e.Kind)
 	}
 }
 
-// observationHeader is the part of an observation payload that ingest
-// needs; the authority defines the whole payload.
-type observationHeader struct {
-	Kind     string `json:"kind"`
-	Instance string `json:"instance"`
-	Kid      string `json:"kid"`
-	Identity string `json:"identity"`
-}
-
-func (s *Store) verifyBinding(body []byte) (*BindingEvent, error) {
+// verifyBinding checks a binding event from another instance, also one
+// inside a checkpoint. An event this instance holds with the same body,
+// signatures included, verified when it was stored and is in effect here:
+// only its form is checked again. Peers repeat every binding in every
+// checkpoint, and each one would otherwise cost its signature checks under
+// the ingest lock.
+func (s *Store) verifyBinding(ctx context.Context, body []byte) (*BindingEvent, error) {
 	var be BindingEvent
 	if err := strictDecode(body, &be); err != nil {
 		return nil, unverified("binding event: %v", err)
@@ -138,10 +141,35 @@ func (s *Store) verifyBinding(body []byte) (*BindingEvent, error) {
 	if be.TrustDomain != s.trustDomain {
 		return nil, fmt.Errorf("%w: %w: %q", ErrUnverified, ErrTrustDomain, be.TrustDomain)
 	}
+	known, err := s.holds(ctx, &be)
+	if err != nil || known {
+		return &be, err
+	}
 	if _, err := s.registry.Verify(&be); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnverified, err)
 	}
 	return &be, nil
+}
+
+// holds reports whether the projection or the events hold be with exactly
+// the body this instance would store for it.
+func (s *Store) holds(ctx context.Context, be *BindingEvent) (bool, error) {
+	h, err := be.Hash()
+	if err != nil {
+		return false, nil //nolint:nilerr // not held; verification reports it
+	}
+	body, err := json.Marshal(be)
+	if err != nil {
+		return false, err
+	}
+	var one int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM bindings WHERE identity = ? AND hash = ? AND body = ?
+		UNION ALL SELECT 1 FROM events WHERE hash = ? AND kind LIKE 'binding.%' AND body = ? LIMIT 1`,
+		be.Identity, h, body, h, body).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // verifyEnvelope checks an instance-signed body and returns its payload.
@@ -358,16 +386,23 @@ func (s *Store) Append(ctx context.Context, e replication.Event) error {
 			return err
 		}
 	default:
-		var h observationHeader
-		if err := decodeEnvelopePayload(e.Body, &h); err != nil {
+		var o Observation
+		if err := decodeEnvelopePayload(e.Body, &o); err != nil {
 			return err
 		}
-		identity = h.Identity
+		identity = o.Identity
 	}
 	if err := s.insert(ctx, tx, e.Origin, e.Seq, e.Kind, identity, epoch, e.Hash, e.Body, e.Sig); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if AlwaysIngest(e.Kind) || e.Kind == KindCheckpoint {
+		s.projection.Add(1)
+	}
+	s.stored(e.Origin, e.Kind, len(e.Body))
+	return nil
 }
 
 // RaiseCoverage implements replication.Store. Raising the coverage of the
@@ -435,9 +470,13 @@ func (s *Store) Outbox(ctx context.Context, after int64) (int64, time.Time, erro
 	return n, t, nil
 }
 
-// Latest implements replication.Store.
-func (s *Store) Latest(ctx context.Context, origin, kind string) ([]replication.Stored, error) {
-	return s.storedEvents(ctx, `WHERE origin = ? AND kind = ? ORDER BY seq DESC`, origin, kind)
+// LatestAt implements replication.Store.
+func (s *Store) LatestAt(ctx context.Context, origin, kind string, pos int64) (*replication.Stored, error) {
+	events, err := s.storedEvents(ctx, `WHERE origin = ? AND kind = ? AND pos <= ? ORDER BY seq DESC LIMIT 1`, origin, kind, pos)
+	if err != nil || len(events) == 0 {
+		return nil, err
+	}
+	return &events[0], nil
 }
 
 // SetFrontier implements replication.Store. The frontier only rises; a

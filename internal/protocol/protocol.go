@@ -190,9 +190,10 @@ const (
 	ErrBadRequest     = "bad_request"     // 400
 	ErrClockSkew      = "clock_skew"      // 400: timestamp outside the accepted window
 	ErrUnsupported    = "unsupported_version"
-	ErrUnavailable    = "unavailable" // 503
-	ErrRejected       = "rejected"    // 422: binding event rejected
-	ErrConflict       = "conflict"    // 409: the binding event's epoch is not above the current one
+	ErrUnavailable    = "unavailable"  // 503
+	ErrRejected       = "rejected"     // 422: binding event rejected
+	ErrConflict       = "conflict"     // 409: the binding event's epoch is not above the current one
+	ErrRateLimited    = "rate_limited" // 429: too many requests of this identity
 )
 
 // Callback is sent by the authority to the daemon over mutual TLS.

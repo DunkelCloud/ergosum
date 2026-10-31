@@ -3,8 +3,12 @@ package keys
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"os"
 	"path/filepath"
@@ -141,6 +145,41 @@ func TestEncryptedKeyFileHeaderSwap(t *testing.T) {
 	kf.Public = &other.PublicKey
 	if _, err := kf.Decrypt([]byte("pw")); err == nil {
 		t.Fatal("swapped public key header accepted")
+	}
+}
+
+// TestKeyFileBounds: only P-256 keys load, in either PEM form, and an
+// encrypted file cannot ask scrypt for more than 256 MiB or p above 4.
+func TestKeyFileBounds(t *testing.T) {
+	k384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec1, _ := x509.MarshalECPrivateKey(k384)
+	pkcs8, _ := x509.MarshalPKCS8PrivateKey(k384)
+	for typ, der := range map[string][]byte{"EC PRIVATE KEY": sec1, "PRIVATE KEY": pkcs8} {
+		if _, err := ParseKeyFile(pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der})); err == nil {
+			t.Errorf("%s on P-384 accepted", typ)
+		}
+	}
+
+	for _, ok := range []string{"N=32768,r=8,p=1", "N=2097152,r=1,p=4", "N=262144,r=8,p=1"} {
+		if _, _, _, err := parseScryptParams(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"N=1048576,r=32,p=1", // 4 GiB
+		"N=262144,r=16,p=1",  // 512 MiB
+		"N=32768,r=8,p=5",
+		"N=30000,r=8,p=1",
+		"N=1,r=8,p=1",
+		"N=32768,r=0,p=1",
+		"N=32768,r=8",
+	} {
+		if _, _, _, err := parseScryptParams(bad); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
 	}
 }
 

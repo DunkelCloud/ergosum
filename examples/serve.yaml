@@ -97,6 +97,10 @@ replication:
   # Largest page sent to and accepted from a peer, in MiB; the same on every
   # instance. A checkpoint (about 1.6 KB per identity) must fit into one.
   max_page_mib: 32
+  # What the observations and checkpoints of each other instance may take
+  # here, in MiB; beyond it they are skipped. About 1.5 KB per token request
+  # that instance answers, kept for the observation retention.
+  origin_quota_mib: 1024
 
 # Checkpoints and compaction. An event is deleted only when the latest own
 # checkpoint that every peer has acknowledged covers it, every peer has

@@ -98,7 +98,8 @@ Wire form (write API body and journal body):
   `[addr]:port`); `net` targets are masked prefixes. Every target has one
   spelling only: a port is plain decimal without sign or leading zeros,
   and brackets go around IPv6 addresses only.
-- `binding.set` needs at least one check; checks are unique.
+- `binding.set` needs between 1 and 16 checks; checks are unique. A body
+  is at most 256 KiB.
 - `binding.revoked` carries neither key nor checks.
 - `epoch` starts at 1 and stays at or below 2^53, so that a revocation can
   always follow.
@@ -258,6 +259,13 @@ per-check outcomes, token ID and reason. For `key_duplicate` it contains the
 daemon's signed `no_open_request` response as evidence, verifiable with the
 bound key alone.
 
+Ingest takes an observation only in that shape: no unknown field, every
+field in its syntax, a token ID exactly for `issued`, evidence exactly with
+`no_open_request`, at most 16 check outcomes, free texts without control
+characters (remote address 64 bytes, reason 256, detail 512; the writer
+clips them), and at most 64 KiB in all. What another instance stores
+under an observation is thereby bounded, whoever wrote it.
+
 Observations never set or end a binding. Only what the current
 configuration authenticates enters the journal: binding events with the
 approvals the registry demands, and observations of requests signed by the
@@ -268,7 +276,9 @@ within an overall limit (60 lines per minute), but never the journal.
 Rejected binding writes share that limit.
 `wrong_location`, `replay` and `misdirected` can be repeated at will by a
 holder of the key and are journaled once per identity and minute; `issued` and
-`key_duplicate` always.
+`key_duplicate` always. A holder of the key gets at most 10 requests and
+then one per minute processed per instance, one at a time; the refusals
+beyond (`rate_limited`) are never journaled.
 
 ### Checkpoints and compaction
 
@@ -310,7 +320,9 @@ key:
 
 **The instance signature grants nothing.** It says which instance wrote the
 checkpoint and when. Every contained binding event is verified against the
-local registry and trust domain, exactly as the write API does. A
+local registry and trust domain, exactly as the write API does, unless the
+instance holds it already with the same body, signatures included: that one
+verified when it was stored, and only its form is checked again. A
 compromised instance can therefore write a checkpoint that omits events, but
 not one that adds a binding. Revocations stay in the checkpoint as the
 winner of their identity: without them, an older, validly signed
@@ -517,6 +529,19 @@ leader, no quorum.
   that origin at that position; for observations that only weakens the
   record, and binding events converge through the checkpoints. An
   equivocating instance must be taken out of service.
+- **Quotas**: what another instance's observations and checkpoints take
+  in a journal is bounded per origin (`replication.origin_quota_mib`,
+  default 1 GiB), and at most 10 000 events of an origin are stored above
+  its coverage. Beyond either, a verified observation or checkpoint of that
+  origin is skipped like a duplicate: acknowledged without being stored,
+  with an alarm (metric per origin, audit line); if it is the next one of
+  its origin, the coverage moves over it. Rejecting it instead would stop
+  the honest instances that forward it from replicating to each other.
+  Binding events are never skipped. An honest origin stays far below both:
+  its events arrive in order, and what it writes within the observation
+  retention fits the quota. A compromised instance can fill no more than
+  its quota on the others, and cannot keep its later events out of
+  compaction by never sending one sequence number.
 - **Rejection**: only an event that fails verification is rejected. Ingest
   stops at the first rejected event and acknowledges
   only what came before it, so the coverage of that origin stops there. The
@@ -603,6 +628,11 @@ leader, no quorum.
   ignores the coverage of an origin it does not know: refusing it would
   stop replication between all instances that once saw that origin's
   events.
+- Skipped events weaken the record of their origin on that instance, and
+  the coverage of an origin stops below a skipped event that was not the
+  next one; its later events then stay until the next sync raises the
+  coverage. Size the quota above what the busiest instance writes within
+  the observation retention.
 - One rejected event stops replication from that peer until the cause is
   fixed (a stale registry here, a forged event there); later events wait
   behind it, also those of other origins the peer forwards.
@@ -618,9 +648,11 @@ leader, no quorum.
   records before would reuse a sequence number its peers know, and they
   reject it as a conflict.
 - Ingest verifies against the current registry, also history and the
-  bindings inside checkpoints. Once an administrator key leaves the
-  registry, every binding event approved only with it fails verification,
-  and a sync of a journal that still holds one stops there. Such bindings
+  bindings inside checkpoints that the instance does not hold yet. Once an
+  administrator key leaves the registry, every binding event approved only
+  with it fails verification where it is new, and a sync of a journal that
+  still holds one stops there; instances that hold it go on accepting the
+  checkpoints that repeat it. Such bindings
   must be approved again by the remaining administrators, and the old
   events compacted away, before the key is removed.
 - History beyond its retention exists only in the archive, if one is

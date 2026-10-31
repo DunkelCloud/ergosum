@@ -38,6 +38,9 @@ const (
 	// ResultMisdirected: a request signed by the bound key but addressed to
 	// another instance arrived here. Whoever had it forwarded it.
 	ResultMisdirected = "misdirected"
+	// ResultRateLimited: the identity has a request in flight or asked too
+	// often (see identityLimit).
+	ResultRateLimited = "rate_limited"
 )
 
 // Limits for what unverified requests may cost. unverifiedPerMinute bounds
@@ -72,6 +75,8 @@ type Authority struct {
 	limiter    *limiter     // per identity, for verified refusals
 	unverified *window      // overall, for refusals anyone can cause
 	seen       *replayCache // request IDs already processed
+	perID      *identityLimit
+	lists      listCache
 
 	metrics  *metrics.Registry
 	requests *metrics.Vec
@@ -120,8 +125,10 @@ func New(cfg Config, opts Options) (*Authority, error) {
 		// A daemon's request is in flight for far less than this; after
 		// that, a replayed ID meets a daemon that no longer confirms it.
 		seen:     newReplayCache(max(2*cfg.ClockSkew, protocol.EndedTTL+5*time.Minute)),
+		perID:    newIdentityLimit(requestBurst, requestEvery),
 		unsealed: make(chan struct{}),
 		ready:    make(chan struct{}),
+		lists:    listCache{turn: make(chan struct{}, 1)},
 	}
 	if a.log == nil {
 		a.log = slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -170,7 +177,8 @@ func New(cfg Config, opts Options) (*Authority, error) {
 		"version", version.Version, "commit", version.Commit)
 	a.requests = a.metrics.Counter("machine_identity_requests_total",
 		"Token requests by result.", "result",
-		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity, ResultReplay, ResultMisdirected)
+		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity, ResultReplay, ResultMisdirected,
+		ResultRateLimited)
 	a.sealedG = a.metrics.Gauge("machine_identity_authority_sealed",
 		"1 while the signing key is still encrypted and the instance issues nothing.")
 	a.bindings = a.metrics.Counter("machine_identity_binding_events_total",
@@ -551,6 +559,69 @@ func (w *window) allow(now time.Time) bool {
 	}
 	w.n++
 	return true
+}
+
+// Requests an identity may make of one instance: requestBurst at once, then
+// one per requestEvery. A daemon asks every quarter of an hour, after a
+// failure with a backoff of seconds to five minutes, one request at a time.
+const (
+	requestBurst = 10
+	requestEvery = time.Minute
+)
+
+// identityLimit lets an identity have one request in flight and bounds its
+// rate. Its keys come from verified requests only, so their number is
+// bounded by the bindings. A copy of a bound key can use up the identity's
+// share and keep the real machine from a token at this instance, but no
+// longer the instance's capacity for every other machine.
+type identityLimit struct {
+	mu    sync.Mutex
+	burst int
+	every time.Duration
+	ids   map[string]*identityState
+	swept time.Time
+}
+
+type identityState struct {
+	busy bool
+	next time.Time // theoretical arrival time: the rate is used up to here
+}
+
+func newIdentityLimit(burst int, every time.Duration) *identityLimit {
+	return &identityLimit{burst: burst, every: every, ids: map[string]*identityState{}}
+}
+
+// acquire admits a request of identity, or refuses it while another one is
+// in flight or the rate is used up. release ends an admitted request.
+func (l *identityLimit) acquire(identity string, now time.Time) (release func(), ok bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now.Sub(l.swept) >= l.every {
+		for id, s := range l.ids {
+			if !s.busy && !s.next.After(now) {
+				delete(l.ids, id)
+			}
+		}
+		l.swept = now
+	}
+	s := l.ids[identity]
+	if s == nil {
+		s = &identityState{}
+		l.ids[identity] = s
+	}
+	next := s.next
+	if next.Before(now) {
+		next = now
+	}
+	if s.busy || next.Sub(now) > time.Duration(l.burst-1)*l.every {
+		return nil, false
+	}
+	s.busy, s.next = true, next.Add(l.every)
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		s.busy = false
+	}, true
 }
 
 // replayCache remembers keys for a while; first reports whether a key is
