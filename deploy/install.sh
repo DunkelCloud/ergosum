@@ -129,18 +129,19 @@ restart_daemon() {
 	fi
 }
 
-# fresh MARKER VERSION: a token newer than MARKER, and the new version in
-# the metrics file if there is one.
+# fresh MARKER [VERSION]: a token newer than MARKER and, with a metrics
+# file, VERSION in build_info. The way back may lead to a build from before
+# that metric, so it passes no VERSION.
 fresh() {
 	[ -f "$token" ] && [ "$token" -nt "$1" ] || return 1
-	[ -z "$metrics" ] && return 0
+	[ -n "$metrics" ] && [ -n "$2" ] || return 0
 	grep -q "^machine_identity_build_info{version=\"$2\"," "$metrics" 2>/dev/null
 }
 
 wait_fresh() {
 	n=0
 	while [ "$n" -lt "$wait" ]; do
-		fresh "$1" "$2" && return 0
+		fresh "$1" "${2:-}" && return 0
 		sleep 1
 		n=$((n + 1))
 	done
@@ -211,7 +212,7 @@ mv -f "$BINDIR/ergosumd.old" "$BINDIR/ergosumd"
 touch "$marker"
 sleep 1
 restart_daemon || say "restarting ergosumd returned an error"
-if wait_fresh "$marker" "$installed_daemon_old"; then
+if wait_fresh "$marker"; then
 	die "ergosumd $installed_daemon failed; $installed_daemon_old is back and has a new token"
 fi
 die "ergosumd $installed_daemon failed, and $installed_daemon_old has no new token either"
