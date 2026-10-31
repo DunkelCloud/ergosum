@@ -59,6 +59,19 @@ A host with many bridge or tunnel addresses logs a warning when it has to
 leave some out; name the addresses inside the bound networks in `addresses`
 then.
 
+`authorities` needs one instance, the anchor: its key and its URLs. After
+the first token the daemon takes the [authority list](#authority-list)
+that the instance serves, keeps it as `authorities.json` in `state_dir`,
+and from then on tries the listed instances in their order, the configured
+ones last. It takes a newer list (higher serial) from any listed instance,
+and any list from a configured instance that the list in use does not name;
+so a new anchor in the configuration replaces a list from an old trust
+domain. Of an instance's URLs the daemon tries only those it can reach from
+its own addresses: an overlay address needs an overlay address on the
+machine, IPv4 needs IPv4, other IPv6 needs IPv6. Each connection attempt
+gives up after 5 s. Prefer addresses to names, which make every renewal
+depend on DNS.
+
 Metrics (node_exporter textfile collector, `metrics_file`):
 
 | Metric | Meaning |
@@ -70,6 +83,7 @@ Metrics (node_exporter textfile collector, `metrics_file`):
 | `machine_identity_callbacks_total{status}` | callbacks answered: `confirmed`, `ended` (a late callback for a request this daemon gave up), `no_open_request` (the key is used elsewhere) |
 | `machine_identity_key_change_pending` | 1 while a new key waits for its binding |
 | `machine_identity_build_info{version,commit}` | 1; version and commit of the running binary |
+| `machine_identity_authorities_serial` | serial of the authority list in use; 0 while the daemon knows only its configuration |
 
 Short token lifetimes need synchronized clocks.
 
@@ -121,6 +135,19 @@ instance's overlay address (`100.64.0.10:7432` in `examples/serve.yaml`).
 An address that binds all interfaces (`:7432`, `0.0.0.0:7432`,
 `[::]:7432`) is refused unless `listen_all_interfaces: true` is set; on a
 public host that would expose the API to the internet.
+
+### Authority list
+
+`authorities_file` (`examples/authorities.yaml`) names every instance of
+the trust domain with the URLs daemons reach it on, in order of preference;
+the instance serves it at `/v1/authorities` (ADR 0001). Keep the same file
+on every instance, list each instance on every path a daemon may take
+(overlay, underlay IPv4 and IPv6), and raise `serial` with each change:
+daemons take a list only with a higher serial. An instance reads the file
+again when it changes, without a restart or an unseal; a file that turns
+invalid leaves the last good list in place and logs an error. An instance
+does not start with a file that does not name it. `ergosum authorities`
+shows what every instance serves and whether they agree.
 
 ### Modes of operation
 
@@ -412,18 +439,20 @@ The tool refuses what would otherwise fail later or go unnoticed:
 # (or $ERGOSUM_ADMIN_CONFIG)
 trust_domain: example.com         # the authorities' trust domain
 sign_key: ~/.ssh/id_ed25519.pub   # the administrator's key, see below
-authorities:                      # every instance of the trust domain
+authorities:                      # one is enough if they serve a list
   - url: https://100.64.0.10:7432
     key: SHA256:...               # instance fingerprint, from "ergosum keygen"
-  - url: https://100.64.0.11:7432
-    key: SHA256:...
 # For "ergosum release sign" and "verify" (docs/releasing.md):
 release_key: ~/.ssh/ergosum-release.pub
 release_signers: ~/src/ergosum/release-signers
 ```
 
-The tool reads from every configured authority and insists that those that
-answer agree: on the trust domain (it must be the configured one), on the
+The tool first asks the configured authorities for their [authority
+list](#authority-list) and adds the instances it names, each on the first of
+its URLs reachable from this machine; the lists must agree. `ergosum
+authorities` shows the lists, which instances are not configured here and
+which configured ones the list lacks. The tool then reads from every
+authority and insists that those that answer agree: on the trust domain (it must be the configured one), on the
 approvals, and on the binding of the identity at hand. If they disagree,
 `bind`, `revoke` and `show` stop and name both answers; that happens for a
 moment while replication carries a change, and otherwise means that one

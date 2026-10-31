@@ -45,6 +45,9 @@ type Options struct {
 	// TailnetName returns the machine's overlay name for a request;
 	// default: ask "tailscale status".
 	TailnetName func(context.Context) (string, error)
+	// InterfaceAddrs returns the machine's addresses, which decide the
+	// URLs of an authority worth trying; default: all interfaces.
+	InterfaceAddrs func() ([]netip.Addr, error)
 }
 
 // Daemon is one ergosumd instance.
@@ -65,30 +68,30 @@ type Daemon struct {
 
 	holdPending time.Time // no switch before this, after going back
 
+	interfaceAddrs func() ([]netip.Addr, error)
+
+	amu         sync.Mutex
 	authorities []*authorityClient
 	preferred   int
-	tokenGID    int
-	overlay     []netip.Prefix
-	addrWarn    sync.Once // the address limit is reported once
+	list        *protocol.AuthorityList // in use; nil: the configured authorities only
 
-	metrics    *metrics.Registry
-	mExpiry    *metrics.Vec
-	mSuccess   *metrics.Vec
-	mError     *metrics.Vec
-	mClockSkew *metrics.Vec
-	mCallbacks *metrics.Vec
-	mPending   *metrics.Vec
+	tokenGID int
+	overlay  []netip.Prefix
+	addrWarn sync.Once // the address limit is reported once
+
+	metrics     *metrics.Registry
+	mExpiry     *metrics.Vec
+	mSuccess    *metrics.Vec
+	mError      *metrics.Vec
+	mClockSkew  *metrics.Vec
+	mCallbacks  *metrics.Vec
+	mPending    *metrics.Vec
+	mListSerial *metrics.Vec
 
 	lmu      sync.Mutex
 	users    int
 	listener net.Listener
 	server   *http.Server
-}
-
-type authorityClient struct {
-	url    string
-	pin    string
-	client *http.Client
 }
 
 // New loads (or creates) the identity key.
@@ -99,7 +102,10 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	}
 	overlay, _ := protocol.ParsePrefixes(cfg.OverlayPrefixes) // checked by Validate
 	d := &Daemon{cfg: cfg, log: opts.Logger, now: opts.Now, listen: opts.Listen, tailnetName: opts.TailnetName,
-		tokenGID: -1, overlay: overlay}
+		interfaceAddrs: opts.InterfaceAddrs, tokenGID: -1, overlay: overlay}
+	if d.interfaceAddrs == nil {
+		d.interfaceAddrs = protocol.InterfaceAddrs
+	}
 	if d.tailnetName == nil {
 		d.tailnetName = tailnetName
 	}
@@ -134,20 +140,6 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	if d.previous, err = keys.Load(d.keyPath() + previousSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
 		d.log.Warn("cannot read the old key", "err", err)
 	}
-	for _, a := range cfg.Authorities {
-		d.authorities = append(d.authorities, &authorityClient{
-			url: a.URL,
-			pin: a.Key,
-			client: &http.Client{
-				Timeout:       cfg.RequestTimeout,
-				CheckRedirect: tlspin.NoRedirect,
-				Transport: &http.Transport{
-					TLSClientConfig: tlspin.ClientConfig(nil, tlspin.Fingerprints(a.Key)),
-					Proxy:           nil,
-				},
-			},
-		})
-	}
 	if cfg.TokenGroup != "-" && runtime.GOOS != "windows" {
 		if g, err := user.LookupGroup(cfg.TokenGroup); err == nil {
 			d.tokenGID, _ = strconv.Atoi(g.Gid)
@@ -168,6 +160,9 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	if d.pending != nil {
 		d.mPending.Set("", 1)
 	}
+	d.mListSerial = d.metrics.Gauge("machine_identity_authorities_serial",
+		"Serial of the authority list in use; 0 while only the configured authorities are known.")
+	d.setAuthorities(d.loadList())
 	return d, nil
 }
 
@@ -380,35 +375,34 @@ func allRefused(err error) bool {
 func (d *Daemon) boundKeys(ctx context.Context) (map[string]string, error) {
 	out := map[string]string{}
 	var errs []error
-	for _, a := range d.authorities {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.url+protocol.PathBindings+"/"+d.cfg.Identity, http.NoBody)
+	authorities, _ := d.snapshot()
+	for _, a := range authorities {
+		resp, err := d.do(ctx, a, func(base string) (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, http.MethodGet, base+protocol.PathBindings+"/"+d.cfg.Identity, http.NoBody)
+		})
 		if err != nil {
-			return nil, err
-		}
-		resp, err := a.client.Do(req)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
+			errs = append(errs, fmt.Errorf("%s: %w", a.pin, err))
 			continue
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
 		switch {
 		case err != nil:
-			errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
+			errs = append(errs, fmt.Errorf("%s: %w", a.name(), err))
 		case resp.StatusCode == http.StatusNotFound:
-			out[a.url] = ""
+			out[a.name()] = ""
 		case resp.StatusCode != http.StatusOK:
-			errs = append(errs, fmt.Errorf("%s: %s", a.url, resp.Status))
+			errs = append(errs, fmt.Errorf("%s: %s", a.name(), resp.Status))
 		default:
 			var b struct{ Kind, Key string }
 			if err := json.Unmarshal(data, &b); err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
+				errs = append(errs, fmt.Errorf("%s: %w", a.name(), err))
 				continue
 			}
 			if b.Kind != "binding.set" {
 				b.Key = ""
 			}
-			out[a.url] = b.Key
+			out[a.name()] = b.Key
 		}
 	}
 	if len(out) == 0 {
@@ -505,16 +499,17 @@ func (d *Daemon) Obtain(ctx context.Context) (string, jwt.Claims, error) {
 	defer d.releaseListener()
 
 	var errs []error
-	n := len(d.authorities)
+	authorities, preferred := d.snapshot()
+	n := len(authorities)
 	for i := 0; i < n; i++ {
-		idx := (d.preferred + i) % n
-		a := d.authorities[idx]
+		a := authorities[(preferred+i)%n]
 		token, claims, err := d.request(ctx, a)
 		if err == nil {
-			d.preferred = idx
+			d.setPreferred(a)
+			d.refreshList(ctx, a, claims)
 			return token, claims, nil
 		}
-		errs = append(errs, fmt.Errorf("%s: %w", a.url, err))
+		errs = append(errs, fmt.Errorf("%s: %w", a.name(), err))
 		if ctx.Err() != nil {
 			break
 		}
@@ -553,13 +548,14 @@ func (d *Daemon) request(ctx context.Context, a *authorityClient) (string, jwt.C
 		return "", jwt.Claims{}, err
 	}
 	body, _ := json.Marshal(env)
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url+protocol.PathToken, bytes.NewReader(body))
-	if err != nil {
-		return "", jwt.Claims{}, err
-	}
-	hreq.Header.Set("Content-Type", "application/json")
 	sent := d.now()
-	resp, err := a.client.Do(hreq)
+	resp, err := d.do(ctx, a, func(base string) (*http.Request, error) {
+		hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+protocol.PathToken, bytes.NewReader(body))
+		if err == nil {
+			hreq.Header.Set("Content-Type", "application/json")
+		}
+		return hreq, err
+	})
 	if err != nil {
 		return "", jwt.Claims{}, err
 	}
@@ -739,12 +735,8 @@ func (d *Daemon) acquireListener() error {
 		d.users--
 		return fmt.Errorf("callback listener: %w", err)
 	}
-	pins := make([]string, 0, len(d.cfg.Authorities))
-	for _, a := range d.cfg.Authorities {
-		pins = append(pins, a.Key)
-	}
 	_, cert := d.identity()
-	tcfg := tlspin.ServerConfig(cert, tlspin.Fingerprints(pins...))
+	tcfg := tlspin.ServerConfig(cert, d.knownAuthority)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+protocol.PathCallback, d.handleCallback)
 	srv := &http.Server{Handler: mux, TLSConfig: tcfg, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second}

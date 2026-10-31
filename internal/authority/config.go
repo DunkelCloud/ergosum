@@ -61,6 +61,11 @@ type Config struct {
 	Replication ReplicationConfig `yaml:"replication"`
 	// Compaction configures checkpoints and the shortening of the journal.
 	Compaction CompactionConfig `yaml:"compaction"`
+	// AuthoritiesFile lists every instance of the trust domain with the
+	// URLs daemons reach it on, the same file on every instance; the
+	// instance serves it at /v1/authorities and reads it again when it
+	// changes. Empty: no list.
+	AuthoritiesFile string `yaml:"authorities_file"`
 }
 
 // ReplicationConfig lists the other instances (ADR 0003, Replication).

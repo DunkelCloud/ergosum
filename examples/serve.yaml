@@ -28,6 +28,11 @@ listen: "100.64.0.10:7432"
 # Metrics, health and public keys over plain HTTP.
 ops_listen: "127.0.0.1:7434"
 
+# Every instance of the trust domain with the URLs daemons reach it on
+# (examples/authorities.yaml), served at /v1/authorities. The same file on
+# every instance; it must name this one. Optional.
+authorities_file: /etc/ergosum/authorities.yaml
+
 callbacks:
   # Daemon callback port, unless a binding target names its own port.
   port: 7433

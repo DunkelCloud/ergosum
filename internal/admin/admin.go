@@ -41,9 +41,9 @@ type Config struct {
 	// private key the SSH agent holds, or a private key file for
 	// ssh-keygen.
 	SignKey string `yaml:"sign_key"`
-	// Authorities are all instances of the trust domain. Reads ask every
-	// one and insist that those that answer agree; a change goes to the
-	// first reachable one, in order.
+	// Authorities are instances of the trust domain; Expand adds those of
+	// their authority list. Reads ask every one and insist that those that
+	// answer agree; a change goes to the first reachable one, in order.
 	Authorities []Authority `yaml:"authorities"`
 	// ReleaseKey is the key "ergosum release sign" signs with, like
 	// SignKey. Default: ~/.ssh/ergosum-release.pub.

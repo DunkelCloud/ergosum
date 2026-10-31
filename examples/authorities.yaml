@@ -1,0 +1,16 @@
+# The authority list (authorities_file in serve.yaml): every instance of
+# the trust domain with the URLs daemons reach it on, in order of
+# preference. Keep the same file on every instance and raise serial with
+# each change; daemons take a list only with a higher serial. An instance
+# reads the file again when it changes, without a restart.
+serial: 1
+authorities:
+  - key: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"   # authority-a
+    urls:
+      - https://100.64.0.10:7432          # overlay
+      - https://[fd7a:115c:a1e0::a]:7432
+      - https://192.0.2.10:7432           # underlay
+  - key: "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"   # authority-b
+    urls:
+      - https://100.64.0.11:7432
+      - https://[2001:db8::11]:7432
