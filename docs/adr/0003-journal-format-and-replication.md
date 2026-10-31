@@ -614,6 +614,10 @@ leader, no quorum.
 - An administrator whose change lost its epoch to another one starts again.
 - The list of every binding is readable by every machine that reaches the
   API listener.
+- A binding event is bound to its trust domain, not to a journal: a
+  journal that starts over accepts every event signed before for the same
+  trust domain, above the current epoch. Starting over therefore means new
+  administrator keys.
 
 - The registry is static: adding or removing an administrator is a
   deployment to every instance, and a stale registry on one instance rejects

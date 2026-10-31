@@ -391,6 +391,14 @@ protection class:
   that key approved, and let compaction remove the older events (retention
   for `bindings`). Ingest verifies history against the current registry; an
   event approved only with a removed key stops a sync.
+- A binding event names its trust domain, but no journal: once signed, it
+  is valid in every journal of that trust domain, and anyone who reaches
+  the API listener can write it to an instance where the identity's current
+  epoch is lower. When the journals of a trust domain start over, after a
+  trial or a loss without an export, start them with new administrator
+  keys. Otherwise every event signed before, such as an old key of a
+  machine, a test identity or a revocation, can come back and win against
+  the new bindings.
 
 ## Administration
 
