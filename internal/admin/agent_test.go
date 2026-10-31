@@ -50,7 +50,7 @@ func TestAgentSign(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sig, err := agentSign(ctx, dial, s.PublicKey(), text)
+		sig, err := agentSign(ctx, dial, s.PublicKey(), journal.Namespace, text)
 		if err != nil {
 			t.Fatalf("%s: %v", s.PublicKey().Type(), err)
 		}
@@ -60,13 +60,12 @@ func TestAgentSign(t *testing.T) {
 		}
 	}
 	otherSigner, _ := ssh.NewSignerFromKey(other)
-	_, err = agentSign(ctx, dial, otherSigner.PublicKey(), text)
-	var na *errNoAgentKey
-	if !errors.As(err, &na) {
+	_, err = agentSign(ctx, dial, otherSigner.PublicKey(), journal.Namespace, text)
+	if !NoAgentKey(err) {
 		t.Fatalf("key not in the agent: %v", err)
 	}
-	_, err = agentSign(ctx, func(context.Context) (io.ReadWriteCloser, error) { return nil, errors.New("no agent") }, otherSigner.PublicKey(), text)
-	if !errors.As(err, &na) {
+	_, err = agentSign(ctx, func(context.Context) (io.ReadWriteCloser, error) { return nil, errors.New("no agent") }, otherSigner.PublicKey(), journal.Namespace, text)
+	if !NoAgentKey(err) {
 		t.Fatalf("no agent: %v", err)
 	}
 }

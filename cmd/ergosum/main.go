@@ -45,6 +45,10 @@ Bindings, from an administrator's machine (configuration: %[3]s):
   ergosum revoke [-out FILE] NAME                        revoke a binding
   ergosum show [-out FILE] NAME                          current binding, in the file format
   ergosum list                                           all bindings
+
+Releases (same configuration: release_key, release_signers):
+  ergosum release sign [-key KEY] [-signers FILE] [-yes] SHA256SUMS   sign a release's checksums
+  ergosum release verify [-signers FILE] DIR                          check a downloaded release
 `, defaultConfig, defaultSocket, defaultAdminConfig())
 }
 
@@ -71,6 +75,8 @@ func main() {
 		err = show(os.Args[2:])
 	case "list":
 		err = list(os.Args[2:])
+	case "release":
+		err = releaseCmd(os.Args[2:])
 	case "version":
 		fmt.Println("ergosum", version.String())
 	case "help", "-h", "--help":

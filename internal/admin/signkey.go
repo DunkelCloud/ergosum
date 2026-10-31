@@ -43,7 +43,7 @@ func LoadSignKey(spec, keygen string) (*SignKey, error) {
 	if pub, err := sshsig.ParseAuthorizedKey(spec); err == nil {
 		return &SignKey{Public: pub, Sign: AgentSigner(pub, "", keygen)}, nil
 	}
-	path := expandHome(spec)
+	path := ExpandHome(spec)
 	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied path
 	if err != nil {
 		return nil, fmt.Errorf("sign key: %w", err)
@@ -110,7 +110,8 @@ func parseSSH2PublicKey(text string) (ssh.PublicKey, error) {
 	return ssh.ParsePublicKey(raw)
 }
 
-func expandHome(p string) string {
+// ExpandHome replaces a leading ~ with the home directory.
+func ExpandHome(p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, p[1:])
@@ -131,9 +132,8 @@ func (e *errNoAgentKey) Unwrap() error { return e.err }
 // file, ssh-keygen signs with that file instead.
 func AgentSigner(pub ssh.PublicKey, private, keygen string) Signer {
 	return func(ctx context.Context, canonical []byte) ([]byte, error) {
-		sig, err := agentSign(ctx, dialAgent, pub, canonical)
-		var na *errNoAgentKey
-		if errors.As(err, &na) && private != "" {
+		sig, err := agentSign(ctx, dialAgent, pub, journal.Namespace, canonical)
+		if NoAgentKey(err) && private != "" {
 			if _, serr := os.Stat(private); serr == nil {
 				return SSHKeygen(keygen, private)(ctx, canonical)
 			}
@@ -142,7 +142,51 @@ func AgentSigner(pub ssh.PublicKey, private, keygen string) Signer {
 	}
 }
 
-func agentSign(ctx context.Context, dial func(context.Context) (io.ReadWriteCloser, error), pub ssh.PublicKey, canonical []byte) ([]byte, error) {
+// AgentSign signs message in namespace with the key pub that the SSH agent
+// holds. NoAgentKey tells whether no agent answered or it lacks the key.
+func AgentSign(ctx context.Context, pub ssh.PublicKey, namespace string, message []byte) ([]byte, error) {
+	return agentSign(ctx, dialAgent, pub, namespace, message)
+}
+
+// NoAgentKey reports whether err from AgentSign means that no agent
+// answered or that it does not hold the key.
+func NoAgentKey(err error) bool {
+	var na *errNoAgentKey
+	return errors.As(err, &na)
+}
+
+// FileSign signs message in namespace with a private key file and returns
+// the public key with the signature. passphrase is asked only for an
+// encrypted file. The file is read here, not by ssh-keygen, so that
+// neither the ssh-keygen found first in PATH nor Windows line ends in the
+// file matter. Keys on security keys need the agent.
+func FileSign(file string, passphrase func() ([]byte, error), namespace string, message []byte) (ssh.PublicKey, []byte, error) {
+	data, err := os.ReadFile(ExpandHome(file)) //nolint:gosec // operator-supplied path
+	if err != nil {
+		return nil, nil, err
+	}
+	key, err := ssh.ParseRawPrivateKey(data)
+	var pme *ssh.PassphraseMissingError
+	if errors.As(err, &pme) {
+		pass, perr := passphrase()
+		if perr != nil {
+			return nil, nil, perr
+		}
+		key, err = ssh.ParseRawPrivateKeyWithPassphrase(data, pass)
+		clear(pass)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("private key %s: %w", file, err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("private key %s: %w", file, err)
+	}
+	sig, err := sshsig.Sign(signer, namespace, message)
+	return signer.PublicKey(), sig, err
+}
+
+func agentSign(ctx context.Context, dial func(context.Context) (io.ReadWriteCloser, error), pub ssh.PublicKey, namespace string, canonical []byte) ([]byte, error) {
 	conn, err := dial(ctx)
 	if err != nil {
 		return nil, &errNoAgentKey{fmt.Errorf("ssh-agent: %w", err)}
@@ -155,7 +199,7 @@ func agentSign(ctx context.Context, dial func(context.Context) (io.ReadWriteClos
 	want := pub.Marshal()
 	for _, s := range signers {
 		if bytes.Equal(s.PublicKey().Marshal(), want) {
-			return sshsig.Sign(s, journal.Namespace, canonical)
+			return sshsig.Sign(s, namespace, canonical)
 		}
 	}
 	return nil, &errNoAgentKey{fmt.Errorf("ssh-agent does not hold the key %s; add it with ssh-add", sshsig.Fingerprint(pub))}

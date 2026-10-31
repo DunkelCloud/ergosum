@@ -417,6 +417,9 @@ authorities:                      # every instance of the trust domain
     key: SHA256:...               # instance fingerprint, from "ergosum keygen"
   - url: https://100.64.0.11:7432
     key: SHA256:...
+# For "ergosum release sign" and "verify" (docs/releasing.md):
+release_key: ~/.ssh/ergosum-release.pub
+release_signers: ~/src/ergosum/release-signers
 ```
 
 The tool reads from every configured authority and insists that those that

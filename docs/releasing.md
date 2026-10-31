@@ -30,10 +30,15 @@ ssh-keygen -Y verify -f release-signers -I release -n ergosum-release \
 sha256sum -c --ignore-missing SHA256SUMS
 ```
 
-`ssh-keygen` needs OpenSSH 8.1 or later; Windows 11 and Git for Windows
-ship one. On Windows without `sha256sum`, compare
-`Get-FileHash -Algorithm SHA256 FILE` with the line in `SHA256SUMS`. In
-`cmd.exe`, `~` means nothing: write `%USERPROFILE%\.ssh\` for `~/.ssh/`.
+`ssh-keygen` needs OpenSSH 8.1 or later. With an `ergosum` binary at hand,
+on any system:
+
+```sh
+ergosum release verify -signers release-signers DIR
+```
+
+It checks the signature and every listed file present in `DIR`, and names
+the ones that are not there.
 
 To rebuild a binary, check out the tag and build with the version and the
 full commit hash from the release notes; the result must match
@@ -107,18 +112,29 @@ For the holder of a release key.
    is the one you tagged, and sign:
 
    ```sh
-   ssh-keygen -Y sign -f ~/.ssh/ergosum-release -n ergosum-release SHA256SUMS
+   ergosum release sign SHA256SUMS
    ```
 
-   On Windows in `cmd.exe`, with the `ssh-keygen` of Windows 11 or of Git
-   for Windows (if `ssh-keygen` reports `unknown option -- Y`, an older
-   one comes first in `PATH`; `where ssh-keygen` shows which):
+   It shows the files, asks, signs with the release key and writes
+   `SHA256SUMS.sig`, but only once the signature verifies against
+   `release-signers`. The key comes from `release_key` in the
+   administrator configuration (default `~/.ssh/ergosum-release.pub`): if
+   the SSH agent holds it, the agent signs; otherwise `ergosum` reads the
+   private key file next to the `.pub` and asks for its passphrase. It
+   reads that file itself, so neither the `ssh-keygen` in `PATH` nor
+   Windows line ends in the file matter. A release key is better not kept
+   in the agent: the Windows agent service keeps keys across restarts, for
+   every process of the user. Set `release_signers` to the repository's
+   file, or give `-signers`:
 
-   ```bat
-   ssh-keygen -Y sign -f "%USERPROFILE%\.ssh\ergosum-release" -n ergosum-release SHA256SUMS
+   ```yaml
+   release_key: ~/.ssh/ergosum-release.pub
+   release_signers: ~/src/ergosum/release-signers
    ```
 
-   Check the signature as above before attaching it.
+   With `ssh-keygen` instead: `ssh-keygen -Y sign -f ~/.ssh/ergosum-release
+   -n ergosum-release SHA256SUMS`. It refuses a key file with Windows line
+   ends, saying "Couldn't load public key" or "No private key found".
 
 4. Attach `SHA256SUMS.sig` to the draft and publish it.
 5. Verify the published release as above.
