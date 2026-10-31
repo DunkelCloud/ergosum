@@ -165,16 +165,15 @@ func (s *memStore) Outbox(_ context.Context, after int64) (int64, time.Time, err
 	return n, time.Time{}, nil
 }
 
-func (s *memStore) Latest(_ context.Context, origin, kind string) ([]replication.Stored, error) {
+func (s *memStore) LatestAt(_ context.Context, origin, kind string, pos int64) (*replication.Stored, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []replication.Stored
 	for i := len(s.events) - 1; i >= 0; i-- {
-		if e := s.events[i]; e.Origin == origin && e.Kind == kind {
-			out = append(out, e)
+		if e := s.events[i]; e.Origin == origin && e.Kind == kind && e.Pos <= pos {
+			return &e, nil
 		}
 	}
-	return out, nil
+	return nil, nil
 }
 
 func (s *memStore) SetFrontier(_ context.Context, cp replication.Stored, frontier map[string]int64) error {

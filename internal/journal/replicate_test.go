@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -106,9 +108,9 @@ func TestReadPagesAfterCompaction(t *testing.T) {
 	if _, err := s.WriteCheckpoint(ctx); err != nil {
 		t.Fatal(err)
 	}
-	cps, _ := s.Latest(ctx, "instance-a", journal.KindCheckpoint)
+	cp, _ := s.LatestAt(ctx, "instance-a", journal.KindCheckpoint, math.MaxInt64)
 	cov, _ := s.Coverages(ctx)
-	if err := s.SetFrontier(ctx, cps[0], cov); err != nil {
+	if err := s.SetFrontier(ctx, *cp, cov); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -300,5 +302,99 @@ func TestProjectionVersion(t *testing.T) {
 	}
 	if a.ProjectionVersion() != before {
 		t.Fatal("an observation changed the version")
+	}
+}
+
+// TestHeldBindingsNotVerifiedAgain: a checkpoint repeats every binding; one
+// that an instance holds with the same body verified when it was stored,
+// and is not checked against the registry again. An instance that does
+// not hold it still verifies it: there a binding approved only by an
+// administrator who has since left the registry fails.
+func TestHeldBindingsNotVerifiedAgain(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice", "bob")
+	ka, kb := newKey(t), newKey(t)
+	all := map[string]*ecdsa.PublicKey{"instance-a": &ka.PublicKey, "instance-b": &kb.PublicKey}
+	open := func(path, name string, cfg journal.RegistryConfig, key *ecdsa.PrivateKey) *journal.Store {
+		t.Helper()
+		reg, err := journal.NewRegistry(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := journal.Open(path, name, td, reg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetSigner(ctx, key); err != nil {
+			t.Fatal(err)
+		}
+		s.SetInstanceKeys(all)
+		return s
+	}
+	a := open(filepath.Join(t.TempDir(), "a.db"), "instance-a", admins.Registry(1), ka)
+	defer a.Close()
+	bPath := filepath.Join(t.TempDir(), "b.db")
+	b := open(bPath, "instance-b", admins.Registry(1), kb)
+	if _, err := a.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", 1, fingerprint(t), tailnet), "bob")); err != nil {
+		t.Fatal(err)
+	}
+	after := copyEvents(t, a, b, 0)
+	b.Close()
+
+	// bob leaves the registry; b still holds the binding he approved.
+	withoutBob := admins.Registry(1)
+	delete(withoutBob.Admins, "bob")
+	for kind, ap := range withoutBob.Approvals {
+		ap.Keys = []string{"alice"}
+		withoutBob.Approvals[kind] = ap
+	}
+	b = open(bPath, "instance-b", withoutBob, kb)
+	defer b.Close()
+	if _, err := a.WriteCheckpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, events, _, err := a.Read(ctx, after, 10)
+	if err != nil || len(events) != 1 || events[0].Kind != journal.KindCheckpoint {
+		t.Fatalf("%v %v", events, err)
+	}
+	if err := b.Verify(ctx, events[0].Event); err != nil {
+		t.Fatalf("checkpoint with a held binding: %v", err)
+	}
+	c := open(filepath.Join(t.TempDir(), "c.db"), "instance-b", withoutBob, kb)
+	defer c.Close()
+	if err := c.Verify(ctx, events[0].Event); !errors.Is(err, journal.ErrUnverified) {
+		t.Fatalf("instance without the binding: %v", err)
+	}
+}
+
+// TestLatestAt: the frontier reads the newest own checkpoint at or below
+// the acknowledged position, and only that one.
+func TestLatestAt(t *testing.T) {
+	ctx := context.Background()
+	admins := jt.NewAdmins(t, "alice")
+	s := newStore(t, admins, 1)
+	var pos []int64
+	for range 3 {
+		if _, err := s.AppendBinding(ctx, admins.Sign(t, jt.Set(td, "host1.example.com", uint64(len(pos)+1), fingerprint(t), tailnet), "alice")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.WriteCheckpoint(ctx); err != nil {
+			t.Fatal(err)
+		}
+		_, events, _, _ := s.Read(ctx, 0, 100)
+		pos = append(pos, events[len(events)-1].Pos)
+	}
+	for _, c := range []struct{ at, want int64 }{{pos[0] - 1, 0}, {pos[0], pos[0]}, {pos[2] - 1, pos[1]}, {math.MaxInt64, pos[2]}} {
+		cp, err := s.LatestAt(ctx, "instance-a", journal.KindCheckpoint, c.at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got int64
+		if cp != nil {
+			got = cp.Pos
+		}
+		if got != c.want {
+			t.Errorf("at %d: %d, want %d", c.at, got, c.want)
+		}
 	}
 }

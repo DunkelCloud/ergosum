@@ -320,7 +320,9 @@ key:
 
 **The instance signature grants nothing.** It says which instance wrote the
 checkpoint and when. Every contained binding event is verified against the
-local registry and trust domain, exactly as the write API does. A
+local registry and trust domain, exactly as the write API does, unless the
+instance holds it already with the same body, signatures included: that one
+verified when it was stored, and only its form is checked again. A
 compromised instance can therefore write a checkpoint that omits events, but
 not one that adds a binding. Revocations stay in the checkpoint as the
 winner of their identity: without them, an older, validly signed
@@ -628,9 +630,11 @@ leader, no quorum.
   records before would reuse a sequence number its peers know, and they
   reject it as a conflict.
 - Ingest verifies against the current registry, also history and the
-  bindings inside checkpoints. Once an administrator key leaves the
-  registry, every binding event approved only with it fails verification,
-  and a sync of a journal that still holds one stops there. Such bindings
+  bindings inside checkpoints that the instance does not hold yet. Once an
+  administrator key leaves the registry, every binding event approved only
+  with it fails verification where it is new, and a sync of a journal that
+  still holds one stops there; instances that hold it go on accepting the
+  checkpoints that repeat it. Such bindings
   must be approved again by the remaining administrators, and the old
   events compacted away, before the key is removed.
 - History beyond its retention exists only in the archive, if one is
