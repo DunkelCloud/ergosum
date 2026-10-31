@@ -217,6 +217,7 @@ authority discards the request like one whose requester went away.
 | 400 | `bad_request`, `clock_skew`, `unsupported_version` | malformed or stale request |
 | 403 | `denied` | a check failed; the reason is in the audit log only |
 | 421 | `not_responsible` | a `net` check needs an instance attached to that network |
+| 429 | `rate_limited` | the identity has a request in flight at this instance, or asked too often |
 | 503 | `unavailable` | instance sealed or journal unavailable |
 
 `denied` deliberately does not say which check failed, so that a prober
@@ -260,15 +261,19 @@ after the real machine restarted, never a token.
 4. `to` names another instance: `misdirected`. No callback is made. The
    request verified against the bound key, so whoever brought it here had it
    from the machine: another instance or a relay.
-5. Request ID already processed for this identity: `replay`. No callback is
+5. The identity has another request in flight here, or used up its rate
+   (10 requests, then one per minute): `rate_limited`. No callback is made,
+   nothing is journaled. Only a holder of the bound key gets this far, so
+   a copy of it can keep its own identity from a token here, but no other.
+6. Request ID already processed for this identity: `replay`. No callback is
    made.
-6. Plan one callback per bound check; targets and ports come from the
+7. Plan one callback per bound check; targets and ports come from the
    binding. A `net` check whose prefix is not inside a network attached to
    this instance: answer `not_responsible` before any callback.
-7. Run the callbacks (in parallel, each with a timeout, default 5 s). Each
+8. Run the callbacks (in parallel, each with a timeout, default 5 s). Each
    uses a fresh nonce. For `net`, try up to four reported addresses inside
    the prefix.
-8. Requester gone, or any callback answered `ended` or `no_open_request`
+9. Requester gone, or any callback answered `ended` or `no_open_request`
    from a daemon started after the request: discard. Otherwise any
    `no_open_request`:
    `key_duplicate`; any callback that is unreachable, answers with another

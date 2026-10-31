@@ -150,6 +150,19 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		a.deny(ctx, w, ResultMisdirected, obs, "request addressed to "+req.To)
 		return
 	}
+	// What a holder of the bound key can make the instance do is bounded:
+	// callbacks, journal entries, audit lines and the replay cache.
+	release, ok := a.perID.acquire(req.Identity, now)
+	if !ok {
+		a.requests.Inc(ResultRateLimited)
+		if a.limiter.allow(ResultRateLimited+" "+req.Identity, now) {
+			a.audit.Warn("token request "+ResultRateLimited, "event", "token_request", "result", ResultRateLimited,
+				"identity", req.Identity, "key", obs.Key, "remote", obs.Remote)
+		}
+		a.writeError(w, http.StatusTooManyRequests, protocol.ErrRateLimited, "")
+		return
+	}
+	defer release()
 	// The daemon never reuses a request ID. A repeat comes from a second
 	// holder of the key replaying an ID it has seen; it gets no callbacks.
 	if !a.seen.first(req.Identity+" "+req.RequestID, now) {

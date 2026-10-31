@@ -195,7 +195,7 @@ on a host of its own or on a shared host.
 
 | Metric | Meaning |
 | --- | --- |
-| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `misdirected`, `foreign_key`, `unknown_identity` |
+| `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `misdirected`, `rate_limited`, `foreign_key`, `unknown_identity` |
 | `machine_identity_authority_sealed` | 1 while sealed |
 | `machine_identity_build_info{version,commit}` | 1; version and commit of the running binary |
 | `machine_identity_binding_events_total{outcome}` | write API: `accepted`, `rejected` |
@@ -215,6 +215,10 @@ it like `key_duplicate`. `misdirected` means that a request signed by the
 machine but addressed to another instance arrived here: that instance, or
 whoever relayed the request, passed it on. All three are logged at level
 `error` with an `alert` field. `wrong_location` is a warning.
+`rate_limited` counts requests of an identity beyond 10 and then one per
+minute, or while another of its requests is in flight; a daemon renewing
+every quarter of an hour never gets there. Many of them come from a copy
+of the machine key, usually together with `key_duplicate`.
 
 Audit entries are JSON log lines with `"log_type":"audit"` on stdout — one
 per token request (result, identity, request ID, presented key, per-check
