@@ -30,9 +30,10 @@ ssh-keygen -Y verify -f release-signers -I release -n ergosum-release \
 sha256sum -c --ignore-missing SHA256SUMS
 ```
 
-`ssh-keygen` needs OpenSSH 8.1 or later; Windows ships it. On Windows
-without `sha256sum`, compare `Get-FileHash -Algorithm SHA256 FILE` with the
-line in `SHA256SUMS`.
+`ssh-keygen` needs OpenSSH 8.1 or later; Windows 11 and Git for Windows
+ship one. On Windows without `sha256sum`, compare
+`Get-FileHash -Algorithm SHA256 FILE` with the line in `SHA256SUMS`. In
+`cmd.exe`, `~` means nothing: write `%USERPROFILE%\.ssh\` for `~/.ssh/`.
 
 To rebuild a binary, check out the tag and build with the version and the
 full commit hash from the release notes; the result must match
@@ -108,6 +109,16 @@ For the holder of a release key.
    ```sh
    ssh-keygen -Y sign -f ~/.ssh/ergosum-release -n ergosum-release SHA256SUMS
    ```
+
+   On Windows in `cmd.exe`, with the `ssh-keygen` of Windows 11 or of Git
+   for Windows (if `ssh-keygen` reports `unknown option -- Y`, an older
+   one comes first in `PATH`; `where ssh-keygen` shows which):
+
+   ```bat
+   ssh-keygen -Y sign -f "%USERPROFILE%\.ssh\ergosum-release" -n ergosum-release SHA256SUMS
+   ```
+
+   Check the signature as above before attaching it.
 
 4. Attach `SHA256SUMS.sig` to the draft and publish it.
 5. Verify the published release as above.
