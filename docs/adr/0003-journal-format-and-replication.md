@@ -98,7 +98,8 @@ Wire form (write API body and journal body):
   `[addr]:port`); `net` targets are masked prefixes. Every target has one
   spelling only: a port is plain decimal without sign or leading zeros,
   and brackets go around IPv6 addresses only.
-- `binding.set` needs at least one check; checks are unique.
+- `binding.set` needs between 1 and 16 checks; checks are unique. A body
+  is at most 256 KiB.
 - `binding.revoked` carries neither key nor checks.
 - `epoch` starts at 1 and stays at or below 2^53, so that a revocation can
   always follow.
@@ -257,6 +258,13 @@ instance, kid, identity, epoch, request ID, presented key, remote address,
 per-check outcomes, token ID and reason. For `key_duplicate` it contains the
 daemon's signed `no_open_request` response as evidence, verifiable with the
 bound key alone.
+
+Ingest takes an observation only in that shape: no unknown field, every
+field in its syntax, a token ID exactly for `issued`, evidence exactly with
+`no_open_request`, at most 16 check outcomes, free texts without control
+characters (remote address 64 bytes, reason 256, detail 512; the writer
+clips them), and at most 64 KiB in all. What another instance stores
+under an observation is thereby bounded, whoever wrote it.
 
 Observations never set or end a binding. Only what the current
 configuration authenticates enters the journal: binding events with the

@@ -56,6 +56,9 @@ type BindingEvent struct {
 	Signatures  []string `json:"signatures"`
 }
 
+// MaxChecks is the most callback checks a binding may have.
+const MaxChecks = 16
+
 // ErrInvalidEvent wraps all validation errors of the event content.
 var ErrInvalidEvent = errors.New("invalid binding event")
 
@@ -88,8 +91,8 @@ func validateContent(kind, identity string, epoch uint64, key string, checks []C
 		if !keys.ValidFingerprint(key) {
 			return invalid("bad key fingerprint %q", key)
 		}
-		if len(checks) == 0 {
-			return invalid("binding.set needs at least one callback check")
+		if len(checks) == 0 || len(checks) > MaxChecks {
+			return invalid("binding.set needs between 1 and %d callback checks", MaxChecks)
 		}
 		seen := map[Check]bool{}
 		for _, c := range checks {

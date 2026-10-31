@@ -298,7 +298,8 @@ func signedAt(t *testing.T, key *ecdsa.PrivateKey, e replication.Event) replicat
 func observationEvent(t *testing.T, key *ecdsa.PrivateKey, instance, origin string, seq int64) replication.Event {
 	t.Helper()
 	obs := authority.Observation{V: 1, Kind: "observation.issued", Instance: instance, Kid: keys.Thumbprint(&key.PublicKey),
-		Identity: host1, RequestID: protocol.NewRequestID(), Time: time.Now().UTC()}
+		Identity: host1, Epoch: 1, RequestID: protocol.NewRequestID(), Key: keys.Fingerprint(&key.PublicKey),
+		TokenID: protocol.NewRequestID(), Time: time.Now().UTC()}
 	return sealed(t, key, protocol.ContextObservation, origin, obs.Kind, seq, obs)
 }
 

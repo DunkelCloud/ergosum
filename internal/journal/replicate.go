@@ -71,6 +71,9 @@ func (s *Store) Verify(ctx context.Context, e replication.Event) error {
 		return unverified("the position %s/%d is not signed by %s", e.Origin, e.Seq, e.Origin)
 	}
 	switch {
+	case AlwaysIngest(e.Kind) && len(e.Body) > maxBindingBody,
+		observationKinds[e.Kind] && len(e.Body) > maxObservationBody:
+		return unverified("%s body of %d bytes", e.Kind, len(e.Body))
 	case AlwaysIngest(e.Kind):
 		be, err := s.verifyBinding(e.Body)
 		if err != nil {
@@ -98,12 +101,15 @@ func (s *Store) Verify(ctx context.Context, e replication.Event) error {
 		if err != nil {
 			return err
 		}
-		var h observationHeader
-		if err := json.Unmarshal(payload, &h); err != nil {
+		var o Observation
+		if err := strictDecode(payload, &o); err != nil {
 			return unverified("observation: %v", err)
 		}
-		if h.Kind != e.Kind || h.Instance != e.Origin || !protocol.ValidDNSName(h.Identity) {
-			return unverified("observation header (%s, %s, %q) does not match", h.Kind, h.Instance, h.Identity)
+		if err := o.Validate(); err != nil {
+			return err
+		}
+		if o.Kind != e.Kind || o.Instance != e.Origin {
+			return unverified("observation of %s by %s stored as %s by %s", o.Kind, o.Instance, e.Kind, e.Origin)
 		}
 		return nil
 	case e.Kind == KindCheckpoint:
@@ -116,15 +122,6 @@ func (s *Store) Verify(ctx context.Context, e replication.Event) error {
 	default:
 		return unverified("unknown kind %q", e.Kind)
 	}
-}
-
-// observationHeader is the part of an observation payload that ingest
-// needs; the authority defines the whole payload.
-type observationHeader struct {
-	Kind     string `json:"kind"`
-	Instance string `json:"instance"`
-	Kid      string `json:"kid"`
-	Identity string `json:"identity"`
 }
 
 func (s *Store) verifyBinding(body []byte) (*BindingEvent, error) {
@@ -358,11 +355,11 @@ func (s *Store) Append(ctx context.Context, e replication.Event) error {
 			return err
 		}
 	default:
-		var h observationHeader
-		if err := decodeEnvelopePayload(e.Body, &h); err != nil {
+		var o Observation
+		if err := decodeEnvelopePayload(e.Body, &o); err != nil {
 			return err
 		}
-		identity = h.Identity
+		identity = o.Identity
 	}
 	if err := s.insert(ctx, tx, e.Origin, e.Seq, e.Kind, identity, epoch, e.Hash, e.Body, e.Sig); err != nil {
 		return err
