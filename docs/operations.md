@@ -203,6 +203,8 @@ on a host of its own or on a shared host.
 | `machine_identity_journal_outbox_oldest_age_seconds{peer}` | age of the oldest of them; 0 if none |
 | `machine_identity_journal_rejected_total{peer}` | events from a peer that ingest rejected |
 | `machine_identity_journal_equivocations_total{origin}` | events skipped because their origin signed a contradicting event; take that instance out of service |
+| `machine_identity_journal_skipped_total{origin}` | observations and checkpoints skipped over the quota of their origin, or too far above its coverage; check that instance |
+| `machine_identity_journal_origin_bytes{origin}` | what the observations and checkpoints of another origin take here, against `origin_quota_mib` |
 | `machine_identity_journal_coverage{origin}` | sequence number up to which every event of an origin is here |
 | `machine_identity_journal_compaction_frontier{origin}` | sequence number up to which events of an origin may be deleted |
 | `machine_identity_journal_checkpoint_age_seconds` | age of the latest own checkpoint; -1 before the first |
@@ -245,6 +247,7 @@ replication:
         -----BEGIN PUBLIC KEY-----
         ...
   max_page_mib: 32                 # largest page sent and accepted; the same everywhere
+  origin_quota_mib: 1024           # what another instance's observations may take here
 ```
 
 Allow TCP 7435 between the instances only. A peer without `url` is known
@@ -260,6 +263,14 @@ about 1.6 KB per identity. A page that is too large is refused with `413`
 and logged on the sender ("page larger than max_body"); raise the value on
 every instance before a checkpoint reaches it (32 MiB hold about 20 000
 identities).
+
+`origin_quota_mib` bounds what the observations and checkpoints of each
+other instance take in this journal; beyond it they are skipped, with the
+alert `ErgosumJournalEventsSkipped`. An observation takes about 1.5 KB, and
+an instance writes one per token request it answers: 100 machines renewing
+every quarter of an hour at one instance make about 15 MB a day, 1.3 GB
+over a retention of 90 days. Size the quota above that for the busiest
+instance, with `machine_identity_journal_origin_bytes` as the measure.
 
 `GET /v1/journal/state` on the ops listener reports the state hash, the
 coverage and compaction frontier per origin, and the outbox of every peer.

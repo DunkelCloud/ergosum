@@ -112,6 +112,12 @@ type Store struct {
 	keysMu sync.RWMutex
 	keys   map[string]*ecdsa.PublicKey // instance keys by origin
 	signer *ecdsa.PrivateKey           // own instance key, once unsealed
+
+	quotaMu      sync.Mutex
+	quota        int64            // bytes per other origin, 0 for none
+	used         map[string]int64 // bytes stored per other origin, as far as known
+	usedGen      uint64           // counts forgetUsage
+	maxUncovered int
 }
 
 // timeFormat is RFC 3339 with a fixed number of fractional digits, so that
@@ -141,7 +147,8 @@ func Open(path, origin, trustDomain string, registry *Registry) (*Store, error) 
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db, origin: origin, trustDomain: trustDomain, registry: registry, now: time.Now, keys: map[string]*ecdsa.PublicKey{}}, nil
+	return &Store{db: db, origin: origin, trustDomain: trustDomain, registry: registry, now: time.Now,
+		keys: map[string]*ecdsa.PublicKey{}, maxUncovered: MaxUncovered}, nil
 }
 
 func prepare(ctx context.Context, db *sql.DB, origin, trustDomain string) error {

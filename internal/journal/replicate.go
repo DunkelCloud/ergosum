@@ -401,6 +401,7 @@ func (s *Store) Append(ctx context.Context, e replication.Event) error {
 	if AlwaysIngest(e.Kind) || e.Kind == KindCheckpoint {
 		s.projection.Add(1)
 	}
+	s.stored(e.Origin, e.Kind, len(e.Body))
 	return nil
 }
 

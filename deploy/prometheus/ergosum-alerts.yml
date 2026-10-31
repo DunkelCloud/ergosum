@@ -42,6 +42,17 @@ groups:
           summary: "{{ $labels.instance }}: instance {{ $labels.origin }} signed contradicting journal events"
           description: "See the audit log (journal equivocation) for both hashes. Take that instance out of service."
 
+      # Events of an instance were skipped: it wrote more than its quota,
+      # or left a gap in its sequence numbers. Either is unusual for an
+      # honest instance; a sync raises the coverage over a gap.
+      - alert: ErgosumJournalEventsSkipped
+        expr: increase(machine_identity_journal_skipped_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}: journal events of {{ $labels.origin }} skipped"
+          description: "See the audit log (journal events skipped). Raise replication.origin_quota_mib if that instance is merely busy."
+
       - alert: ErgosumJournalOutboxStuck
         expr: machine_identity_journal_outbox_oldest_age_seconds > 900
         for: 15m
