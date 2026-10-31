@@ -75,8 +75,8 @@ Chosen option 1.
 
 | Connection | Server | Client | Server pins | Client pins |
 | --- | --- | --- | --- | --- |
-| Token request | authority, port 7432, overlay address | daemon | – | authority keys from the daemon config |
-| Callback | daemon, port 7433 | authority | authority keys from the daemon config | the bound daemon key |
+| Token request | authority, port 7432, overlay address | daemon | – | authority keys from the daemon config and its authority list |
+| Callback | daemon, port 7433 | authority | authority keys from the daemon config and its authority list | the bound daemon key |
 | Replication (journal push and pull, ADR 0003) | authority, port 7435, overlay address | peer authority | the configured peers' keys | the peer's key |
 | Ops (metrics, health, public keys, journal state hash) | authority, port 7434, plain HTTP | operator, scraper | – | – |
 
@@ -282,6 +282,47 @@ after the real machine restarted, never a token.
   from one, so that an exit node or overlay route cannot carry an underlay
   check. Source address and interface per check kind are configurable.
 - A `net` check runs only on an instance attached to that network.
+
+### Authority list
+
+An authority may serve `GET /v1/authorities` on its token listener: every
+instance of its trust domain with its key fingerprint and one to eight
+URLs (`https://HOST:PORT`, `HOST` an address or a DNS name) in order of
+preference, and a serial from 1 to 2^53−1. Without a list it answers 404
+`no_list`.
+
+```json
+{"v": 1, "trust_domain": "example.com", "serial": 3, "authorities": [
+  {"key": "SHA256:...", "urls": ["https://100.64.0.10:7432", "https://192.0.2.10:7432"]}]}
+```
+
+- The operator keeps the same file (`authorities_file`) on every instance
+  and raises the serial with each change. An instance reads the file again
+  when it changes; a file that turns invalid leaves the last good list in
+  place. An instance does not start with a file that does not name it.
+- A daemon's configuration names at least one authority, its anchor. After
+  each token the daemon asks the issuing instance for its list and takes it
+  if it names that instance, is for the token's trust domain, and either
+  has a higher serial than the list in use or comes from an instance that
+  the configuration names and the list in use does not (a new trust domain,
+  or new instances after a restart). The daemon keeps the list in its state
+  directory and tries its instances in list order, then the configured ones
+  it does not name. Callbacks are accepted only from these instances.
+- The list is as trustworthy as the pinned connection to an instance the
+  daemon already trusts. A wrong list can keep a daemon from reaching an
+  authority, but cannot make it accept a token or let another instance use
+  its requests: Vault checks tokens against the trust domain's keys, and a
+  request names its target instance (`to`).
+- The daemon tries a URL only if it can reach it from its own addresses:
+  an overlay address needs an overlay address on the machine, an IPv4
+  address an IPv4 address, another IPv6 address an IPv6 address outside the
+  overlay; names and loopback addresses always. If none fits, it tries all.
+  Each connection attempt is bounded (5 s). It moves to the next URL only
+  while the request has not been written (connection or TLS handshake
+  failed), so that one request never reaches an instance twice.
+- The administrator's tool asks every configured authority for its list,
+  insists that those that answer agree on serial and content, and adds the
+  listed instances it does not know.
 
 ### Versioning
 

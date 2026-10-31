@@ -82,24 +82,44 @@ func (f *adminFlags) load() (admin.Config, error) {
 	return cfg, nil
 }
 
-// tool builds the administrator tool from the flags and the configuration.
-func (f *adminFlags) tool() (*admin.Tool, error) {
+// client builds the client of the configured authorities.
+func (f *adminFlags) client() (*admin.Client, admin.Config, error) {
 	cfg, err := f.load()
 	if err != nil {
-		return nil, err
+		return nil, cfg, err
 	}
 	if len(cfg.Authorities) == 0 {
 		if _, err := os.Stat(f.config); errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("no authority: the configuration %s does not exist; create it, point ERGOSUM_ADMIN_CONFIG or -config at one, or give -authority and -authority-key", f.config)
+			return nil, cfg, fmt.Errorf("no authority: the configuration %s does not exist; create it, point ERGOSUM_ADMIN_CONFIG or -config at one, or give -authority and -authority-key", f.config)
 		}
-		return nil, fmt.Errorf("no authority: configure one in %s or give -authority and -authority-key", f.config)
+		return nil, cfg, fmt.Errorf("no authority: configure one in %s or give -authority and -authority-key", f.config)
 	}
 	if cfg.TrustDomain == "" {
-		return nil, fmt.Errorf("no trust domain: set trust_domain in %s or give -trust-domain", f.config)
+		return nil, cfg, fmt.Errorf("no trust domain: set trust_domain in %s or give -trust-domain", f.config)
 	}
 	client, err := admin.NewClient(cfg)
+	return client, cfg, err
+}
+
+// tool builds the administrator tool from the flags and the configuration.
+// It adds the instances that the authorities' list names and the
+// configuration does not.
+func (f *adminFlags) tool() (*admin.Tool, error) {
+	client, cfg, err := f.client()
 	if err != nil {
 		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	list, added, err := client.Expand(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(added) > 0 {
+		fmt.Fprintf(os.Stderr, "The authority list (serial %d) names %d more authorities, asked as well:\n", list.Serial, len(added))
+		for _, a := range added {
+			fmt.Fprintf(os.Stderr, "  %s (%s)\n", a.URL, a.Key)
+		}
 	}
 	t := &admin.Tool{Client: client, Out: os.Stderr}
 	if cfg.SignKey != "" {
@@ -232,4 +252,60 @@ func confirm(question string) error {
 		return errors.New("not signed")
 	}
 	return nil
+}
+
+// authorities implements "ergosum authorities": the authority list of
+// every configured authority, and whether they agree.
+func authorities(args []string) error {
+	fs := flag.NewFlagSet("authorities", flag.ExitOnError)
+	var af adminFlags
+	af.register(fs, false)
+	_ = fs.Parse(args)
+	if fs.NArg() != 0 {
+		return errors.New("usage: ergosum authorities [flags]")
+	}
+	client, cfg, err := af.client()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := adminContext()
+	defer cancel()
+	answers, reach, err := client.AuthorityLists(ctx)
+	if err != nil {
+		return err
+	}
+	for _, a := range answers {
+		if a.List == nil {
+			fmt.Printf("%s serves no list\n", a.From)
+		} else {
+			fmt.Printf("%s serves serial %d with %d instances\n", a.From, a.List.Serial, len(a.List.Authorities))
+		}
+	}
+	for _, e := range reach.Unreachable {
+		fmt.Printf("unreachable: %v\n", e)
+	}
+	list, agreeErr := admin.AgreedList(answers)
+	if list != nil {
+		configured := map[string]bool{}
+		for _, a := range cfg.Authorities {
+			configured[a.Key] = true
+		}
+		fmt.Printf("\nList (serial %d, trust domain %s):\n", list.Serial, list.TrustDomain)
+		for _, la := range list.Authorities {
+			note := ""
+			if !configured[la.Key] {
+				note = "  (not configured here)"
+			}
+			fmt.Printf("  %s%s\n", la.Key, note)
+			for _, u := range la.URLs {
+				fmt.Printf("    %s\n", u)
+			}
+		}
+		for _, a := range cfg.Authorities {
+			if !list.Lists(a.Key) {
+				fmt.Printf("  configured here, missing from the list: %s (%s)\n", a.URL, a.Key)
+			}
+		}
+	}
+	return agreeErr
 }

@@ -60,6 +60,14 @@ AUTH_FP=$(awk '/^fingerprint:/ {print $2}' "$W/keygen.txt")
 ssh-keygen -q -t ed25519 -N "" -C alice@example.com -f "$W/alice"
 
 mkdir -p "$W/authority"
+# The authority list: an overlay and an IPv6 address that host1 cannot
+# reach from its addresses, then the one it can.
+cat > "$W/authorities.yaml" <<EOF
+serial: 1
+authorities:
+  - key: $AUTH_FP
+    urls: [https://100.64.0.2:7432, "https://[2001:db8::2]:7432", https://198.51.100.2:7432]
+EOF
 cat > "$W/serve.yaml" <<EOF
 instance: authority-a
 trust_domain: example.com
@@ -70,6 +78,7 @@ control_socket: $W/authority/control.sock
 listen: ":7432"
 listen_all_interfaces: true  # reached on both test networks
 ops_listen: "127.0.0.1:7434"
+authorities_file: $W/authorities.yaml
 callbacks:
   networks:
     - cidr: 198.51.100.0/24
@@ -140,6 +149,9 @@ echo "$claims" | jq -e '.sub == "spiffe://example.com/host/host1.example.com" an
 	|| fail "unexpected claims: $claims"
 perm=$(stat -c %a "$W/host1/run/token")
 [ "$perm" = 640 ] || fail "token mode $perm"
+jq -e '.serial == 1 and (.authorities[0].urls | length) == 3' "$W/host1/state/authorities.json" >/dev/null ||
+	fail "authority list not stored"
+grep -q '^machine_identity_authorities_serial 1$' "$W/host1/run/ergosum.prom" || fail "list serial not reported"
 
 log "clone of host1 in the other segment"
 cp -a "$W/host1/state" "$W/clone-state"

@@ -22,9 +22,16 @@ addresses: []
 # ranges 100.64.0.0/10 and fd7a:115c:a1e0::/48.
 overlay_prefixes: []
 
-# Tried in order. key is the fingerprint printed by "ergosum keygen".
+# One authority is enough: after the first token the daemon takes the
+# list of all instances that the authorities serve (/v1/authorities),
+# keeps it in state_dir and uses it from then on; these stay as the way
+# back. key is the fingerprint printed by "ergosum keygen". urls are tried
+# in order, those the machine cannot reach from its addresses not at all
+# (an overlay address needs an overlay address here, IPv4 an IPv4 address,
+# IPv6 an IPv6 address). Prefer addresses to names: a name makes renewal
+# depend on DNS.
 authorities:
-  - url: https://authority-a.example.com:7432
-    key: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-  - url: https://authority-b.example.com:7432
-    key: "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+  - key: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    urls:
+      - https://100.64.0.10:7432
+      - https://192.0.2.10:7432

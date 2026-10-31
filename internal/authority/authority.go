@@ -84,6 +84,7 @@ type Authority struct {
 	keyFile *keys.KeyFile
 	public  *ecdsa.PublicKey
 	kid     string
+	list    *authorityList // nil without Config.AuthoritiesFile
 
 	mu       sync.RWMutex
 	key      *ecdsa.PrivateKey // nil while sealed
@@ -149,6 +150,11 @@ func New(cfg Config, opts Options) (*Authority, error) {
 	}
 	a.public = a.keyFile.Public
 	a.kid = keys.Thumbprint(a.public)
+	if cfg.AuthoritiesFile != "" {
+		if a.list, err = newAuthorityList(cfg.AuthoritiesFile, cfg.TrustDomain, keys.Fingerprint(a.public), a.log); err != nil {
+			return nil, err
+		}
+	}
 
 	reg, err := journal.NewRegistry(cfg.Registry)
 	if err != nil {
@@ -405,6 +411,7 @@ func (a *Authority) apiHandler() http.Handler {
 	mux.HandleFunc("POST "+protocol.PathBindings, a.handleBindingWrite)
 	mux.HandleFunc("GET "+protocol.PathBindings, a.handleBindingList)
 	mux.HandleFunc("GET "+protocol.PathBindings+"/{identity}", a.handleBindingRead)
+	mux.HandleFunc("GET "+protocol.PathAuthorities, a.handleAuthorities)
 	mux.HandleFunc("GET "+protocol.PathKeys, a.handleKeys)
 	mux.HandleFunc("GET "+protocol.PathKeysPEM, a.handleKeysPEM)
 	return a.bodyGuard(mux, maxAPIBody)

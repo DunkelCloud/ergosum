@@ -3,7 +3,6 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -45,7 +44,11 @@ type Config struct {
 
 // AuthorityConfig names one authority instance and pins its key.
 type AuthorityConfig struct {
-	URL string `yaml:"url"`
+	// URL, or URLs in order of preference, reach the instance. The daemon
+	// tries only those it can reach from its own addresses (see
+	// docs/operations.md).
+	URL  string   `yaml:"url"`
+	URLs []string `yaml:"urls"`
 	// Key is the instance's key fingerprint ("SHA256:...", as printed by
 	// "ergosum keygen").
 	Key string `yaml:"key"`
@@ -99,9 +102,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("at least one authority is required"))
 	}
 	for i, a := range c.Authorities {
-		u, err := url.Parse(a.URL)
-		if err != nil || u.Scheme != "https" || u.Host == "" {
-			errs = append(errs, fmt.Errorf("authorities[%d]: url must be https://host:port", i))
+		if err := protocol.ValidateAuthorityURLs(a.urls()); err != nil {
+			errs = append(errs, fmt.Errorf("authorities[%d]: %w", i, err))
 		}
 		if !keys.ValidFingerprint(a.Key) {
 			errs = append(errs, fmt.Errorf("authorities[%d]: key must be a SHA256 fingerprint", i))
@@ -114,4 +116,12 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("overlay_prefixes: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+// urls returns URL and URLs as one list.
+func (a AuthorityConfig) urls() []string {
+	if a.URL == "" {
+		return a.URLs
+	}
+	return append([]string{a.URL}, a.URLs...)
 }
