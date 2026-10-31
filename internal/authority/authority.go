@@ -72,6 +72,7 @@ type Authority struct {
 	limiter    *limiter     // per identity, for verified refusals
 	unverified *window      // overall, for refusals anyone can cause
 	seen       *replayCache // request IDs already processed
+	lists      listCache
 
 	metrics  *metrics.Registry
 	requests *metrics.Vec
@@ -122,6 +123,7 @@ func New(cfg Config, opts Options) (*Authority, error) {
 		seen:     newReplayCache(max(2*cfg.ClockSkew, protocol.EndedTTL+5*time.Minute)),
 		unsealed: make(chan struct{}),
 		ready:    make(chan struct{}),
+		lists:    listCache{turn: make(chan struct{}, 1)},
 	}
 	if a.log == nil {
 		a.log = slog.New(slog.NewJSONHandler(os.Stdout, nil))

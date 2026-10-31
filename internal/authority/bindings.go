@@ -2,6 +2,7 @@ package authority
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -88,13 +89,51 @@ func (a *Authority) handleBindingRead(w http.ResponseWriter, r *http.Request) {
 // approvals the registry demands, for administrator tooling. Bindings are
 // no secret: the same is readable identity by identity.
 func (a *Authority) handleBindingList(w http.ResponseWriter, r *http.Request) {
-	bs, err := a.store.List(r.Context())
+	body, err := a.bindingList(r.Context())
 	if err != nil {
 		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "")
 		return
 	}
-	writeJSON(w, http.StatusOK, journal.BindingList{
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// listCache keeps the answer of the list endpoint until the projection
+// changes. Anyone who reaches the listener may ask for the list, and
+// building it reads every binding over the journal's only connection: it
+// is built once per change, by one request at a time.
+type listCache struct {
+	turn    chan struct{} // held by the request that looks at the cache
+	version uint64
+	body    []byte
+	builds  int
+}
+
+func (a *Authority) bindingList(ctx context.Context) ([]byte, error) {
+	c := &a.lists
+	select {
+	case c.turn <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-c.turn }()
+	v := a.store.ProjectionVersion()
+	if c.body != nil && c.version == v {
+		return c.body, nil
+	}
+	bs, err := a.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(journal.BindingList{
 		V: protocol.Version, TrustDomain: a.store.TrustDomain(),
 		Approvals: a.store.Registry().Approvals(), Bindings: bs,
 	})
+	if err != nil {
+		return nil, err
+	}
+	body = append(body, '\n')
+	c.version, c.body = v, body
+	c.builds++
+	return c.body, nil
 }

@@ -367,7 +367,13 @@ func (s *Store) Append(ctx context.Context, e replication.Event) error {
 	if err := s.insert(ctx, tx, e.Origin, e.Seq, e.Kind, identity, epoch, e.Hash, e.Body, e.Sig); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if AlwaysIngest(e.Kind) || e.Kind == KindCheckpoint {
+		s.projection.Add(1)
+	}
+	return nil
 }
 
 // RaiseCoverage implements replication.Store. Raising the coverage of the
