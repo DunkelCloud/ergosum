@@ -74,11 +74,12 @@ jobs:
 
   netns:
     # The real binaries in Linux network namespaces: sealed start and
-    # unseal, an SSH-signed binding, issuance with a net check, and a clone
-    # in another segment that is refused; then three instances replicating
-    # the journal: four-eyes approval with ergosum bind, catch-up
-    # after an outage, convergence after a partition, compaction, and a new
-    # instance built from a sync.
+    # unseal, an SSH-signed binding, issuance with a net check, a clone
+    # in another segment that is refused, and updates with
+    # deploy/install.sh; then three instances replicating the journal:
+    # four-eyes approval with ergosum bind, catch-up after an outage,
+    # convergence after a partition, compaction, and a new instance built
+    # from a sync.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -88,9 +89,13 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build
-        run: scripts/build.sh dist
+        # Two release versions, so that install.sh can update from one to
+        # the other and refuse the way back.
+        run: |
+          VERSION=v0.1.0 scripts/build.sh dist
+          VERSION=v0.2.0 scripts/build.sh dist-next ergosumd
       - name: Integration test in network namespaces
-        run: sudo BIN="$PWD/dist" bash test/netns/run.sh
+        run: sudo BIN="$PWD/dist" NEXT="$PWD/dist-next" bash test/netns/run.sh
       - name: Journal replication in network namespaces
         run: sudo BIN="$PWD/dist" bash test/netns/replication.sh
 

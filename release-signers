@@ -1,0 +1,6 @@
+# Keys that sign ergosum releases, in the ALLOWED SIGNERS format of
+# ssh-keygen(1). A release signs SHA256SUMS in the namespace
+# ergosum-release; docs/releasing.md shows how to verify it.
+#
+# SHA256:xcJy5kiogfRmaX7n8ednlEIcxJUxQGiN1QJgXxhKeSc
+release namespaces="ergosum-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICosjgD9nkaIHwTvmSi/TRreT78T/OLS6nEP4F8jUbj3 ergosum-release

@@ -46,6 +46,7 @@ read-only root filesystem.
 ## Documentation
 
 - [Operations](docs/operations.md): installation, modes of operation, unsealing, metrics, audit, Vault
+- [Releases](docs/releasing.md): verifying, installing and updating signed releases; making one
 - [Architecture decisions](docs/adr/): protocol, token format, journal and replication
 - Example configuration: [`examples/`](examples), including Vault Agent;
   service definitions for systemd and OpenRC: [`deploy/`](deploy)
@@ -63,3 +64,6 @@ fetches if needed. `GOOS` and `GOARCH` select the target; `VERSION` and
 `COMMIT` are stamped into the binaries. The same commit and settings give
 the same bytes on Linux, macOS and Windows (in Git Bash), so anyone can
 rebuild a published binary and compare it.
+
+Releases are signed with an SSH key listed in
+[`release-signers`](release-signers); see [Releases](docs/releasing.md).

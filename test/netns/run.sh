@@ -8,11 +8,18 @@
 # its local socket, accepts an SSH-signed binding for host1 with a net
 # check, and issues host1 a token. A copy of host1's state in the other
 # segment is refused, also when it reports host1's address as its own.
+# deploy/install.sh then updates host1 from a signed release to the
+# ergosumd in NEXT, refuses a bad signature, a changed file and an older
+# version, and goes back when the new binary gets no token.
 #
-# Needs root, iproute2, curl, jq and ssh-keygen. Usage: sudo test/netns/run.sh
+# Needs root, iproute2, curl, jq and ssh-keygen. BIN and NEXT are builds
+# with release versions, NEXT the newer (see .github/workflows/ci.yml).
+# Usage: sudo BIN=dist NEXT=dist-next test/netns/run.sh
 set -euo pipefail
 
 BIN=${BIN:-$(pwd)/dist}
+NEXT=${NEXT:?set NEXT to a build of ergosumd newer than BIN}
+INSTALL=$(cd "$(dirname "$0")/../.." && pwd)/deploy/install.sh
 W=$(mktemp -d /tmp/ergosum-netns.XXXXXX)
 PIDS=()
 
@@ -22,6 +29,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 cleanup() {
 	set +e
 	for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done
+	[ -f "$W/host1.pid" ] && kill "$(cat "$W/host1.pid")" 2>/dev/null
 	wait 2>/dev/null
 	for ns in authority host1 clone; do ip netns del "$ns" 2>/dev/null; done
 	if [ "${KEEP:-}" = "" ]; then rm -rf "$W"; fi
@@ -118,6 +126,7 @@ code=$(in_ns host1 curl -sk -o "$W/bind.out" -w '%{http_code}' -H 'Content-Type:
 
 log "host1 obtains a token"
 in_ns host1 "$BIN/ergosumd" run --config "$W/host1/ergosumd.yaml" --log-format text > "$W/host1.log" 2>&1 &
+HOST1_PID=$!
 PIDS+=($!)
 for _ in $(seq 50); do [ -s "$W/host1/run/token" ] && break; sleep 0.2; done
 [ -s "$W/host1/run/token" ] || { cat "$W/host1.log" "$W/authority.log"; fail "no token for host1"; }
@@ -154,5 +163,74 @@ version=$("$BIN/ergosum" version | cut -d' ' -f2)
 echo "$metrics" | grep "^machine_identity_build_info{version=\"$version\"," || fail "authority reports no build_info for $version"
 grep -q "^machine_identity_build_info{version=\"$version\"," "$W/host1/run/ergosum.prom" || fail "daemon reports no build_info for $version"
 grep -q '"log_type":"audit"\|log_type=audit' "$W/authority.log" || fail "no audit entries"
+
+log "update host1 with deploy/install.sh"
+# host1's daemon now runs from a directory the script installs into and is
+# restarted the way a service manager would do it.
+kill "$HOST1_PID"
+wait "$HOST1_PID" 2>/dev/null || true
+mkdir -p "$W/bin"
+cp "$BIN/ergosumd" "$W/bin/ergosumd"
+cat > "$W/restart-host1" <<EOF
+if [ -f "$W/host1.pid" ]; then
+	pid=\$(cat "$W/host1.pid")
+	kill "\$pid" 2>/dev/null
+	while kill -0 "\$pid" 2>/dev/null; do sleep 0.1; done
+fi
+ip netns exec host1 "$W/bin/ergosumd" run --config "$W/host1/ergosumd.yaml" --log-format text >> "$W/host1.log" 2>&1 &
+echo \$! > "$W/host1.pid"
+EOF
+sh "$W/restart-host1"
+
+arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+ssh-keygen -q -t ed25519 -N "" -C release -f "$W/release-key"
+echo "release namespaces=\"ergosum-release\" $(cat "$W/release-key.pub")" > "$W/release-signers"
+ssh-keygen -q -t ed25519 -N "" -C other -f "$W/other-key"
+echo "release namespaces=\"ergosum-release\" $(cat "$W/other-key.pub")" > "$W/other-signers"
+release() { # name ergosumd-binary
+	mkdir -p "$W/$1"
+	cp "$2" "$W/$1/ergosumd-linux-$arch"
+	(cd "$W/$1" && sha256sum "ergosumd-linux-$arch" > SHA256SUMS)
+	ssh-keygen -q -Y sign -f "$W/release-key" -n ergosum-release "$W/$1/SHA256SUMS"
+}
+install_release() { # [signers] options... dir
+	local signers=$W/release-signers
+	[ "$1" = --other ] && { signers=$W/other-signers; shift; }
+	BINDIR="$W/bin" RESTART_CMD="sh $W/restart-host1" sh "$INSTALL" \
+		--signers "$signers" --config "$W/host1/ergosumd.yaml" --wait 20 "$@"
+}
+installed() { "$W/bin/ergosumd" version | awk '{print $2}'; }
+old=$("$BIN/ergosumd" version | awk '{print $2}')
+new=$("$NEXT/ergosumd" version | awk '{print $2}')
+
+release next "$NEXT/ergosumd"
+if out=$(install_release --other "$W/next" 2>&1); then fail "installed with a foreign signature: $out"; fi
+echo "$out" | grep -q 'does not verify' || fail "foreign signature: $out"
+cp -r "$W/next" "$W/changed"
+printf x >> "$W/changed/ergosumd-linux-$arch"
+if out=$(install_release "$W/changed" 2>&1); then fail "installed a changed file: $out"; fi
+echo "$out" | grep -q 'does not match SHA256SUMS' || fail "changed file: $out"
+[ "$(installed)" = "$old" ] || fail "binary replaced by a refused release"
+
+install_release "$W/next" || fail "update to $new failed"
+[ "$(installed)" = "$new" ] || fail "installed $(installed), not $new"
+[ "$("$W/bin/ergosumd.old" version | awk '{print $2}')" = "$old" ] || fail "previous binary not kept"
+grep -q "^machine_identity_build_info{version=\"$new\"," "$W/host1/run/ergosum.prom" || fail "daemon does not report $new"
+install_release "$W/next" | grep -q 'already installed' || fail "same version installed again"
+
+release older "$BIN/ergosumd"
+if out=$(install_release "$W/older" 2>&1); then fail "installed an older version: $out"; fi
+echo "$out" | grep -q 'is older than' || fail "older version: $out"
+
+cat > "$W/broken-ergosumd" <<'EOF'
+#!/bin/sh
+# Claims a newer version, but does not run.
+[ "$1" = version ] && { echo "ergosumd v99.0.0 (broken)"; exit 0; }
+exit 1
+EOF
+release broken "$W/broken-ergosumd"
+if out=$(install_release "$W/broken" 2>&1); then fail "broken binary kept: $out"; fi
+echo "$out" | grep -q "$new is back and has a new token" || fail "no way back: $out"
+[ "$(installed)" = "$new" ] || fail "after the way back $(installed) runs, not $new"
 
 log "OK"

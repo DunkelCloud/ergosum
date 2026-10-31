@@ -1,0 +1,114 @@
+name: Release
+
+# A tag vX.Y.Z builds a draft release: the binaries, the image as an
+# archive per platform, and SHA256SUMS over all of them. CI holds no
+# signing key: the release key's holder signs SHA256SUMS on their own
+# machine, attaches SHA256SUMS.sig and publishes the release
+# (docs/releasing.md).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0 # to check where the tag points
+          persist-credentials: false
+      - name: Tag names a release from main
+        run: |
+          echo "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || {
+            echo "$VERSION is not vMAJOR.MINOR.PATCH[-PRERELEASE]"; exit 1; }
+          # Pre-releases may come from a branch under test; releases only
+          # from main.
+          case $VERSION in
+          *-*) ;;
+          *) git merge-base --is-ancestor "$COMMIT" origin/main || {
+               echo "$COMMIT is not on main"; exit 1; } ;;
+          esac
+      # No cache: what another run leaves there must not reach a release.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Build binaries
+        run: |
+          mkdir -p release
+          for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
+            os=${target%/*} arch=${target#*/}
+            cmds=ergosum
+            [ "$os" = linux ] && cmds="ergosum ergosumd"
+            GOOS=$os GOARCH=$arch scripts/build.sh "build/$os-$arch" $cmds
+            for c in $cmds; do
+              ext=
+              [ "$os" = windows ] && ext=.exe
+              cp "build/$os-$arch/$c$ext" "release/$c-$os-$arch$ext"
+            done
+          done
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build image archives
+        run: |
+          for arch in amd64 arm64; do
+            docker buildx build --no-cache --platform "linux/$arch" \
+              --build-arg VERSION="$VERSION" --build-arg COMMIT="$COMMIT" \
+              --tag "ergosum:$VERSION" \
+              --output "type=docker,dest=release/ergosum-image-linux-$arch.tar" .
+          done
+      - name: Images carry the released binaries
+        run: |
+          for arch in amd64 arm64; do
+            docker load -i "release/ergosum-image-linux-$arch.tar"
+            id=$(docker create --platform "linux/$arch" "ergosum:$VERSION")
+            docker cp "$id:/usr/bin/ergosum" "image-ergosum-$arch"
+            docker rm "$id"
+            docker image rm "ergosum:$VERSION"
+            cmp "image-ergosum-$arch" "release/ergosum-linux-$arch"
+          done
+      - name: SHA256SUMS
+        run: |
+          cd release
+          sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS .
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: release
+          path: release/
+          retention-days: 7
+
+  draft:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the draft release, nothing else
+    env:
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: release
+          path: release
+      - name: Create the draft release
+        run: |
+          prerelease=
+          case $VERSION in *-*) prerelease=--prerelease ;; esac
+          {
+            echo "Commit: $COMMIT"
+            echo
+            echo "Not yet signed. Verify with docs/releasing.md once SHA256SUMS.sig is attached."
+          } > notes.md
+          gh release create "$VERSION" --draft $prerelease --verify-tag \
+            --title "$VERSION" --notes-file notes.md release/*

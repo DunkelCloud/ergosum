@@ -15,7 +15,7 @@ out=${1:?usage: scripts/build.sh OUTDIR [COMMAND...]}
 shift
 [ $# -gt 0 ] || set -- ergosum ergosumd
 case $out in
-/*) ;;
+/* | [A-Za-z]:[/\\]*) ;; # absolute, also C:/ or C:\ in Git Bash
 *) out=$PWD/$out ;;
 esac
 cd "$(dirname "$0")/.."

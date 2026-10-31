@@ -45,6 +45,13 @@ type Config struct {
 	// one and insist that those that answer agree; a change goes to the
 	// first reachable one, in order.
 	Authorities []Authority `yaml:"authorities"`
+	// ReleaseKey is the key "ergosum release sign" signs with, like
+	// SignKey. Default: ~/.ssh/ergosum-release.pub.
+	ReleaseKey string `yaml:"release_key"`
+	// ReleaseSigners is the file of keys that may sign releases
+	// (release-signers from the repository). Default on Linux:
+	// /etc/ergosum/release-signers.
+	ReleaseSigners string `yaml:"release_signers"`
 }
 
 // Authority names one authority instance and pins its key.
