@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/x509"
@@ -25,6 +26,12 @@ const (
 	scryptN = 1 << 15
 	scryptR = 8
 	scryptP = 1
+)
+
+// Largest scrypt cost a key file may ask for.
+const (
+	maxScryptMemory = 256 << 20
+	maxScryptP      = 4
 )
 
 // ErrBadPassphrase is returned when an encrypted key cannot be decrypted.
@@ -59,6 +66,9 @@ func ParseKeyFile(data []byte) (*KeyFile, error) {
 		key, err := x509.ParseECPrivateKey(block.Bytes)
 		if err != nil {
 			return nil, err
+		}
+		if key.Curve != elliptic.P256() {
+			return nil, errNotP256
 		}
 		return &KeyFile{Key: key, Public: &key.PublicKey}, nil
 	case pemEncrypted:
@@ -192,8 +202,9 @@ func parseScryptParams(s string) (n, r, p int, err error) {
 			p = x
 		}
 	}
-	// Bound the cost so that a crafted file cannot exhaust memory.
-	if n < 2 || n > 1<<20 || r < 1 || r > 32 || p < 1 || p > 16 {
+	// Bound the cost so that a crafted file cannot exhaust memory or CPU:
+	// scrypt needs 128·N·r bytes and runs p times.
+	if n < 2 || n&(n-1) != 0 || r < 1 || p < 1 || p > maxScryptP || 128*int64(n)*int64(r) > maxScryptMemory {
 		return 0, 0, 0, fmt.Errorf("keys: KDF-Params out of range: %q", s)
 	}
 	return n, r, p, nil
