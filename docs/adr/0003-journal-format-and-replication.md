@@ -268,7 +268,9 @@ within an overall limit (60 lines per minute), but never the journal.
 Rejected binding writes share that limit.
 `wrong_location`, `replay` and `misdirected` can be repeated at will by a
 holder of the key and are journaled once per identity and minute; `issued` and
-`key_duplicate` always.
+`key_duplicate` always. A holder of the key gets at most 10 requests and
+then one per minute processed per instance, one at a time; the refusals
+beyond (`rate_limited`) are never journaled.
 
 ### Checkpoints and compaction
 

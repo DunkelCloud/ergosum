@@ -161,3 +161,46 @@ func TestKeyMode(t *testing.T) {
 		}
 	}
 }
+
+// TestIdentityLimit: one request of an identity at a time, a burst, then one
+// per interval; other identities are not affected.
+func TestIdentityLimit(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	l := newIdentityLimit(3, time.Minute)
+	release, ok := l.acquire("host1", now)
+	if !ok {
+		t.Fatal("first request refused")
+	}
+	if _, ok := l.acquire("host1", now); ok {
+		t.Fatal("second request in flight admitted")
+	}
+	if r, ok := l.acquire("host2", now); !ok {
+		t.Fatal("another identity refused")
+	} else {
+		r()
+	}
+	release()
+	for i := 1; i < 3; i++ {
+		r, ok := l.acquire("host1", now)
+		if !ok {
+			t.Fatalf("request %d of the burst refused", i+1)
+		}
+		r()
+	}
+	if _, ok := l.acquire("host1", now.Add(30*time.Second)); ok {
+		t.Fatal("request beyond the burst admitted")
+	}
+	r, ok := l.acquire("host1", now.Add(time.Minute))
+	if !ok {
+		t.Fatal("request after an interval refused")
+	}
+	r()
+	if _, ok := l.acquire("host1", now.Add(time.Minute)); ok {
+		t.Fatal("second request after one interval admitted")
+	}
+	// Idle identities are forgotten once their rate is restored.
+	l.acquire("host3", now.Add(10*time.Minute))
+	if len(l.ids) != 1 {
+		t.Fatalf("%d identities kept", len(l.ids))
+	}
+}
