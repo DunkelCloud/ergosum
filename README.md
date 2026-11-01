@@ -67,3 +67,7 @@ rebuild a published binary and compare it.
 
 Releases are signed with an SSH key listed in
 [`release-signers`](release-signers); see [Releases](docs/releasing.md).
+
+## License
+
+Apache License 2.0; see [`LICENSE`](LICENSE).
