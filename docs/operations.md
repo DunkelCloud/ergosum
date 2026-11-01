@@ -97,8 +97,11 @@ then.
 the first token the daemon takes the [authority list](#authority-list)
 that the instance serves, keeps it as `authorities.json` in `state_dir`,
 and from then on tries the listed instances in their order, the configured
-ones last. It takes a newer list (higher serial) from any listed instance,
-and any list from a configured instance that the list in use does not name;
+ones last. An anchor that cannot run the machine's `net` checks answers
+"not responsible"; a daemon without a list then takes the anchor's list
+at once and asks the instances that can. It takes a newer list (higher
+serial) from any listed instance, and any list from a configured instance
+that the list in use does not name;
 so a new anchor in the configuration replaces a list from an old trust
 domain. Of an instance's URLs the daemon tries only those it can reach from
 its own addresses: an overlay address needs an overlay address on the
@@ -219,9 +222,25 @@ on a host of its own or on a shared host.
 - `tailnet` callbacks must reach an overlay address (`callbacks.tailnet.prefixes`).
 - `ip` and `net` callbacks must neither reach nor leave from an overlay
   address.
-- `net` checks run only for prefixes inside `callbacks.networks`, the
-  networks attached directly to this instance; other instances answer
-  "not responsible" and the daemon moves on.
+- `net` checks run only for prefixes inside `callbacks.networks`; other
+  instances answer "not responsible" and the daemon moves on.
+
+Each entry of `callbacks.networks` names a network and the `source`
+address and `interface` its callbacks leave from. The authority does not
+check how the network is reached, so one instance can serve many networks
+or VLANs:
+
+- **Attached:** the instance has an address in the network, on an
+  interface of its own or on a VLAN subinterface of a trunk, one per VLAN,
+  without routing between them. A callback reaches only that segment; this
+  is the strongest form.
+- **Routed:** the instance reaches the networks through a router of your
+  own; list them, or one prefix that covers them, with the interface
+  towards the router. A check then shows that the machine answers at its
+  address as that router delivers it. That is weaker than an attached
+  segment and holds only while no other path carries the prefix, such as a
+  VPN with an overlapping network. Allow the callback port from `source`
+  into those networks.
 
 ### Metrics and audit
 

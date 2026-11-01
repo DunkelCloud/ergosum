@@ -286,7 +286,10 @@ after the real machine restarted, never a token.
 - `ip` and `net` callbacks must neither reach an overlay address nor leave
   from one, so that an exit node or overlay route cannot carry an underlay
   check. Source address and interface per check kind are configurable.
-- A `net` check runs only on an instance attached to that network.
+- A `net` check runs only on an instance attached to that network: one
+  whose configuration names it, with the source address and interface its
+  callbacks leave from. Directly or through a router of the operator's is
+  the operator's choice (see operations).
 
 ### Authority list
 
@@ -313,6 +316,11 @@ preference, and a serial from 1 to 2^53−1. Without a list it answers 404
   or new instances after a restart). The daemon keeps the list in its state
   directory and tries its instances in list order, then the configured ones
   it does not name. Callbacks are accepted only from these instances.
+- Until it has a list, a daemon also takes one from a configured instance
+  that answers `not_responsible`, and asks the listed instances in the same
+  round: a new machine with a `net` check would otherwise wait forever for
+  a first token from an anchor that cannot run that check. The list must
+  name that instance; its trust domain is checked with the next token.
 - The list is as trustworthy as the pinned connection to an instance the
   daemon already trusts. A wrong list can keep a daemon from reaching an
   authority, but cannot make it accept a token or let another instance use
