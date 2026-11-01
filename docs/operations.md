@@ -13,15 +13,19 @@ All addresses below are documentation examples (RFC 5737, RFC 3849).
 
 The daemon runs as `ergosum`, the authority as `ergosum-authority`: on a
 host with both, a daemon that is taken over reaches neither the signing
-key nor the journal. Create the users and groups with
-`deploy/sysusers.d/ergosum.conf` (systemd), or on Alpine:
+key nor the journal. On a new machine `deploy/install.sh` creates the
+daemon's user and group (see [Daemon](#daemon)). By hand: with
+`deploy/sysusers.d/ergosum.conf` and, for an authority,
+`ergosum-authority.conf` (systemd), or on Alpine:
 
 ```sh
 addgroup -S ergosum-token
-adduser -S -D -H -h /var/lib/ergosum -s /sbin/nologin ergosum
+addgroup -S ergosum
+adduser -S -D -H -h /var/lib/ergosum -s /sbin/nologin -G ergosum ergosum
 addgroup ergosum ergosum-token
 addgroup vault ergosum-token   # the user Vault Agent runs as
-adduser -S -D -H -h /var/lib/ergosum-authority -s /sbin/nologin ergosum-authority   # authorities only
+addgroup -S ergosum-authority   # authorities only
+adduser -S -D -H -h /var/lib/ergosum-authority -s /sbin/nologin -G ergosum-authority ergosum-authority
 ```
 
 Upgrading an authority that ran as `ergosum`: stop it, move
@@ -40,17 +44,41 @@ carries (see [Backups](#backups)).
 
 ## Daemon
 
-1. Install `ergosumd`, write `/etc/ergosum/ergosumd.yaml`
-   (`examples/ergosumd.yaml`).
+A new machine, as root:
+
+```sh
+curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
+sh install.sh --anchor 'SHA256:...@https://100.64.0.10:7432'
+```
+
+`--anchor` names one authority instance: its key fingerprint and its URLs,
+separated by commas (see `authorities` below). The identity is the
+machine's `hostname -f`; `--identity` gives another. The script
+([Releases](releasing.md#installing-and-updating)) installs `ergosumd` from
+the latest signed release and creates what is missing: the user `ergosum`
+and the group `ergosum-token`, the state directory, the systemd unit or
+OpenRC script, and `/etc/ergosum/ergosumd.yaml` with the identity and the
+anchor. Then it starts the daemon and prints the binding request for the
+administrators (see [Administration](#administration)). Once they have
+recorded the binding, the daemon receives its token on its own: until then
+it asks again at intervals of up to five minutes. Run the same line again, and it
+changes nothing that is there and prints the request again.
+
+Allow TCP 7433 (or the configured callback port) from the authorities'
+source addresses only. The listener is open only while a request is in
+flight.
+
+By hand instead:
+
+1. Install `ergosumd`, create the users (see
+   [Users and directories](#users-and-directories)) and write
+   `/etc/ergosum/ergosumd.yaml` (`examples/ergosumd.yaml`).
 2. `sudo -u ergosum ergosumd request -out host1.txt` creates the key on
-   first use and writes the binding request for the administrators (see
-   [Administration](#administration)); `ergosumd fingerprint` prints only the
-   fingerprint. Run both as the service user: a key created by root belongs
-   to root, and the service cannot read it.
-3. Allow TCP 7433 (or the configured callback port) from the authorities'
-   source addresses only. The listener is open only while a request is in
-   flight.
-4. Start the service. The daemon requests a token, writes it to
+   first use and writes the binding request for the administrators;
+   `ergosumd fingerprint` prints only the fingerprint. Run both as the
+   service user: a key created by root belongs to root, and the service
+   cannot read it.
+3. Start the service. The daemon requests a token, writes it to
    `/run/ergosum/token`, and renews it from half its lifetime on.
 
 `addresses` may stay empty: the daemon reports its global unicast addresses
@@ -565,12 +593,14 @@ keys and certificates are refused.
 
 ### Enrollment
 
-1. Install `ergosumd` and its configuration; `sudo -u ergosum ergosumd
-   request -out host1.txt` creates the key and writes the request.
+1. On the machine, `install.sh --anchor ...` (see [Daemon](#daemon))
+   installs and starts `ergosumd` and prints the request. Save it as
+   `host1.txt` where the administrators run `ergosum`.
 2. Administrators adjust the checks and record the binding with `ergosum
    bind`. The machine needs no bootstrap secret.
-3. Start `ergosumd`; check that `/run/ergosum/token` appears and that the
-   authority's audit log shows `issued` with every check.
+3. Check that `/run/ergosum/token` appears on the machine within a few
+   minutes and that the authority's audit log shows `issued` with every
+   check.
 4. Store the machine's backup settings in Vault and, while the role names
    its identities, add the identity there (see [Vault](#vault)).
 
