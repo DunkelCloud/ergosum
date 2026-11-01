@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/authority"
+	"github.com/DunkelCloud/ergosum/internal/daemon"
 	"github.com/DunkelCloud/ergosum/internal/journal"
 	jt "github.com/DunkelCloud/ergosum/internal/journal/journaltest"
 	"github.com/DunkelCloud/ergosum/internal/jwt"
@@ -688,6 +689,53 @@ func TestNetCheckNeedsAttachedNetwork(t *testing.T) {
 	}
 	requireCount(t, remote.auth, authority.ResultIssued, 0)
 	requireCount(t, local.auth, authority.ResultIssued, 1)
+}
+
+// TestNetCheckFromAnchorOnly: a new machine that knows only an anchor
+// without the segment takes the anchor's list when it answers "not
+// responsible", and reaches the instance that has the segment in the same
+// round. Without a list from the anchor, the round ends with "not
+// responsible".
+func TestNetCheckFromAnchorOnly(t *testing.T) {
+	sim := newSimNet()
+	admins := jt.NewAdmins(t, "alice", "bob", "carol")
+	remote := prepareEnv(t, envOptions{instance: "authority-remote", net: sim, admins: admins})
+	local := prepareEnv(t, envOptions{instance: "authority-local", net: sim, admins: admins, networks: []string{segment}})
+	list := filepath.Join(t.TempDir(), "authorities.yaml")
+	writeList(t, list, 1, listed{e: remote}, listed{e: local})
+	remote.start()
+	local.cfg.AuthoritiesFile = list
+	local.start()
+	opts := machineOptions{
+		targets:     []string{at(host2Tailnet), at(host2Addr)},
+		addresses:   []string{host2Addr},
+		authorities: []*env{remote},
+	}
+	m := remote.machine(host2, opts)
+	for _, e := range []*env{remote, local} {
+		e.bind(host2, m.d.Fingerprint(), 1, tailnetCheck(host2Tailnet), netCheck(segment))
+	}
+	ctx := context.Background()
+
+	var re *daemon.RequestError
+	if _, _, err := m.d.Obtain(ctx); !errors.As(err, &re) || re.Code != protocol.ErrNotResponsible {
+		t.Fatalf("anchor without a list: %v", err)
+	}
+	if got := storedSerial(t, m); got != 0 {
+		t.Fatalf("stored serial %d without a list", got)
+	}
+
+	remote.stop()
+	remote.cfg.AuthoritiesFile = list
+	remote.start()
+	if _, _, err := m.d.Obtain(ctx); err != nil {
+		t.Fatalf("through the anchor's list: %v", err)
+	}
+	requireCount(t, remote.auth, authority.ResultIssued, 0)
+	requireCount(t, local.auth, authority.ResultIssued, 1)
+	if got := storedSerial(t, m); got != 1 {
+		t.Fatalf("stored serial %d, want the anchor's 1", got)
+	}
 }
 
 // observations decodes the journal's observations of one kind.

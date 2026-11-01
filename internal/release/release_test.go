@@ -65,6 +65,31 @@ func TestRepositorySigners(t *testing.T) {
 	}
 }
 
+// deploy/install.sh carries release-signers for machines that have none
+// yet; the two must not drift apart.
+func TestInstallScriptSigners(t *testing.T) {
+	want, err := os.ReadFile("../../release-signers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile("../../deploy/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const start, end = "release_signers() {\n\tcat <<'EOF'\n", "EOF\n}\n"
+	_, rest, ok := strings.Cut(string(script), start)
+	if !ok {
+		t.Fatal("no release_signers in deploy/install.sh")
+	}
+	got, _, ok := strings.Cut(rest, end)
+	if !ok {
+		t.Fatal("release_signers in deploy/install.sh does not end")
+	}
+	if got != string(want) {
+		t.Errorf("release_signers in deploy/install.sh differs from release-signers:\n%s", got)
+	}
+}
+
 func TestVerify(t *testing.T) {
 	key, other := newSigner(t), newSigner(t)
 	sums := []byte("0000000000000000000000000000000000000000000000000000000000000000  ergosumd-linux-amd64\n")

@@ -43,6 +43,21 @@ Both are static Go binaries without cgo for `linux/amd64` and `linux/arm64`;
 The authority also ships as an OCI image that runs as a non-root user on a
 read-only root filesystem.
 
+## Installing
+
+On a machine, as root, with the machines' domain and an authority's key
+fingerprint and URL:
+
+```sh
+curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
+sh install.sh --domain example.com --anchor 'SHA256:...@https://192.0.2.10:7432'
+```
+
+The script installs `ergosumd` from the latest signed release, sets up its
+user, service and configuration, starts it and prints the binding request
+for the administrators; see [Operations](docs/operations.md#daemon). The
+same script updates the machine later.
+
 ## Documentation
 
 - [Operations](docs/operations.md): installation, modes of operation, unsealing, metrics, audit, Vault

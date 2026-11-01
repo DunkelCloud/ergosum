@@ -17,6 +17,8 @@ who signs on their own machine. The builds are reproducible
 | `ergosum-linux-{amd64,arm64}` | the authority and the administrator tool |
 | `ergosum-{windows,darwin}-{amd64,arm64}[.exe]` | the administrator tool |
 | `ergosum-image-linux-{amd64,arm64}.tar` | the OCI image, for `docker load` |
+| `install.sh` | [`deploy/install.sh`](../deploy/install.sh), the installer |
+| `ergosumd.service`, `ergosumd.openrc`, `ergosum.sysusers` | systemd unit, OpenRC script and sysusers file of the daemon, which the installer sets up on a new machine |
 | `SHA256SUMS`, `SHA256SUMS.sig` | checksums and their signature |
 
 ## Verifying a release
@@ -53,27 +55,36 @@ sha256sum /tmp/rebuild/ergosumd
 
 ## Installing and updating
 
-Once per machine, as root, install the release keys:
+On the machine, as root:
 
 ```sh
-install -m 0644 release-signers /etc/ergosum/release-signers
+curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
+sh install.sh                      # the daemon, latest release
+sh install.sh --version vX.Y.Z     # the daemon, a given release
 ```
 
-Then copy the release files and [`deploy/install.sh`](../deploy/install.sh)
-to the machine and run it as root:
+The script downloads the release with `curl` or `wget`. Where the files
+are already on the machine, it takes them from their directory instead:
 
 ```sh
-deploy/install.sh /tmp/ergosum-vX.Y.Z           # the daemon
-deploy/install.sh /tmp/ergosum-vX.Y.Z ergosum   # an authority
+sh install.sh /tmp/ergosum-vX.Y.Z           # the daemon
+sh install.sh /tmp/ergosum-vX.Y.Z ergosum   # an authority
 ```
 
-The script checks the signature against `/etc/ergosum/release-signers` and
-the checksum of every file it installs, refuses an older version unless
-given `--allow-downgrade`, and keeps the installed binary as
+It checks the signature against `/etc/ergosum/release-signers` and the
+checksum of every file it uses, refuses an older version unless given
+`--allow-downgrade`, and keeps the installed binary as
 `/usr/bin/NAME.old`. It restarts `ergosumd` (systemd or OpenRC) and waits
 for a new token; without one it puts the old binary back and restarts it.
-It changes neither configuration nor state. Users, units and configuration
-of a new machine are set up as in [operations](operations.md).
+On a machine that has a token, it changes neither configuration nor state.
+
+A machine without `/etc/ergosum/release-signers` gets the release keys
+that the script carries, the same as `release-signers` in the repository
+at that release; later updates check against them. Whoever does not want
+to trust the download of `install.sh` alone checks it first like any
+release file, against a verified `SHA256SUMS` (above). A machine whose
+daemon has no token yet is set up and started without waiting for one
+(see [operations](operations.md#daemon)).
 
 An authority is not restarted, since it comes back sealed: restart it,
 unseal it, and check `/healthz`. The way back is
@@ -144,7 +155,8 @@ ruleset).
 
 ## Changing the release key
 
-Add the new key as another line to `release-signers`, install the file on
-the machines, and only then sign with the new key. Remove the old line
+Add the new key as another line to `release-signers` and to its copy in
+`deploy/install.sh` (a test compares the two), install the file on the
+machines, and only then sign with the new key. Remove the old line
 once no machine needs it. A key on a security key (`sk-ssh-ed25519`)
 works the same way; nothing else changes.

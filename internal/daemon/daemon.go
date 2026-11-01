@@ -490,8 +490,8 @@ func (b *backoff) next() time.Duration {
 func (b *backoff) reset() { b.n = 0 }
 
 // Obtain performs one request round: it keeps the callback listener open,
-// tries the authorities one after another, each with a fresh request ID,
-// and returns the first token.
+// tries the authorities one after another, each once and with a fresh
+// request ID, and returns the first token.
 func (d *Daemon) Obtain(ctx context.Context) (string, jwt.Claims, error) {
 	if err := d.acquireListener(); err != nil {
 		return "", jwt.Claims{}, err
@@ -499,22 +499,45 @@ func (d *Daemon) Obtain(ctx context.Context) (string, jwt.Claims, error) {
 	defer d.releaseListener()
 
 	var errs []error
-	authorities, preferred := d.snapshot()
-	n := len(authorities)
-	for i := 0; i < n; i++ {
-		a := authorities[(preferred+i)%n]
+	tried := map[string]bool{}
+	for {
+		authorities, preferred := d.snapshot()
+		a := untried(authorities, preferred, tried)
+		if a == nil {
+			break
+		}
+		tried[a.pin] = true
 		token, claims, err := d.request(ctx, a)
 		if err == nil {
 			d.setPreferred(a)
-			d.refreshList(ctx, a, claims)
+			d.refreshList(ctx, a, trustDomainOf(claims))
 			return token, claims, nil
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", a.name(), err))
 		if ctx.Err() != nil {
 			break
 		}
+		// Until its first token a new machine knows only its anchor. An
+		// anchor that cannot run a net check names the instances that can,
+		// and the round goes on with them.
+		var re *RequestError
+		if errors.As(err, &re) && re.Code == protocol.ErrNotResponsible {
+			d.refreshList(ctx, a, "")
+		}
 	}
 	return "", jwt.Claims{}, errors.Join(errs...)
+}
+
+// untried returns the first authority from the preferred one on that the
+// round has not tried yet; nil once it tried all. The authorities change
+// when the round takes a list.
+func untried(authorities []*authorityClient, preferred int, tried map[string]bool) *authorityClient {
+	for i := range authorities {
+		if a := authorities[(preferred+i)%len(authorities)]; !tried[a.pin] {
+			return a
+		}
+	}
+	return nil
 }
 
 // RequestError is a refusal by an authority.

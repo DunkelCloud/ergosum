@@ -72,6 +72,24 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
+  install:
+    # A new machine set up by deploy/install.sh from a downloaded, signed
+    # release, in Debian, Ubuntu 20.04 and Alpine containers: users, state
+    # directory, service, release keys, configuration, binding request, a
+    # second run that keeps everything, and refused runs that change nothing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: VERSION=v0.1.0 scripts/build.sh dist ergosumd
+      - name: First installation in containers
+        run: BIN="$PWD/dist" bash test/install/run.sh
+
   netns:
     # The real binaries in Linux network namespaces: sealed start and
     # unseal, an SSH-signed binding, issuance with a net check, a clone

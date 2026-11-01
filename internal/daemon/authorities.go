@@ -178,13 +178,23 @@ func (d *Daemon) loadList() *protocol.AuthorityList {
 	return &l
 }
 
-// refreshList asks the instance that just issued a token for its list. A
-// list replaces the one in use if its serial is higher, or if this
-// instance was reached through the configuration and is missing from the
-// list in use (the configuration names a new trust domain or new
+// refreshList asks an instance for its list: one that just issued a token
+// for trustDomain, or, with trustDomain empty, one that is not responsible
+// for a net check. A list replaces the one in use if its serial is higher,
+// or if this instance was reached through the configuration and is missing
+// from the list in use (the configuration names a new trust domain or new
 // instances). It must name the instance that serves it, for the trust
-// domain of the token.
-func (d *Daemon) refreshList(ctx context.Context, a *authorityClient, claims jwt.Claims) {
+// domain of the token. Without a token the list is taken only while none
+// is in use: the first one of a new machine, whose anchor cannot run its
+// net checks. The pinned connection vouches for it as much as after a
+// token, and the next token checks its trust domain.
+func (d *Daemon) refreshList(ctx context.Context, a *authorityClient, trustDomain string) {
+	d.amu.Lock()
+	cur := d.list
+	d.amu.Unlock()
+	if trustDomain == "" && cur != nil {
+		return
+	}
 	resp, err := d.do(ctx, a, func(base string) (*http.Request, error) {
 		return http.NewRequestWithContext(ctx, http.MethodGet, base+protocol.PathAuthorities, http.NoBody)
 	})
@@ -207,8 +217,8 @@ func (d *Daemon) refreshList(ctx context.Context, a *authorityClient, claims jwt
 	if err == nil {
 		err = l.Validate()
 	}
-	if err == nil && l.TrustDomain != trustDomainOf(claims) {
-		err = fmt.Errorf("list for %s, token for %s", l.TrustDomain, trustDomainOf(claims))
+	if err == nil && trustDomain != "" && l.TrustDomain != trustDomain {
+		err = fmt.Errorf("list for %s, token for %s", l.TrustDomain, trustDomain)
 	}
 	if err == nil && !l.Lists(a.pin) {
 		err = errors.New("the list does not name the instance that serves it")
@@ -218,9 +228,11 @@ func (d *Daemon) refreshList(ctx context.Context, a *authorityClient, claims jwt
 		return
 	}
 	d.amu.Lock()
-	cur := d.list
+	cur = d.list
 	d.amu.Unlock()
 	switch {
+	case trustDomain == "" && cur != nil:
+		return
 	case cur == nil, !cur.Lists(a.pin), cur.TrustDomain != l.TrustDomain, l.Serial > cur.Serial:
 	case l.Serial == cur.Serial && !l.Same(cur):
 		d.log.Warn("authorities serve different lists with the same serial; keeping the one in use",
