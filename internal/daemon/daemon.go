@@ -700,8 +700,12 @@ func (d *Daemon) detectAddresses() []ifaceAddr {
 
 // virtualInterfacePrefixes name interfaces of containers, hypervisor bridges
 // and tunnels. Their addresses are reported after the others, so that a host
-// full of bridges still names the address of its real network first.
-var virtualInterfacePrefixes = []string{"docker", "br-", "veth", "virbr", "podman", "cni", "flannel", "lxc", "lxd", "tailscale", "wg", "tun", "tap", "zt"}
+// full of bridges still names the address of its real network first. The
+// second line is macOS: tunnels of Tailscale and other VPNs, the bridges of
+// Internet Sharing and virtual machines, Apple's peer-to-peer Wi-Fi,
+// VMware Fusion, VirtualBox and ZeroTier.
+var virtualInterfacePrefixes = []string{"docker", "br-", "veth", "virbr", "podman", "cni", "flannel", "lxc", "lxd", "tailscale", "wg", "tun", "tap", "zt",
+	"utun", "bridge", "awdl", "llw", "vmnet", "vboxnet", "feth"}
 
 func virtualInterface(name string) bool {
 	for _, p := range virtualInterfacePrefixes {

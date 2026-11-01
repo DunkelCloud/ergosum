@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -124,11 +126,37 @@ func configured(addrs []string, detected []ifaceAddr) []ifaceAddr {
 	return out
 }
 
+// tailscaleCLIs are where the Tailscale client is when it is not in PATH,
+// by GOOS. On macOS launchd starts the daemon with
+// PATH=/usr/bin:/bin:/usr/sbin:/sbin; the client is the CLI in the app
+// (App Store and standalone versions) or Homebrew's (Intel, Apple Silicon).
+var tailscaleCLIs = map[string][]string{
+	"darwin": {
+		"/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+		"/usr/local/bin/tailscale",
+		"/opt/homebrew/bin/tailscale",
+	},
+}
+
+// tailscaleCLI returns the Tailscale client to run: tailscale in PATH,
+// else the first of tailscaleCLIs[goos] that exists.
+func tailscaleCLI(goos string) string {
+	if p, err := exec.LookPath("tailscale"); err == nil {
+		return p
+	}
+	for _, p := range tailscaleCLIs[goos] {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			return p
+		}
+	}
+	return "tailscale"
+}
+
 // tailnetName asks the Tailscale client for the machine's name.
 func tailnetName(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json", "--peers=false").Output()
+	out, err := exec.CommandContext(ctx, tailscaleCLI(runtime.GOOS), "status", "--json", "--peers=false").Output() //nolint:gosec // a fixed list of places
 	if err != nil {
 		return "", fmt.Errorf("tailscale status: %w", err)
 	}
