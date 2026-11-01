@@ -50,7 +50,9 @@ next=$("$NEXT/ergosumd" version | awk '{print $2}')
 arch=$(uname -m | sed 's/x86_64/amd64/')
 
 log "releases $version and $next, signed with a test key"
-"$ROOT/test/install/release.sh" "$W" darwin "$arch" "$BIN" "$NEXT"
+# $version is the latest, so that the runs of machine.sh without --version
+# stay with it; the update names $next.
+"$ROOT/test/install/release.sh" "$W" darwin "$arch" "$NEXT" "$BIN"
 (cd "$W/www" && exec python3 -m http.server 8000 --bind 127.0.0.1) >"$W/web.log" 2>&1 &
 PIDS="$PIDS $!"
 URL=http://127.0.0.1:8000
