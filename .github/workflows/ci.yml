@@ -109,12 +109,12 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test without cgo, as released
-        # Without the authority's replication tests: on macOS, where no
-        # authority is released, TestReplicatedBindingHoldsEverywhere waits
-        # for an instance that does not get ready, and its shutdown hangs.
-        run: |
-          skip=$(sed -n 's/^func \(Test[A-Za-z0-9]*\)(t \*testing.T) {$/\1/p' internal/e2e/replication_test.go | paste -s -d '|' -)
-          CGO_ENABLED=0 go test -count=1 -timeout 5m -skip "^($skip)\$" ./...
+        # macOS's TMPDIR (/var/folders/...) and a long test name make the
+        # authority's control socket path longer than the 104 bytes macOS
+        # allows; /tmp keeps it short.
+        env:
+          TMPDIR: /tmp
+        run: CGO_ENABLED=0 go test -count=1 -timeout 5m ./...
       - name: Build
         run: |
           VERSION=v0.1.0 scripts/build.sh dist
