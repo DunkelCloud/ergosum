@@ -17,15 +17,16 @@
 #     puts the old binary back and restarts again.
 #
 # A machine whose ergosumd has no token yet, a new one above all, gets
-# what is missing of the users, the state directory, the service (systemd
-# or OpenRC) and the configuration, which the script writes from --anchor
-# and the identity. Then it starts ergosumd without waiting for a token and
-# prints the binding request for the administrators. Once they have
-# recorded the binding, the daemon receives its token on its own. The
-# identity is a DNS name in lower case, such as host1.example.com; it need
-# not resolve. --domain example.com makes it the host name in that domain,
-# the same on every machine; without it, hostname -f must give a full name.
-# A run that refuses its options changes nothing.
+# what is missing of the users, the state directory, the service (systemd,
+# OpenRC or, on macOS, launchd) and the configuration, which the script
+# writes from --anchor and the identity. Then it starts ergosumd without
+# waiting for a token and prints the binding request for the
+# administrators. Once they have recorded the binding, the daemon receives
+# its token on its own. The identity is a DNS name in lower case, such as
+# host1.example.com; it need not resolve. --domain example.com makes it the
+# host name in that domain, the same on every machine; without it,
+# hostname -f must give a full name, and not a .local one. A run that
+# refuses its options changes nothing.
 #
 # An authority (ergosum) is not restarted: after a restart it is sealed.
 # Restart and unseal it by hand; BINARY.old stays for the way back.
@@ -47,11 +48,11 @@
 #   --config FILE       daemon configuration (default
 #                       /etc/ergosum/ergosumd.yaml)
 #
-# BINDIR (default /usr/bin) and RESTART_CMD (a shell command that starts or
-# restarts ergosumd; default systemd or OpenRC) serve other layouts and tests.
+# BINDIR (default /usr/bin, on macOS /usr/local/bin) and RESTART_CMD (a
+# shell command that starts or restarts ergosumd; default systemd, OpenRC
+# or launchd) serve other layouts and tests.
 set -eu
 
-BINDIR=${BINDIR:-/usr/bin}
 signers=
 config=/etc/ergosum/ergosumd.yaml
 url=https://github.com/DunkelCloud/ergosum/releases
@@ -113,13 +114,40 @@ for b in "$@"; do
 	esac
 done
 
-[ "$(uname -s)" = Linux ] || die "Linux only"
+case $(uname -s) in
+Linux) os=linux ;;
+Darwin) os=darwin ;;
+*) die "Linux and macOS only" ;;
+esac
 case $(uname -m) in
 x86_64 | amd64) arch=amd64 ;;
 aarch64 | arm64) arch=arm64 ;;
 *) die "unsupported architecture $(uname -m)" ;;
 esac
+# A shell under Rosetta sees x86_64 on Apple Silicon.
+if [ "$os" = darwin ] && [ "$(sysctl -in hw.optional.arm64)" = 1 ]; then
+	arch=arm64
+fi
 command -v ssh-keygen >/dev/null || die "ssh-keygen (OpenSSH 8.1 or later) is needed to check the signature"
+
+# Where things go. macOS keeps /usr/bin for itself, has no /run that its
+# service manager would create for the daemon, and names system accounts
+# with a leading underscore; the daemon's defaults (state_dir, token_file)
+# follow the same layout.
+if [ "$os" = darwin ]; then
+	BINDIR=${BINDIR:-/usr/local/bin}
+	svc_user=_ergosum
+	label=io.github.dunkelcloud.ergosumd
+	plist=/Library/LaunchDaemons/$label.plist
+	logdir=/var/log/ergosum
+	state_default=/var/db/ergosum/state
+	token_default=/var/db/ergosum/token
+else
+	BINDIR=${BINDIR:-/usr/bin}
+	svc_user=ergosum
+	state_default=/var/lib/ergosum
+	token_default=/run/ergosum/token
+fi
 
 # Value of a top-level key in the daemon configuration, without quotes.
 config_value() {
@@ -139,7 +167,7 @@ is_name() {
 }
 
 token=$(config_value token_file)
-token=${token:-/run/ergosum/token}
+token=${token:-$token_default}
 metrics=$(config_value metrics_file)
 
 # A daemon without a token has nothing to prove after an update: it is
@@ -171,6 +199,9 @@ if [ -n "$unbound" ] && [ ! -e "$config" ]; then
 		die "identity \"$identity\" from $from is not a full DNS name in lower case, such as host1.example.com; $hint"
 	[ "${identity%%.*}" != localhost ] ||
 		die "identity \"$identity\" from $from names no machine; $hint"
+	# A Mac without a host name of its own gives its Bonjour name.
+	[ "$from" != "hostname -f" ] || [ "${identity%.local}" = "$identity" ] ||
+		die "identity \"$identity\" from $from is a multicast DNS name (.local), not one in the machines' domain; $hint"
 elif [ -n "$anchor$identity$domain" ]; then
 	say "$config exists and stays; --anchor, --identity and --domain are not used"
 fi
@@ -201,9 +232,14 @@ if [ -z "$dir" ]; then
 	fi
 	files="SHA256SUMS SHA256SUMS.sig"
 	for b in "$@"; do
-		files="$files $b-linux-$arch"
+		files="$files $b-$os-$arch"
 	done
-	[ -z "$unbound" ] || files="$files ergosumd.service ergosumd.openrc ergosum.sysusers"
+	if [ -n "$unbound" ]; then
+		case $os in
+		darwin) files="$files ergosumd.plist" ;;
+		*) files="$files ergosumd.service ergosumd.openrc ergosum.sysusers" ;;
+		esac
+	fi
 	say "downloading ${version:-the latest release} from $url"
 	for f in $files; do
 		fetch "$base/$f" "$dir/$f" || die "downloading $base/$f failed"
@@ -227,9 +263,18 @@ out=$(ssh-keygen -Y verify -f "$signers" -I release -n ergosum-release \
 	die "signature over $dir/SHA256SUMS does not verify against ${pin:+the release keys in this script}${pin:-$signers}: $out"
 say "signature over SHA256SUMS verified"
 if [ -n "$pin" ]; then
-	install -D -m 0644 "$signers" /etc/ergosum/release-signers
+	install -d -m 0755 /etc/ergosum
+	install -m 0644 "$signers" /etc/ergosum/release-signers
 	say "release keys of this script kept in /etc/ergosum/release-signers for updates"
 fi
+
+sha256() {
+	if command -v sha256sum >/dev/null; then
+		sha256sum "$1"
+	else
+		shasum -a 256 "$1" # macOS
+	fi | awk '{print $1}'
+}
 
 # checked FILE: a private copy of the release file in $ck, checked against
 # SHA256SUMS, so that it cannot change between the check and its use.
@@ -238,8 +283,12 @@ checked() {
 	ck_want=$(awk -v f="$1" '$2 == f || $2 == "*" f {n++; h = $1} END {if (n == 1) print h}' "$dir/SHA256SUMS")
 	[ -n "$ck_want" ] || die "$1 is not listed once in SHA256SUMS"
 	cp "$dir/$1" "$ck/$1"
-	ck_got=$(sha256sum "$ck/$1" | awk '{print $1}')
+	ck_got=$(sha256 "$ck/$1")
 	[ "$ck_got" = "$ck_want" ] || die "$1 does not match SHA256SUMS"
+	# A browser's download carries a quarantine flag, which keeps macOS
+	# from running the binary; the signature checked above stands in for
+	# Gatekeeper's check.
+	[ "$os" != darwin ] || xattr -c "$ck/$1"
 }
 
 semver='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
@@ -275,9 +324,21 @@ EOF
 
 version_of() { "$1" version 2>/dev/null | awk 'NR == 1 {print $2}'; }
 
+# launchd_restart: (re)starts the launchd job, which launchd loads first
+# if it does not have it.
+launchd_restart() {
+	if launchctl print "system/$label" >/dev/null 2>&1; then
+		launchctl kickstart -k "system/$label"
+	else
+		launchctl bootstrap system "$plist" # starts it (RunAtLoad)
+	fi
+}
+
 restart_daemon() {
 	if [ -n "${RESTART_CMD:-}" ]; then
 		sh -c "$RESTART_CMD"
+	elif [ "$os" = darwin ]; then
+		launchd_restart
 	elif [ -d /run/systemd/system ]; then
 		systemctl restart ergosumd
 	elif command -v rc-service >/dev/null; then
@@ -290,7 +351,9 @@ restart_daemon() {
 # as_ergosum CMD [ARG...]: runs CMD as the daemon's user, which has no
 # login shell.
 as_ergosum() {
-	if command -v runuser >/dev/null; then
+	if [ "$os" = darwin ]; then
+		sudo -u "$svc_user" -- "$@"
+	elif command -v runuser >/dev/null; then
 		runuser -u ergosum -- "$@"
 	else
 		# BusyBox su takes options anywhere; after -- they are CMD's.
@@ -299,9 +362,55 @@ as_ergosum() {
 	fi
 }
 
-# ensure_users: the daemon's user ergosum, and the group ergosum-token
-# whose members (Vault Agent's user) read the token.
+# free_id: the highest ID below 500, the range of macOS system accounts,
+# that no user and no group has. Apple hands out its IDs from below.
+free_id() {
+	{ dscl . -list /Users UniqueID; dscl . -list /Groups PrimaryGroupID; } |
+		awk '{used[$2] = 1} END {for (i = 499; i >= 200; i--) if (!(i in used)) {print i; exit 0}; exit 1}'
+}
+
+# ensure_users_darwin: the user _ergosum with a group of its own, the same
+# ID for both, and the group ergosum-token, as macOS keeps system accounts:
+# an ID below 500, no password, no login shell, hidden.
+ensure_users_darwin() {
+	eu_changed=
+	if ! dscl . -read /Groups/ergosum-token PrimaryGroupID >/dev/null 2>&1; then
+		eu_id=$(free_id) || die "no free ID below 500 for the group ergosum-token"
+		dscl . -create /Groups/ergosum-token RealName "ergosum token readers"
+		dscl . -create /Groups/ergosum-token Password '*'
+		dscl . -create /Groups/ergosum-token PrimaryGroupID "$eu_id"
+		eu_changed=yes
+	fi
+	if ! dscl . -read /Users/_ergosum UniqueID >/dev/null 2>&1; then
+		eu_id=$(free_id) || die "no free ID below 500 for the user _ergosum"
+		dscl . -create /Groups/_ergosum RealName "ergosum machine identity daemon"
+		dscl . -create /Groups/_ergosum Password '*'
+		dscl . -create /Groups/_ergosum PrimaryGroupID "$eu_id"
+		dscl . -create /Users/_ergosum RealName "ergosum machine identity daemon"
+		dscl . -create /Users/_ergosum PrimaryGroupID "$eu_id"
+		dscl . -create /Users/_ergosum NFSHomeDirectory /var/empty
+		dscl . -create /Users/_ergosum UserShell /usr/bin/false
+		dscl . -create /Users/_ergosum Password '*'
+		dscl . -create /Users/_ergosum IsHidden 1
+		# Last: a user with a UniqueID is complete, also after an
+		# interrupted run.
+		dscl . -create /Users/_ergosum UniqueID "$eu_id"
+		eu_changed=yes
+	fi
+	if ! dseditgroup -o checkmember -m _ergosum ergosum-token >/dev/null 2>&1; then
+		dseditgroup -o edit -a _ergosum -t user ergosum-token
+		eu_changed=yes
+	fi
+	[ -z "$eu_changed" ] || dscacheutil -flushcache
+}
+
+# ensure_users: the daemon's user (ergosum, on macOS _ergosum), and the
+# group ergosum-token whose members (Vault Agent's user) read the token.
 ensure_users() {
+	if [ "$os" = darwin ]; then
+		ensure_users_darwin
+		return 0
+	fi
 	if command -v systemd-sysusers >/dev/null; then
 		if [ ! -e /etc/sysusers.d/ergosum.conf ]; then
 			checked ergosum.sysusers
@@ -328,9 +437,16 @@ ensure_users() {
 	fi
 }
 
-# install_service: the systemd unit or OpenRC script, unless there is one.
+# install_service: the launchd job, systemd unit or OpenRC script, unless
+# there is one.
 install_service() {
-	if command -v systemctl >/dev/null; then
+	if [ "$os" = darwin ]; then
+		[ ! -e "$plist" ] || return 0
+		checked ergosumd.plist
+		# launchd refuses a job file that is not root's or that others can
+		# change.
+		install -m 0644 -o root -g wheel "$ck/ergosumd.plist" "$plist"
+	elif command -v systemctl >/dev/null; then
 		for u in /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
 			[ ! -e "$u/ergosumd.service" ] || return 0
 		done
@@ -372,6 +488,8 @@ write_config() {
 start_daemon() {
 	if [ -n "${RESTART_CMD:-}" ]; then
 		sh -c "$RESTART_CMD"
+	elif [ "$os" = darwin ]; then
+		launchctl enable "system/$label" && launchd_restart
 	elif [ -d /run/systemd/system ]; then
 		systemctl enable ergosumd && systemctl restart ergosumd
 	elif command -v rc-service >/dev/null; then
@@ -388,8 +506,15 @@ start_daemon() {
 setup() {
 	ensure_users
 	state=$(config_value state_dir)
-	state=${state:-/var/lib/ergosum}
-	[ -d "$state" ] || install -d -o ergosum -g ergosum -m 0700 "$state"
+	state=${state:-$state_default}
+	if [ "$os" = darwin ]; then
+		# launchd creates no directories, as systemd and OpenRC do for the
+		# token; the token's comes first, since the state's is inside it.
+		tokdir=$(dirname "$token")
+		[ -d "$tokdir" ] || install -d -o "$svc_user" -g "$svc_user" -m 0755 "$tokdir"
+		[ -d "$logdir" ] || install -d -o "$svc_user" -g "$svc_user" -m 0755 "$logdir"
+	fi
+	[ -d "$state" ] || install -d -o "$svc_user" -g "$svc_user" -m 0700 "$state"
 	install_service
 	[ -e "$config" ] || write_config
 	if [ -n "$restart" ]; then
@@ -402,6 +527,11 @@ setup() {
 	as_ergosum "$BINDIR/ergosumd" request -config "$config"
 	echo
 	say "checks of kind ip need the callback port (TCP 7433) open to the authorities"
+	fw=/usr/libexec/ApplicationFirewall/socketfilterfw
+	if [ "$os" = darwin ] && "$fw" --getglobalstate 2>/dev/null | grep -q enabled; then
+		say "the application firewall is on; it lets callbacks reach ergosumd after"
+		say "  $fw --add $BINDIR/ergosumd; $fw --unblockapp $BINDIR/ergosumd"
+	fi
 }
 
 # fresh MARKER [VERSION]: a token newer than MARKER and, with a metrics
@@ -425,7 +555,7 @@ wait_fresh() {
 
 installed_daemon=
 for b in "$@"; do
-	file=$b-linux-$arch
+	file=$b-$os-$arch
 	checked "$file"
 	chmod 0755 "$ck/$file"
 
@@ -441,6 +571,7 @@ for b in "$@"; do
 		die "$b $new is older than the installed $cur; use --allow-downgrade"
 	fi
 
+	[ -d "$BINDIR" ] || install -d -m 0755 "$BINDIR" # a new Mac has no /usr/local/bin
 	if [ -e "$BINDIR/$b" ]; then
 		cp -p "$BINDIR/$b" "$BINDIR/$b.old"
 	fi

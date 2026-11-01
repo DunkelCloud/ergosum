@@ -13,12 +13,13 @@ who signs on their own machine. The builds are reproducible
 
 | File | Contents |
 | --- | --- |
-| `ergosumd-linux-{amd64,arm64}` | the daemon |
+| `ergosumd-{linux,darwin}-{amd64,arm64}` | the daemon |
 | `ergosum-linux-{amd64,arm64}` | the authority and the administrator tool |
 | `ergosum-{windows,darwin}-{amd64,arm64}[.exe]` | the administrator tool |
 | `ergosum-image-linux-{amd64,arm64}.tar` | the OCI image, for `docker load` |
 | `install.sh` | [`deploy/install.sh`](../deploy/install.sh), the installer |
 | `ergosumd.service`, `ergosumd.openrc`, `ergosum.sysusers` | systemd unit, OpenRC script and sysusers file of the daemon, which the installer sets up on a new machine |
+| `ergosumd.plist` | the daemon's launchd job, which the installer sets up on a new Mac |
 | `SHA256SUMS`, `SHA256SUMS.sig` | checksums and their signature |
 
 ## Verifying a release
@@ -29,7 +30,7 @@ downloaded files:
 ```sh
 ssh-keygen -Y verify -f release-signers -I release -n ergosum-release \
   -s SHA256SUMS.sig < SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS   # on macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
 ```
 
 `ssh-keygen` needs OpenSSH 8.1 or later. With an `ergosum` binary at hand,
@@ -74,9 +75,10 @@ sh install.sh /tmp/ergosum-vX.Y.Z ergosum   # an authority
 It checks the signature against `/etc/ergosum/release-signers` and the
 checksum of every file it uses, refuses an older version unless given
 `--allow-downgrade`, and keeps the installed binary as
-`/usr/bin/NAME.old`. It restarts `ergosumd` (systemd or OpenRC) and waits
-for a new token; without one it puts the old binary back and restarts it.
-On a machine that has a token, it changes neither configuration nor state.
+`/usr/bin/NAME.old` (on macOS `/usr/local/bin/NAME.old`). It restarts
+`ergosumd` (systemd, OpenRC or launchd) and waits for a new token; without
+one it puts the old binary back and restarts it. On a machine that has a
+token, it changes neither configuration nor state.
 
 A machine without `/etc/ergosum/release-signers` gets the release keys
 that the script carries, the same as `release-signers` in the repository
