@@ -45,11 +45,12 @@ read-only root filesystem.
 
 ## Installing
 
-On a machine, as root, with an authority's key fingerprint and URL:
+On a machine, as root, with the machines' domain and an authority's key
+fingerprint and URL:
 
 ```sh
 curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
-sh install.sh --anchor 'SHA256:...@https://192.0.2.10:7432'
+sh install.sh --domain example.com --anchor 'SHA256:...@https://192.0.2.10:7432'
 ```
 
 The script installs `ergosumd` from the latest signed release, sets up its

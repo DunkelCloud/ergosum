@@ -19,9 +19,13 @@
 # A machine whose ergosumd has no token yet, a new one above all, gets
 # what is missing of the users, the state directory, the service (systemd
 # or OpenRC) and the configuration, which the script writes from --anchor
-# and --identity. Then it starts ergosumd without waiting for a token and
+# and the identity. Then it starts ergosumd without waiting for a token and
 # prints the binding request for the administrators. Once they have
-# recorded the binding, the daemon receives its token on its own.
+# recorded the binding, the daemon receives its token on its own. The
+# identity is a DNS name in lower case, such as host1.example.com; it need
+# not resolve. --domain example.com makes it the host name in that domain,
+# the same on every machine; without it, hostname -f must give a full name.
+# A run that refuses its options changes nothing.
 #
 # An authority (ergosum) is not restarted: after a restart it is sealed.
 # Restart and unseal it by hand; BINARY.old stays for the way back.
@@ -30,6 +34,7 @@
 #   --anchor KEY@URL[,URL...]
 #                       a new machine's authority: its key fingerprint
 #                       (printed by "ergosum keygen") and its URLs
+#   --domain DOMAIN     a new machine's identity is its host name in DOMAIN
 #   --identity NAME     a new machine's identity (default: hostname -f)
 #   --version VERSION   the release to download (default: the latest)
 #   --url URL           where releases are downloaded from (default
@@ -53,6 +58,7 @@ url=https://github.com/DunkelCloud/ergosum/releases
 version=
 anchor=
 identity=
+domain=
 wait=120
 downgrade=
 restart=yes
@@ -77,6 +83,7 @@ while [ $# -gt 0 ]; do
 	case $1 in
 	--anchor) anchor=${2:?--anchor needs KEY@URL}; shift ;;
 	--identity) identity=${2:?--identity needs a name}; shift ;;
+	--domain) domain=${2:?--domain needs a domain}; shift ;;
 	--version) version=${2:?--version needs a version}; shift ;;
 	--url) url=${2:?--url needs a URL}; shift ;;
 	--allow-downgrade) downgrade=yes ;;
@@ -120,6 +127,17 @@ config_value() {
 	sed -n "s/^$1:[[:space:]]*//p" "$config" | sed 's/[[:space:]]*#.*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/' | head -n 1
 }
 
+# is_name NAME: a DNS name in lower case with two labels or more, the last
+# not all digits, as ergosumd wants its identity. ergosumd checks again;
+# this check comes before anything is installed.
+is_name() {
+	case $1 in *[!a-z0-9.-]*) return 1 ;; esac
+	label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+	[ "${#1}" -le 253 ] &&
+		printf '%s\n' "$1" | grep -Eqx "($label\\.)+$label" &&
+		printf '%s\n' "${1##*.}" | grep -q '[^0-9]'
+}
+
 token=$(config_value token_file)
 token=${token:-/run/ergosum/token}
 metrics=$(config_value metrics_file)
@@ -136,12 +154,25 @@ if [ -n "$unbound" ] && [ ! -e "$config" ]; then
 	SHA256:*@https://*) ;;
 	*) die "--anchor needs KEY@URL[,URL...], such as SHA256:...@https://192.0.2.10:7432" ;;
 	esac
-	if [ -z "$identity" ]; then
+	if [ -n "$identity" ]; then
+		[ -z "$domain" ] || die "--identity and --domain exclude each other"
+		from=--identity
+	elif [ -n "$domain" ]; then
+		host=$(uname -n)
+		identity=$(printf '%s\n' "${host%%.*}.$domain" | tr 'A-Z' 'a-z')
+		from="the host name and --domain"
+	else
 		identity=$(hostname -f 2>/dev/null || uname -n)
 		identity=$(printf '%s\n' "$identity" | tr 'A-Z' 'a-z')
+		from="hostname -f"
 	fi
-elif [ -n "$anchor$identity" ]; then
-	say "$config exists and stays; --anchor and --identity are not used"
+	hint="give --domain DOMAIN (the host name in DOMAIN) or --identity NAME"
+	is_name "$identity" ||
+		die "identity \"$identity\" from $from is not a full DNS name in lower case, such as host1.example.com; $hint"
+	[ "${identity%%.*}" != localhost ] ||
+		die "identity \"$identity\" from $from names no machine; $hint"
+elif [ -n "$anchor$identity$domain" ]; then
+	say "$config exists and stays; --anchor, --identity and --domain are not used"
 fi
 
 tmp=$(mktemp -d)
@@ -331,7 +362,7 @@ write_config() {
 	chmod 0644 "$config.new"
 	if ! out=$(as_ergosum "$BINDIR/ergosumd" request -config "$config.new" 2>&1); then
 		rm -f "$config.new"
-		die "ergosumd refuses the configuration (identity \"$identity\"; another one with --identity): $out"
+		die "ergosumd refuses the configuration: $out"
 	fi
 	mv -f "$config.new" "$config"
 	say "$config written for $identity"

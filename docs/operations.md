@@ -48,12 +48,18 @@ A new machine, as root:
 
 ```sh
 curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
-sh install.sh --anchor 'SHA256:...@https://100.64.0.10:7432'
+sh install.sh --domain example.com --anchor 'SHA256:...@https://100.64.0.10:7432'
 ```
 
 `--anchor` names one authority instance: its key fingerprint and its URLs,
-separated by commas (see `authorities` below). The identity is the
-machine's `hostname -f`; `--identity` gives another. The script
+separated by commas (see `authorities` below). The identity names the
+machine in its binding, in its token and in Vault: a DNS name in lower
+case, which need not resolve. `--domain example.com` makes it the host name
+in that domain, such as `host1.example.com`, so the same line serves every
+machine. Without `--domain` the identity is the machine's `hostname -f`,
+which must then give a full name; `--identity` gives any other. A run that
+refuses its options, a short `hostname -f` for instance, changes nothing.
+The script
 ([Releases](releasing.md#installing-and-updating)) installs `ergosumd` from
 the latest signed release and creates what is missing: the user `ergosum`
 and the group `ergosum-token`, the state directory, the systemd unit or

@@ -56,12 +56,36 @@ if $install --signers /t/other-signers --anchor "$anchor" >/tmp/out 2>&1; then
 fi
 grep -q 'does not verify' /tmp/out || { cat /tmp/out; fail "no signature error"; }
 if $install --identity host1 --anchor "$anchor" >/tmp/out 2>&1; then fail "installed with a short identity"; fi
-grep -q 'refuses the configuration' /tmp/out || { cat /tmp/out; fail "short identity not refused by ergosumd"; }
+grep -q 'identity "host1" from --identity is not a full DNS name' /tmp/out || { cat /tmp/out; fail "short identity not refused"; }
+if $install --identity host1.example.com --domain example.org --anchor "$anchor" >/tmp/out 2>&1; then
+	fail "installed with --identity and --domain"
+fi
+grep -q 'exclude each other' /tmp/out || { cat /tmp/out; fail "--identity with --domain not refused"; }
+# A machine whose hostname -f gives no full name, or localhost.
+mkdir /tmp/fake
+printf '#!/bin/sh\necho "$FAKE_HOST"\n' >/tmp/fake/hostname
+chmod +x /tmp/fake/hostname
+if FAKE_HOST=host1 PATH=/tmp/fake:$PATH $install --anchor "$anchor" >/tmp/out 2>&1; then
+	fail "installed with a short host name"
+fi
+grep -q 'identity "host1" from hostname -f .*--domain' /tmp/out || { cat /tmp/out; fail "short host name not refused with a hint at --domain"; }
+if FAKE_HOST=localhost.localdomain PATH=/tmp/fake:$PATH $install --anchor "$anchor" >/tmp/out 2>&1; then
+	fail "installed as localhost"
+fi
+grep -q 'names no machine' /tmp/out || { cat /tmp/out; fail "localhost not refused"; }
+[ ! -e /etc/ergosum ] || fail "refused runs left /etc/ergosum"
+[ ! -e /usr/bin/ergosumd ] || fail "refused runs installed ergosumd"
+! id ergosum >/dev/null 2>&1 || fail "refused runs created the user ergosum"
+
+log "configuration that ergosumd refuses"
+# A fingerprint of the wrong length passes the script's check of the
+# anchor's form; ergosumd refuses it after the binary and the user are in
+# place, which a second run keeps.
+if $install --anchor "SHA256:AAAA@https://192.0.2.10:7432" >/tmp/out 2>&1; then fail "installed with a bad fingerprint"; fi
+grep -q 'refuses the configuration' /tmp/out || { cat /tmp/out; fail "bad fingerprint not refused by ergosumd"; }
 [ ! -e /etc/ergosum/ergosumd.yaml ] || fail "configuration left by a refused run"
 [ ! -e /etc/ergosum/ergosumd.yaml.new ] || fail "draft configuration left by a refused run"
 ! running || fail "daemon started by a refused run"
-# The short identity got as far as the binary and the user, which a second
-# run keeps.
 rm -f /usr/bin/ergosumd
 
 log "new machine"
@@ -99,4 +123,12 @@ grep -q 'exists and stays' /tmp/out || fail "no note that the configuration stay
 grep -q "^key $fp\$" /tmp/out || fail "request with another key"
 sleep 2
 running || fail "daemon not running after the second run"
+
+log "--domain: the host name in that domain"
+# The container's host name is host1.example.com; another configuration
+# file makes this machine new again, except for its binary, users and key.
+$install --domain Example.ORG --config /tmp/domain.yaml --no-restart --anchor "$anchor" >/tmp/out 2>&1 ||
+	{ cat /tmp/out; fail "run with --domain"; }
+grep -qx 'identity: host1.example.org' /tmp/domain.yaml || { cat /tmp/out; fail "identity not from the host name and --domain"; }
+grep -q '^identity host1.example.org$' /tmp/out || { cat /tmp/out; fail "request names another identity"; }
 echo "ok"
