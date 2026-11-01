@@ -154,13 +154,20 @@ jq -e '.serial == 1 and (.authorities[0].urls | length) == 3' "$W/host1/state/au
 grep -q '^machine_identity_authorities_serial 1$' "$W/host1/run/ergosum.prom" || fail "list serial not reported"
 
 log "clone of host1 in the other segment"
+# Every request with host1's key counts against host1 at the authority: ten
+# at once, then one a minute. The update below still needs its share, so
+# each clone stops at its first denial.
 cp -a "$W/host1/state" "$W/clone-state"
 for variant in auto lying; do
 	addrs='[]'
 	[ "$variant" = lying ] && addrs='["198.51.100.20"]'
 	daemon_config "clone-$variant" https://203.0.113.2:7432 "$addrs"
 	cp "$W/clone-state/identity.key" "$W/clone-$variant/state/"
-	in_ns clone timeout 8 "$BIN/ergosumd" run --config "$W/clone-$variant/ergosumd.yaml" --log-format text > "$W/clone-$variant.log" 2>&1 || true
+	ip netns exec clone "$BIN/ergosumd" run --config "$W/clone-$variant/ergosumd.yaml" --log-format text > "$W/clone-$variant.log" 2>&1 &
+	clone_pid=$!
+	for _ in $(seq 80); do grep -q 'denied' "$W/clone-$variant.log" && break; sleep 0.1; done
+	kill "$clone_pid" 2>/dev/null || true
+	wait "$clone_pid" 2>/dev/null || true
 	[ -e "$W/clone-$variant/run/token" ] && fail "clone ($variant) received a token"
 	grep -q 'denied' "$W/clone-$variant.log" || { cat "$W/clone-$variant.log"; fail "clone ($variant) not denied"; }
 done
@@ -242,7 +249,7 @@ exit 1
 EOF
 release broken "$W/broken-ergosumd"
 if out=$(install_release "$W/broken" 2>&1); then fail "broken binary kept: $out"; fi
-echo "$out" | grep -q "$new is back and has a new token" || fail "no way back: $out"
+echo "$out" | grep -q "$new is back and has a new token" || { tail -n 20 "$W/host1.log"; fail "no way back: $out"; }
 [ "$(installed)" = "$new" ] || fail "after the way back $(installed) runs, not $new"
 
 log "OK"
