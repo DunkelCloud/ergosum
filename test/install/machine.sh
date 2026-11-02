@@ -20,6 +20,7 @@ if [ "$(uname -s)" = Darwin ]; then
 	running() { pgrep -x ergosumd >/dev/null; }
 	owner_mode() { stat -f '%Su %Sg %Lp' "$1"; }
 	sum() { shasum -a 256; }
+	as_nobody() { sudo -u nobody "$@"; }
 else
 	bindir=/usr/bin svc_user=ergosum state=/var/lib/ergosum
 	daemon_log=/tmp/ergosumd.log
@@ -32,6 +33,8 @@ else
 	}
 	owner_mode() { stat -c '%U %G %a' "$1"; }
 	sum() { sha256sum; }
+	# The words of the command have no spaces.
+	as_nobody() { su -s /bin/sh nobody -c "$*"; }
 
 	log "packages"
 	if command -v apk >/dev/null; then
@@ -68,6 +71,9 @@ install="sh $T/install.sh --url $URL"
 anchor=${ANCHOR:-"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@https://192.0.2.10:7432,https://198.51.100.10:7432"}
 
 log "refused runs change nothing"
+if as_nobody $install --anchor "$anchor" >/tmp/out 2>&1; then fail "installed as nobody"; fi
+grep -q 'run as root, such as with sudo' /tmp/out || { cat /tmp/out; fail "no hint at root"; }
+! grep -q 'downloading' /tmp/out || { cat /tmp/out; fail "downloaded before the check for root"; }
 if $install >/tmp/out 2>&1; then fail "installed without --anchor"; fi
 grep -q 'needs --anchor' /tmp/out || { cat /tmp/out; fail "no hint at --anchor"; }
 if $install --anchor nonsense >/tmp/out 2>&1; then fail "installed with a bad anchor"; fi

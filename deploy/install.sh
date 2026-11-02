@@ -113,6 +113,8 @@ for b in "$@"; do
 	*) die "unknown binary $b (ergosumd or ergosum)" ;;
 	esac
 done
+# The binaries, /etc/ergosum, the users and the service are root's.
+[ "$(id -u)" = 0 ] || die "run as root, such as with sudo sh $0 ..."
 
 case $(uname -s) in
 Linux) os=linux ;;
