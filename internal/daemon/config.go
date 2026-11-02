@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -17,9 +18,11 @@ import (
 type Config struct {
 	// Identity is the machine's name (FQDN), e.g. host1.example.com.
 	Identity string `yaml:"identity"`
-	// StateDir holds the identity key. Default: /var/lib/ergosum.
+	// StateDir holds the identity key. Default: /var/lib/ergosum, on macOS
+	// /var/db/ergosum/state.
 	StateDir string `yaml:"state_dir"`
-	// TokenFile is written atomically. Default: /run/ergosum/token.
+	// TokenFile is written atomically. Default: /run/ergosum/token, on
+	// macOS /var/db/ergosum/token.
 	TokenFile string `yaml:"token_file"`
 	// TokenGroup owns the token file (mode 0640). Default: ergosum-token.
 	// Set to "-" to leave the group unchanged.
@@ -73,13 +76,25 @@ func LoadConfig(path string) (Config, error) {
 	return c, nil
 }
 
+// defaultPaths returns the default state directory and token file on goos.
+// launchd creates no runtime directory as systemd and OpenRC do, and
+// /var/run belongs to root, so on macOS the token stays in a directory of
+// its own, next to the state.
+func defaultPaths(goos string) (stateDir, tokenFile string) {
+	if goos == "darwin" {
+		return "/var/db/ergosum/state", "/var/db/ergosum/token"
+	}
+	return "/var/lib/ergosum", "/run/ergosum/token"
+}
+
 // SetDefaults fills unset fields.
 func (c *Config) SetDefaults() {
+	stateDir, tokenFile := defaultPaths(runtime.GOOS)
 	if c.StateDir == "" {
-		c.StateDir = "/var/lib/ergosum"
+		c.StateDir = stateDir
 	}
 	if c.TokenFile == "" {
-		c.TokenFile = "/run/ergosum/token"
+		c.TokenFile = tokenFile
 	}
 	if c.TokenGroup == "" {
 		c.TokenGroup = "ergosum-token"
@@ -106,7 +121,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("authorities[%d]: %w", i, err))
 		}
 		if !keys.ValidFingerprint(a.Key) {
-			errs = append(errs, fmt.Errorf("authorities[%d]: key must be a SHA256 fingerprint", i))
+			errs = append(errs, fmt.Errorf("authorities[%d]: key %q is no key fingerprint (SHA256: and 43 characters of base64, as ergosum keygen prints it)", i, a.Key))
 		}
 	}
 	if _, err := protocol.ParseAddresses(c.Addresses); err != nil {

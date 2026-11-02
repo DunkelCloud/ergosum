@@ -35,8 +35,35 @@ give `signing.key` to the group `ergosum-authority`, and adjust `journal`,
 `control_socket` and `archive` in `serve.yaml` if they name the old place.
 
 Service definitions: `deploy/systemd/` and `deploy/openrc/` (Alpine,
-`supervise-daemon`). Both binaries run in the foreground and log JSON lines
-to stdout.
+`supervise-daemon`), for the daemon on a Mac `deploy/launchd/`. Both
+binaries run in the foreground and log JSON lines to stdout.
+
+On a Mac the daemon follows macOS's layout: `/usr/bin` belongs to the
+system, system accounts begin with an underscore, and launchd creates no
+directories for a job, so the token lives on disk next to the state:
+
+| Path | Owner, mode | Content |
+| --- | --- | --- |
+| `/usr/local/bin/ergosumd` | root, 0755 | the daemon |
+| `/etc/ergosum/` | root, 0755 | `ergosumd.yaml`, `release-signers` |
+| `/var/db/ergosum/` | `_ergosum`, 0755 | `token` (`_ergosum`:`ergosum-token`, 0640) |
+| `/var/db/ergosum/state/` | `_ergosum`, 0700 | `identity.key` (0600) |
+| `/var/log/ergosum/` | `_ergosum`, 0755 | `ergosumd.log`, the daemon's output |
+| `/Library/LaunchDaemons/io.github.dunkelcloud.ergosumd.plist` | root:wheel, 0644 | the launchd job |
+
+These are the daemon's defaults on macOS. `_ergosum` is a system account
+in the local directory service: an ID below 500 that no user and no group
+has, a group `_ergosum` with the same ID, no password, the shell
+`/usr/bin/false`, the home `/var/empty`, hidden. `deploy/install.sh`
+creates it and the group `ergosum-token` with `dscl` (see
+`ensure_users_darwin` there for doing it by hand). Vault Agent's user joins
+the group with:
+
+```sh
+sudo dseditgroup -o edit -a USER -t user ergosum-token
+```
+
+launchd does not rotate `ergosumd.log`.
 
 Whether `/var/lib/ergosum/` and `/var/lib/tailscale/` go into a machine's
 backups is a trade-off between a working restore and what a stolen backup
@@ -52,7 +79,9 @@ sh install.sh --domain example.com --anchor 'SHA256:...@https://100.64.0.10:7432
 ```
 
 `--anchor` names one authority instance: its key fingerprint and its URLs,
-separated by commas (see `authorities` below). The identity names the
+separated by commas (see `authorities` below). The fingerprint is the one
+`ergosum keygen` printed, `SHA256:` and 43 characters of base64; the
+authority also logs it when it starts. The identity names the
 machine in its binding, in its token and in Vault: a DNS name in lower
 case, which need not resolve. `--domain example.com` makes it the host name
 in that domain, such as `host1.example.com`, so the same line serves every
@@ -64,7 +93,10 @@ The script
 the latest signed release and creates what is missing: the user `ergosum`
 and the group `ergosum-token`, the state directory, the systemd unit or
 OpenRC script, and `/etc/ergosum/ergosumd.yaml` with the identity and the
-anchor. Then it starts the daemon and prints the binding request for the
+anchor. Before it writes the configuration, `ergosumd check` connects to
+the anchor's URLs: one that presents another key than the one in
+`--anchor` stops the setup, one that cannot be reached yet does not. Then
+it starts the daemon and prints the binding request for the
 administrators (see [Administration](#administration)). Once they have
 recorded the binding, the daemon receives its token on its own: until then
 it asks again at intervals of up to five minutes. Run the same line again, and it
@@ -83,7 +115,8 @@ By hand instead:
    first use and writes the binding request for the administrators;
    `ergosumd fingerprint` prints only the fingerprint. Run both as the
    service user: a key created by root belongs to root, and the service
-   cannot read it.
+   cannot read it. `ergosumd check` shows the key each authority URL
+   presents and fails if it is not the configured one.
 3. Start the service. The daemon requests a token, writes it to
    `/run/ergosum/token`, and renews it from half its lifetime on.
 
@@ -123,6 +156,62 @@ Metrics (node_exporter textfile collector, `metrics_file`):
 | `machine_identity_authorities_serial` | serial of the authority list in use; 0 while the daemon knows only its configuration |
 
 Short token lifetimes need synchronized clocks.
+
+### On a Mac
+
+A Mac, Apple Silicon or Intel, is enrolled with the same line, run with
+`sudo`:
+
+```sh
+curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
+sudo sh install.sh --domain example.com --anchor 'SHA256:...@https://100.64.0.10:7432'
+```
+
+The script installs `ergosumd` to `/usr/local/bin` and creates what is
+missing of the account `_ergosum`, the group `ergosum-token`, the
+directories (see [Users and directories](#users-and-directories)) and the
+launchd job `io.github.dunkelcloud.ergosumd`, which it loads with
+`launchctl bootstrap`. Updates restart the daemon with `launchctl kickstart
+-k`; by hand:
+
+```sh
+sudo launchctl kickstart -k system/io.github.dunkelcloud.ergosumd   # restart
+sudo launchctl print system/io.github.dunkelcloud.ergosumd          # state
+sudo launchctl bootout system/io.github.dunkelcloud.ergosumd        # stop and unload
+```
+
+The identity is best given with `--domain`: a Mac without a host name of
+its own answers `hostname -f` with its Bonjour name, such as
+`hosts-macbook-pro.local`, which the script refuses.
+
+The application firewall, if it is on, lets callbacks reach the daemon
+only once it is allowed:
+
+```sh
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/local/bin/ergosumd
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/local/bin/ergosumd
+```
+
+For the binding request the daemon asks the Tailscale client for the
+tailnet name: `tailscale` in `PATH`, otherwise the CLI inside the app
+(`/Applications/Tailscale.app/Contents/MacOS/Tailscale`, App Store and
+standalone versions) or Homebrew's. The request runs as `_ergosum`; where
+it shows `# check tailnet NAME`, take the name from `tailscale status` as
+the logged-in user. Addresses of tunnels (`utun`), bridges (Internet
+Sharing, virtual machines) and Apple's peer-to-peer interfaces (`awdl`,
+`llw`) count as virtual: their checks are proposed commented out, and
+Ethernet and Wi-Fi (`en`) come first.
+
+Vault Agent reads the token at `/var/db/ergosum/token` (`path` in
+`agent.hcl`, see [Vault Agent](#vault-agent)).
+
+Unlike `/run`, `/var/db/ergosum` survives a reboot, and the token with it.
+Time Machine backs it up together with the key unless told otherwise (see
+[Backups](#backups)):
+
+```sh
+sudo tmutil addexclusion -p /var/db/ergosum
+```
 
 ## Authority
 

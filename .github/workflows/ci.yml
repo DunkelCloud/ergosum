@@ -90,6 +90,38 @@ jobs:
       - name: First installation in containers
         run: BIN="$PWD/dist" bash test/install/run.sh
 
+  install-macos:
+    # A Mac set up by deploy/install.sh on the runner itself, Apple Silicon
+    # and Intel: the user and groups in the directory service, the launchd
+    # job, refused runs that change nothing; then a token from an authority
+    # on the same Mac, group-owned by ergosum-token, and an update through
+    # launchctl that waits for a new one.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Test without cgo, as released
+        # macOS's TMPDIR (/var/folders/...) and a long test name make the
+        # authority's control socket path longer than the 104 bytes macOS
+        # allows; /tmp keeps it short.
+        env:
+          TMPDIR: /tmp
+        run: CGO_ENABLED=0 go test -count=1 -timeout 5m ./...
+      - name: Build
+        run: |
+          VERSION=v0.1.0 scripts/build.sh dist
+          VERSION=v0.2.0 scripts/build.sh dist-next ergosumd
+      - name: First installation, token and update
+        run: sudo env PATH="$PATH" BIN="$PWD/dist" NEXT="$PWD/dist-next" bash test/install/macos.sh
+
   netns:
     # The real binaries in Linux network namespaces: sealed start and
     # unseal, an SSH-signed binding, issuance with a net check, a clone
@@ -158,11 +190,11 @@ jobs:
         include:
           - {goos: linux, goarch: amd64}
           - {goos: linux, goarch: arm64}
-          # Administrators' machines need only the administrator tool.
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+          # Administrators' Windows machines need only the administrator tool.
           - {goos: windows, goarch: amd64, admin: true}
           - {goos: windows, goarch: arm64, admin: true}
-          - {goos: darwin, goarch: amd64, admin: true}
-          - {goos: darwin, goarch: arm64, admin: true}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:

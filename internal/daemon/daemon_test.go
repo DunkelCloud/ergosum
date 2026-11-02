@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,6 +45,30 @@ func TestPickAddresses(t *testing.T) {
 	short := []ifaceAddr{{addr: "192.0.2.1", iface: "eth0", index: 2}, {addr: "172.17.0.1", iface: "docker0", index: 1}}
 	if out, truncated := pickAddresses(short); truncated || len(out) != 2 || out[0] != "192.0.2.1" {
 		t.Fatalf("short list: %v %v", out, truncated)
+	}
+	// A Mac: Wi-Fi after VPN tunnels and the bridge of Internet Sharing.
+	mac := []ifaceAddr{
+		{addr: "10.8.0.2", iface: "utun4", index: 20},
+		{addr: "192.168.2.1", iface: "bridge100", index: 21},
+		{addr: "192.0.2.30", iface: "en0", index: 22},
+	}
+	if out, _ := pickAddresses(mac); out[0] != "192.0.2.30" {
+		t.Fatalf("en0 not first: %v", out)
+	}
+}
+
+// Interfaces of tunnels, bridges and virtual machines count as virtual, on
+// Linux and on macOS; Ethernet and Wi-Fi do not.
+func TestVirtualInterface(t *testing.T) {
+	for name, want := range map[string]bool{
+		"eth0": false, "enp3s0": false, "wlan0": false, "en0": false, "en7": false,
+		"docker0": true, "br-1a2b": true, "tailscale0": true, "wg0": true, "tun0": true,
+		"utun3": true, "bridge0": true, "bridge100": true, "awdl0": true, "llw0": true,
+		"vmnet8": true, "vboxnet0": true, "feth1": true,
+	} {
+		if got := virtualInterface(name); got != want {
+			t.Errorf("virtualInterface(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
 
@@ -83,6 +109,39 @@ func TestObserveSkew(t *testing.T) {
 	d.observeSkew(sent.Add(60*time.Second), sent, sent.Add(80*time.Second))
 	if got := d.mClockSkew.Get(""); got != 2 {
 		t.Fatalf("a long round changed the estimate: %v", got)
+	}
+}
+
+// The Tailscale client is the one in PATH, else the first that exists of
+// the places known for the system (on macOS: in the app, Homebrew's).
+func TestTailscaleCLI(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", filepath.Join(dir, "bin"))
+	missing, present := filepath.Join(dir, "missing"), filepath.Join(dir, "Tailscale")
+	if err := os.WriteFile(present, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // a test executable
+		t.Fatal(err)
+	}
+	tailscaleCLIs["testos"] = []string{missing, dir, present}
+	t.Cleanup(func() { delete(tailscaleCLIs, "testos") })
+	if got := tailscaleCLI("testos"); got != present {
+		t.Fatalf("got %s, want %s", got, present)
+	}
+	if got := tailscaleCLI("otheros"); got != "tailscale" {
+		t.Fatalf("no client anywhere: got %s", got)
+	}
+	name := "tailscale"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	inPath := filepath.Join(dir, "bin", name)
+	if err := os.MkdirAll(filepath.Dir(inPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inPath, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // a test executable
+		t.Fatal(err)
+	}
+	if got := tailscaleCLI("testos"); got != inPath {
+		t.Fatalf("PATH not first: got %s, want %s", got, inPath)
 	}
 }
 

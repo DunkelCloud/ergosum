@@ -3,6 +3,7 @@
 # The machine's identity (FQDN). It must match the binding.
 identity: host1.example.com
 
+# Defaults on macOS: /var/db/ergosum/state and /var/db/ergosum/token.
 state_dir: /var/lib/ergosum
 token_file: /run/ergosum/token
 # Group of the token file (mode 0640); put Vault Agent's user into it.

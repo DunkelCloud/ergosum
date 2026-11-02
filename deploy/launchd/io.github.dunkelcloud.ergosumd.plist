@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ergosum machine identity daemon (launchd, macOS), installed as
+  /Library/LaunchDaemons/io.github.dunkelcloud.ergosumd.plist (root:wheel,
+  0644). launchd creates no directories: /var/db/ergosum (the token) and
+  /var/db/ergosum/state belong to _ergosum, /var/log/ergosum as well.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.dunkelcloud.ergosumd</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/ergosumd</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/etc/ergosum/ergosumd.yaml</string>
+	</array>
+	<key>UserName</key>
+	<string>_ergosum</string>
+	<key>GroupName</key>
+	<string>_ergosum</string>
+	<!-- The supplementary groups of _ergosum, ergosum-token among them:
+	     the token file is group-owned by ergosum-token (mode 0640). -->
+	<key>InitGroups</key>
+	<true/>
+	<!-- 027 -->
+	<key>Umask</key>
+	<integer>23</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Started again when it fails, as with Restart=on-failure. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<!-- The daemon logs JSON lines to stdout. -->
+	<key>StandardOutPath</key>
+	<string>/var/log/ergosum/ergosumd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/ergosum/ergosumd.log</string>
+</dict>
+</plist>

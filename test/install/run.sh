@@ -3,12 +3,8 @@
 # distributions it supports: Debian (useradd, wget), Ubuntu 20.04 (systemd
 # without /etc/sysusers.d, curl) and Alpine (BusyBox, OpenRC). Each
 # downloads a release from a local web server, laid out as GitHub serves
-# it and signed with a key made for the test; test/install/machine.sh runs
-# in the container and checks the result.
-#
-# The script under test is deploy/install.sh with the test key in place of
-# the release keys it carries, so that the way a machine gets its first
-# release keys is tested as well.
+# it and signed with a key made for the test (test/install/release.sh);
+# test/install/machine.sh runs in the container and checks the result.
 #
 # Needs docker and ssh-keygen. BIN is a build of ergosumd with a release
 # version (see .github/workflows/ci.yml).
@@ -41,27 +37,7 @@ version=$("$BIN/ergosumd" version | awk '{print $2}')
 arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 
 log "release $version, signed with a test key"
-ssh-keygen -q -t ed25519 -N "" -C release -f "$W/release-key"
-echo "release namespaces=\"ergosum-release\" $(cat "$W/release-key.pub")" >"$W/release-signers"
-ssh-keygen -q -t ed25519 -N "" -C other -f "$W/other-key"
-echo "release namespaces=\"ergosum-release\" $(cat "$W/other-key.pub")" >"$W/other-signers"
-rel=$W/www/download/$version
-mkdir -p "$rel" "$W/www/latest"
-cp "$BIN/ergosumd" "$rel/ergosumd-linux-$arch"
-"$ROOT/scripts/release-files.sh" "$rel"
-(cd "$rel" && sha256sum -- * >SHA256SUMS)
-ssh-keygen -q -Y sign -f "$W/release-key" -n ergosum-release "$rel/SHA256SUMS"
-cp -r "$rel" "$W/www/latest/download"
-chmod -R a+rX "$W"
-
-# The test key in place of the release keys the script carries.
-awk -v keys="$W/release-signers" '
-	/^release_signers\(\) \{$/ { fn = 1 }
-	fn && /^EOF$/ { while ((getline l < keys) > 0) print l; skip = 0; fn = 0 }
-	!skip { print }
-	fn && /^\tcat <<.EOF.$/ { skip = 1 }
-' "$ROOT/deploy/install.sh" >"$W/install.sh"
-grep -qF "$(cat "$W/release-key.pub")" "$W/install.sh" || { echo "FAIL: test key not in the script" >&2; exit 1; }
+"$ROOT/test/install/release.sh" "$W" linux "$arch" "$BIN"
 
 docker network create "$NET" >/dev/null
 docker run -d --name "$NET-web" --network "$NET" -v "$W/www:/www:ro" "$WEB" \

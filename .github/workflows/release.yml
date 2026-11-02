@@ -46,8 +46,9 @@ jobs:
           mkdir -p release
           for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
             os=${target%/*} arch=${target#*/}
-            cmds=ergosum
-            [ "$os" = linux ] && cmds="ergosum ergosumd"
+            cmds="ergosum ergosumd"
+            # Administrators' Windows machines need only the administrator tool.
+            [ "$os" = windows ] && cmds=ergosum
             GOOS=$os GOARCH=$arch scripts/build.sh "build/$os-$arch" $cmds
             for c in $cmds; do
               ext=

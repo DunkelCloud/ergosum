@@ -38,8 +38,10 @@ The authority instances replicate their binding journal among each other
 without a leader, verify every event before they store it, and shorten it
 through signed checkpoints.
 
-Both are static Go binaries without cgo for `linux/amd64` and `linux/arm64`;
-`ergosum` is also built for Windows and macOS, for administrators' machines.
+Both are static Go binaries without cgo for `linux/amd64` and `linux/arm64`.
+`ergosumd` is also built for macOS (Apple Silicon and Intel), so that a Mac
+can be a machine; `ergosum` is built for Windows and macOS as well, for
+administrators' machines.
 The authority also ships as an OCI image that runs as a non-root user on a
 read-only root filesystem.
 
@@ -56,7 +58,9 @@ sh install.sh --domain example.com --anchor 'SHA256:...@https://192.0.2.10:7432'
 The script installs `ergosumd` from the latest signed release, sets up its
 user, service and configuration, starts it and prints the binding request
 for the administrators; see [Operations](docs/operations.md#daemon). The
-same script updates the machine later.
+same script updates the machine later. On a Mac the same two lines enroll
+it, the second with `sudo`: the daemon then runs under launchd as the
+system account `_ergosum` (see [Operations](docs/operations.md#on-a-mac)).
 
 ## Documentation
 
@@ -64,7 +68,7 @@ same script updates the machine later.
 - [Releases](docs/releasing.md): verifying, installing and updating signed releases; making one
 - [Architecture decisions](docs/adr/): protocol, token format, journal and replication
 - Example configuration: [`examples/`](examples), including Vault Agent;
-  service definitions for systemd and OpenRC: [`deploy/`](deploy)
+  service definitions for systemd, OpenRC and launchd: [`deploy/`](deploy)
 - Vault setup and rollback: [`deploy/vault/machine-auth.sh`](deploy/vault/machine-auth.sh)
 
 ## Building

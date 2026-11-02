@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -24,10 +25,12 @@ func usage() {
   ergosumd run [-config %[1]s] [-log-format json|text]
   ergosumd request [-config %[1]s] [-new-key] [-out FILE]
   ergosumd fingerprint [-config %[1]s]
+  ergosumd check [-config %[1]s]
   ergosumd version
 
 Run request and fingerprint as the service user (sudo -u ergosum ...):
-they create the key on first use.
+they create the key on first use. check connects to each authority URL
+and fails if one presents another key than the configured one.
 `, defaultConfig)
 }
 
@@ -46,6 +49,8 @@ func main() {
 		err = request(os.Args[2:])
 	case "fingerprint":
 		err = fingerprint(os.Args[2:])
+	case "check":
+		err = check(os.Args[2:])
 	case "version":
 		fmt.Println("ergosumd", version.String())
 	case "help", "-h", "--help":
@@ -133,5 +138,34 @@ func fingerprint(args []string) error {
 		return err
 	}
 	fmt.Println(d.Fingerprint())
+	return nil
+}
+
+// check prints the key each authority URL presents. A URL with another key
+// than the configured one fails the check; one that is not reached does
+// not, since a new machine may reach its authorities only later.
+func check(args []string) error {
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConfig, "configuration file")
+	_ = fs.Parse(args)
+	cfg, err := daemon.LoadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	wrong := false
+	for _, c := range daemon.CheckKeys(context.Background(), cfg) {
+		switch {
+		case c.Err != nil:
+			fmt.Printf("%s: not reached: %v\n", c.URL, c.Err)
+		case c.Got != c.Want:
+			fmt.Printf("%s: presents %s, not the configured %s\n", c.URL, c.Got, c.Want)
+			wrong = true
+		default:
+			fmt.Printf("%s: presents %s, as configured\n", c.URL, c.Got)
+		}
+	}
+	if wrong {
+		return errors.New("the key or the URL of an authority is wrong; an authority logs its key when it starts")
+	}
 	return nil
 }

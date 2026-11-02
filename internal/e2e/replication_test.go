@@ -436,9 +436,11 @@ func TestPartitionConverges(t *testing.T) {
 	}
 	eventually(t, "convergence", func() bool { return converged(a, b, cc) })
 	winner := a.binding(host1)
-	if journalCount(t, a.auth, "binding.set") != 2 || journalCount(t, cc.auth, "binding.set") != 2 {
-		t.Fatal("both events must be journaled everywhere")
-	}
+	// The state hash covers the winning event only; the other one may
+	// still be on its way.
+	eventually(t, "both events journaled everywhere", func() bool {
+		return journalCount(t, a.auth, "binding.set") == 2 && journalCount(t, cc.auth, "binding.set") == 2
+	})
 	for _, e := range []*env{a, b, cc} {
 		bodies, _ := e.auth.Store().EventBodies(context.Background(), "binding.set")
 		for _, body := range bodies {
