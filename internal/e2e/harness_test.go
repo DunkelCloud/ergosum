@@ -107,7 +107,8 @@ type env struct {
 	cfg    authority.Config
 	opts   envOptions
 	cancel context.CancelFunc
-	done   chan error
+	// done receives what Run returns, once; whoever takes it calls exited.
+	done chan error
 	// running is set between start and stop.
 	running bool
 }
@@ -243,13 +244,25 @@ func (e *env) start() {
 	}
 }
 
+// stop ends the instance and fails the test if it had stopped on its own
+// with an error.
 func (e *env) stop() {
 	if !e.running {
 		return
 	}
+	e.cancel()
+	err := <-e.done
+	e.exited()
+	if err != nil {
+		e.t.Errorf("authority stopped: %v", err)
+	}
+}
+
+// exited cleans up after Run has returned, so that stop does not wait for
+// it again.
+func (e *env) exited() {
 	e.running = false
 	e.cancel()
-	<-e.done
 	e.auth.Close()
 }
 
@@ -258,6 +271,7 @@ func (e *env) waitReady() {
 	select {
 	case <-e.auth.Ready():
 	case err := <-e.done:
+		e.exited()
 		e.t.Fatalf("authority stopped: %v", err)
 	case <-time.After(10 * time.Second):
 		e.t.Fatal("authority not ready")
@@ -266,13 +280,17 @@ func (e *env) waitReady() {
 
 func (e *env) waitOps() {
 	e.t.Helper()
-	for i := 0; i < 200; i++ {
-		if e.auth.OpsAddr() != "" {
-			return
+	deadline := time.After(2 * time.Second)
+	for e.auth.OpsAddr() == "" {
+		select {
+		case err := <-e.done:
+			e.exited()
+			e.t.Fatalf("authority stopped: %v", err)
+		case <-deadline:
+			e.t.Fatal("ops listener not up")
+		case <-time.After(10 * time.Millisecond):
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	e.t.Fatal("ops listener not up")
 }
 
 func (e *env) fingerprint() string { return keys.Fingerprint(&e.key.PublicKey) }
