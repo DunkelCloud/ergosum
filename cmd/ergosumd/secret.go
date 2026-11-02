@@ -65,7 +65,9 @@ func newSecretFlags(name string) *secretFlags {
 }
 
 // parse takes NAME before or after the flags and returns it with the path
-// of part A. Without -file a NAME is required.
+// of part A. Without -file a NAME is required. A relative -file is taken
+// from the working directory and returned absolute, the form that get needs
+// from anywhere else.
 func (f *secretFlags) parse(args []string) (name, path string, err error) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		name, args = args[0], args[1:]
@@ -78,13 +80,24 @@ func (f *secretFlags) parse(args []string) (name, path string, err error) {
 	}
 	switch {
 	case *f.file != "":
-		return name, *f.file, nil
+		path, err = filepath.Abs(*f.file)
+		return name, path, err
 	case name == "":
 		return "", "", errors.New("name a secret, or give -file")
 	case !secret.ValidName(name):
 		return "", "", fmt.Errorf("bad name %q: lower-case letters, digits and hyphens, at most 63 characters", name)
 	}
 	return name, filepath.Join(defaultSecretDir, name), nil
+}
+
+// readPartA reads part A from path. NAME alone finds part A only in the
+// secrets directory: one that create wrote elsewhere needs its -file.
+func (f *secretFlags) readPartA(name, path string) ([]byte, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied path
+	if *f.file == "" && errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("no part A of %s in %s; for one that create wrote elsewhere, give its -file", name, filepath.Dir(path))
+	}
+	return data, err
 }
 
 // socketPath is -socket, else the configured socket, else the default.
@@ -145,7 +158,8 @@ func secretCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if path == filepath.Join(defaultSecretDir, name) {
+	inDir := path == filepath.Join(defaultSecretDir, name)
+	if inDir {
 		if err := os.MkdirAll(defaultSecretDir, 0o700); err != nil {
 			return err
 		}
@@ -166,6 +180,9 @@ func secretCreate(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "part A of %s written to %s: threshold %d of %d pinned instances\n", name, path, s.Threshold, len(s.Pins))
+	if !inDir {
+		fmt.Fprintf(os.Stderr, "not in %s: get and info find it only with -file %s\n", defaultSecretDir, path)
+	}
 	return nil
 }
 
@@ -177,7 +194,7 @@ func secretGet(args []string) error {
 	if err != nil {
 		return err
 	}
-	partA, err := os.ReadFile(path) //nolint:gosec // operator-supplied path
+	partA, err := f.readPartA(name, path)
 	if err != nil {
 		return err
 	}
@@ -238,11 +255,11 @@ func replaceFile(path string, data []byte) error {
 // secretInfo shows part A without the secret; it needs no daemon.
 func secretInfo(args []string) error {
 	f := newSecretFlags("info")
-	_, path, err := f.parse(args)
+	name, path, err := f.parse(args)
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied path
+	data, err := f.readPartA(name, path)
 	if err != nil {
 		return err
 	}
