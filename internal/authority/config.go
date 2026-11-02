@@ -35,6 +35,13 @@ type Config struct {
 	// SigningKey is the PEM file with the instance key, optionally
 	// passphrase-encrypted (then the instance starts sealed).
 	SigningKey string `yaml:"signing_key"`
+	// ExchangeKeyFile is the instance's exchange key for releasing secrets
+	// (ADR 0004), written by "ergosum keygen -exchange". Encrypted, it
+	// opens with the signing key's passphrase at unseal. Keep it out of
+	// every backup: with a copy of a machine's sealed secret, it opens the
+	// secret without any check. Empty: the instance takes part in no
+	// secrets and answers /v1/exchange with no_exchange.
+	ExchangeKeyFile string `yaml:"exchange_key_file"`
 	// Journal is the SQLite file. Default: /var/lib/ergosum-authority/journal.db.
 	Journal string `yaml:"journal"`
 	// Listen is the TLS listener for token requests and binding writes,

@@ -30,7 +30,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
   ergosum serve [-config %[1]s] [-log-format json|text]
   ergosum unseal [-socket %[2]s]
-  ergosum keygen -out FILE [-encrypt]
+  ergosum keygen -out FILE [-encrypt] [-exchange]
   ergosum version
 
 Journal of the local instance (through its control socket):
@@ -143,12 +143,16 @@ func keygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
 	out := fs.String("out", "", "file to write the private key to (must not exist)")
 	encrypt := fs.Bool("encrypt", false, "encrypt the key with a passphrase; the instance then starts sealed")
+	exchange := fs.Bool("exchange", false, "write an exchange key for releasing secrets (exchange_key_file) instead of a signing key")
 	_ = fs.Parse(args)
 	if *out == "" {
 		return errors.New("-out is required")
 	}
 	if _, err := os.Stat(*out); err == nil {
-		return fmt.Errorf("%s exists; refusing to overwrite a signing key", *out)
+		return fmt.Errorf("%s exists; refusing to overwrite a key", *out)
+	}
+	if *exchange {
+		return keygenExchange(*out, *encrypt)
 	}
 	k, err := keys.Generate()
 	if err != nil {
@@ -172,6 +176,34 @@ func keygen(args []string) error {
 		return err
 	}
 	fmt.Printf("kid:         %s\nfingerprint: %s\n\n%s", keys.Thumbprint(&k.PublicKey), keys.Fingerprint(&k.PublicKey), keys.MarshalPublicPEM(&k.PublicKey))
+	return nil
+}
+
+// keygenExchange writes an exchange key (ADR 0004). Encrypted, it takes the
+// signing key's passphrase, so that one unseal opens both.
+func keygenExchange(out string, encrypt bool) error {
+	k, err := keys.GenerateExchangeKey()
+	if err != nil {
+		return err
+	}
+	var data []byte
+	if encrypt {
+		pass, err := readPassphrase("Passphrase of the signing key: ", true)
+		if err != nil {
+			return err
+		}
+		defer wipe(pass)
+		data, err = keys.EncryptExchangeKeyPEM(k, pass)
+		if err != nil {
+			return err
+		}
+	} else if data, err = keys.MarshalExchangeKeyPEM(k); err != nil {
+		return err
+	}
+	if err := keys.WriteFileAtomic(out, data, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("exchange key written to %s; set exchange_key_file and keep the file out of every backup\n", out)
 	return nil
 }
 

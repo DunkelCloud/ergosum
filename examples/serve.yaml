@@ -17,6 +17,13 @@ clock_skew: 2m
 # An encrypted key keeps the instance sealed after every start until
 # "ergosum unseal" is run on this host.
 signing_key: /etc/ergosum/signing.key
+# Releasing secrets without Vault ("ergosumd secret", ADR 0004). Created with
+# "ergosum keygen -exchange -out /etc/ergosum/exchange.key [-encrypt]"; an
+# encrypted exchange key opens with the signing key's passphrase. Never back
+# it up: next to a copy of a machine's sealed secret it opens the secret
+# without any check. Losing or replacing it takes this instance out of every
+# secret pinned to it. Without it the instance answers no_exchange.
+# exchange_key_file: /etc/ergosum/exchange.key
 journal: /var/lib/ergosum-authority/journal.db
 # Local socket for "ergosum unseal" and "ergosum journal" (mode 0600).
 control_socket: /var/lib/ergosum-authority/control.sock

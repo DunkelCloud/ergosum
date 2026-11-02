@@ -116,11 +116,14 @@ type env struct {
 type envOptions struct {
 	threshold  int
 	passphrase string // non-empty: encrypted signing key, starts sealed
-	networks   []string
-	ttl        time.Duration
-	instance   string
-	net        *simNet
-	admins     *jt.Admins
+	// exchangeKey, if set, becomes exchange_key_file, encrypted with the
+	// passphrase if there is one.
+	exchangeKey []byte
+	networks    []string
+	ttl         time.Duration
+	instance    string
+	net         *simNet
+	admins      *jt.Admins
 
 	// Replication: the instance key (generated if nil), the peers, the
 	// replication listener ("" for none), the links that carry it, and
@@ -197,20 +200,37 @@ func prepareEnv(t *testing.T, o envOptions) *env {
 	if err := os.WriteFile(keyPath, pemBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	var xkeyPath string
+	if o.exchangeKey != nil {
+		var xpem []byte
+		if o.passphrase != "" {
+			xpem, err = keys.EncryptExchangeKeyPEM(o.exchangeKey, []byte(o.passphrase))
+		} else {
+			xpem, err = keys.MarshalExchangeKeyPEM(o.exchangeKey)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		xkeyPath = filepath.Join(dir, "exchange.key")
+		if err := os.WriteFile(xkeyPath, xpem, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	apiAddr := freePort(t)
 	cfg := authority.Config{
-		Instance:      o.instance,
-		TrustDomain:   trustDomain,
-		Issuer:        "https://ergosum.example.com",
-		TokenTTL:      o.ttl,
-		SigningKey:    keyPath,
-		Journal:       filepath.Join(dir, "journal.db"),
-		Listen:        apiAddr,
-		OpsListen:     "127.0.0.1:0",
-		ControlSocket: filepath.Join(dir, "control.sock"),
-		Registry:      o.admins.Registry(o.threshold),
-		Replication:   authority.ReplicationConfig{Listen: o.replListen, Peers: o.peers},
-		Compaction:    o.compaction,
+		Instance:        o.instance,
+		TrustDomain:     trustDomain,
+		Issuer:          "https://ergosum.example.com",
+		TokenTTL:        o.ttl,
+		SigningKey:      keyPath,
+		ExchangeKeyFile: xkeyPath,
+		Journal:         filepath.Join(dir, "journal.db"),
+		Listen:          apiAddr,
+		OpsListen:       "127.0.0.1:0",
+		ControlSocket:   filepath.Join(dir, "control.sock"),
+		Registry:        o.admins.Registry(o.threshold),
+		Replication:     authority.ReplicationConfig{Listen: o.replListen, Peers: o.peers},
+		Compaction:      o.compaction,
 	}
 	cfg.Callbacks.Timeout = 3 * time.Second
 	for _, n := range o.networks {

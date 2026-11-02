@@ -17,12 +17,14 @@ import (
 	"net/netip"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/journal"
 	"github.com/DunkelCloud/ergosum/internal/jwt"
 	"github.com/DunkelCloud/ergosum/internal/keys"
+	"github.com/DunkelCloud/ergosum/internal/metrics"
 	"github.com/DunkelCloud/ergosum/internal/protocol"
 	"github.com/DunkelCloud/ergosum/internal/tlspin"
 )
@@ -53,18 +55,40 @@ type plannedCheck struct {
 	targets []string // net checks: candidate addresses
 }
 
+// requestKind sets token requests and exchange requests (ADR 0004) apart:
+// they run the same procedure, but sign under their own context and count
+// and log under their own names.
+type requestKind struct {
+	event   string // audit "event"; the message reads it with spaces
+	context string // signature context of the request
+	metric  *metrics.Vec
+}
+
+func (k requestKind) message(result string) string {
+	return strings.ReplaceAll(k.event, "_", " ") + " " + result
+}
+
+// readEnvelope reads the request body as an envelope. Reading the body to
+// its end lets the server notice when the requester goes away, which
+// cancels r.Context() (see the end of the callbacks).
+func (a *Authority) readEnvelope(w http.ResponseWriter, r *http.Request) (protocol.Envelope, bool) {
+	data, err := readBody(w, r, 64<<10)
+	var env protocol.Envelope
+	if err != nil || json.Unmarshal(data, &env) != nil {
+		a.writeError(w, http.StatusBadRequest, protocol.ErrBadRequest, "malformed envelope")
+		return env, false
+	}
+	return env, true
+}
+
 func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 	key, _ := a.signingKey()
 	if key == nil {
 		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "sealed")
 		return
 	}
-	// Reading the body to its end lets the server notice when the requester
-	// goes away, which cancels r.Context() (see the end of the callbacks).
-	data, err := readBody(w, r, 64<<10)
-	var env protocol.Envelope
-	if err != nil || json.Unmarshal(data, &env) != nil {
-		a.writeError(w, http.StatusBadRequest, protocol.ErrBadRequest, "malformed envelope")
+	env, ok := a.readEnvelope(w, r)
+	if !ok {
 		return
 	}
 	var req protocol.TokenRequest
@@ -76,11 +100,45 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, protocol.ErrUnsupported, "")
 		return
 	}
-	pub, addrs, err := validateRequest(&req)
+	pub, addrs, err := validateRequest(&req, protocol.TypeTokenRequest)
 	if err != nil {
 		a.writeError(w, http.StatusBadRequest, protocol.ErrBadRequest, err.Error())
 		return
 	}
+	p, ok := a.admit(w, r, a.tokenKind, env, &req, pub, addrs)
+	if !ok {
+		return
+	}
+	defer p.release()
+
+	token, claims, err := a.issue(key, p.binding, p.obs.Checks)
+	if err != nil {
+		a.log.Error("signing token failed", "err", err)
+		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "")
+		return
+	}
+	p.obs.TokenID = claims.ID
+	a.record(r.Context(), a.tokenKind, ResultIssued, p.obs)
+	writeJSON(w, http.StatusOK, protocol.TokenResponse{
+		V: protocol.Version, Token: token,
+		ExpiresAt:  time.Unix(claims.Expiry, 0).UTC(),
+		ServerTime: a.now().UTC(),
+	})
+}
+
+// admitted is a request that passed every step before issuing.
+type admitted struct {
+	binding *journal.Binding
+	obs     Observation // with the outcomes of the checks
+	release func()      // ends the request for the identity's limit
+}
+
+// admit runs the procedure of ADR 0001 on a decoded and validated request,
+// up to the point where a token would be issued: timestamp, binding, key,
+// signature, addressee, rate limit, replay, checks. It answers every
+// refusal itself.
+func (a *Authority) admit(w http.ResponseWriter, r *http.Request, kind requestKind, env protocol.Envelope,
+	req *protocol.TokenRequest, pub *ecdsa.PublicKey, addrs []netip.Addr) (admitted, bool) {
 	now := a.now()
 	if d := now.Sub(req.Timestamp); d > a.cfg.ClockSkew || d < -a.cfg.ClockSkew {
 		// Not yet verified: anyone can send this, so the warning is limited.
@@ -88,7 +146,7 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 			a.log.Warn("request timestamp outside the accepted window", "identity", req.Identity, "skew", d.String())
 		}
 		a.writeError(w, http.StatusBadRequest, protocol.ErrClockSkew, "")
-		return
+		return admitted{}, false
 	}
 
 	ctx := r.Context()
@@ -100,75 +158,79 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.log.Error("journal read failed", "err", err)
 		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "")
-		return
+		return admitted{}, false
 	}
 	switch {
 	case b == nil:
-		a.deny(ctx, w, ResultUnknownIdentity, obs, "no binding")
-		return
+		a.deny(ctx, w, kind, ResultUnknownIdentity, obs, "no binding")
+		return admitted{}, false
 	case !b.Active():
 		obs.Epoch = b.Epoch
-		a.deny(ctx, w, ResultUnknownIdentity, obs, "binding revoked")
-		return
+		a.deny(ctx, w, kind, ResultUnknownIdentity, obs, "binding revoked")
+		return admitted{}, false
 	}
 	obs.Epoch = b.Epoch
 	if keys.Fingerprint(pub) != b.Key {
-		a.deny(ctx, w, ResultForeignKey, obs, "key does not match the binding")
-		return
+		a.deny(ctx, w, kind, ResultForeignKey, obs, "key does not match the binding")
+		return admitted{}, false
 	}
-	if !env.Verify(pub, protocol.ContextRequest) {
-		a.deny(ctx, w, ResultForeignKey, obs, "request signature does not verify")
-		return
+	if !env.Verify(pub, kind.context) {
+		a.deny(ctx, w, kind, ResultForeignKey, obs, "request signature does not verify")
+		return admitted{}, false
 	}
 	// A request addressed to another instance gets no callback: the daemon
 	// has it in flight to that instance and would answer "no open request",
 	// which must remain proof of a second key.
 	if req.To != keys.Fingerprint(a.public) {
-		a.deny(ctx, w, ResultMisdirected, obs, "request addressed to "+req.To)
-		return
+		a.deny(ctx, w, kind, ResultMisdirected, obs, "request addressed to "+req.To)
+		return admitted{}, false
 	}
 	// What a holder of the bound key can make the instance do is bounded:
-	// callbacks, journal entries, audit lines and the replay cache.
+	// callbacks, journal entries, audit lines and the replay cache. Token
+	// and exchange requests share the limit.
 	release, ok := a.perID.acquire(req.Identity, now)
 	if !ok {
-		a.requests.Inc(ResultRateLimited)
+		kind.metric.Inc(ResultRateLimited)
 		if a.limiter.allow(ResultRateLimited+" "+req.Identity, now) {
-			a.audit.Warn("token request "+ResultRateLimited, "event", "token_request", "result", ResultRateLimited,
+			a.audit.Warn(kind.message(ResultRateLimited), "event", kind.event, "result", ResultRateLimited,
 				"identity", req.Identity, "key", obs.Key, "remote", obs.Remote)
 		}
 		a.writeError(w, http.StatusTooManyRequests, protocol.ErrRateLimited, "")
-		return
+		return admitted{}, false
 	}
-	defer release()
 	// The daemon never reuses a request ID. A repeat comes from a second
 	// holder of the key replaying an ID it has seen; it gets no callbacks.
 	if !a.seen.first(req.Identity+" "+req.RequestID, now) {
-		a.deny(ctx, w, ResultReplay, obs, "request ID already processed")
-		return
+		release()
+		a.deny(ctx, w, kind, ResultReplay, obs, "request ID already processed")
+		return admitted{}, false
 	}
 
 	plan, notResponsible := a.plan(b, addrs)
 	if notResponsible != "" {
+		release()
 		a.log.Info("net check needs another instance", "identity", req.Identity, "prefix", notResponsible)
 		a.writeError(w, http.StatusMisdirectedRequest, protocol.ErrNotResponsible, notResponsible)
-		return
+		return admitted{}, false
 	}
-	outcomes := a.runChecks(ctx, plan, &req, pub)
+	outcomes := a.runChecks(ctx, plan, req, pub)
 	if ctx.Err() != nil {
 		// The requester is gone (timeout, crash, restart). Nobody can receive
-		// a token, and a "no open request" from a daemon that has dropped the
-		// request proves nothing: the request is discarded without a trace in
-		// the journal.
+		// the answer, and a "no open request" from a daemon that has dropped
+		// the request proves nothing: the request is discarded without a
+		// trace in the journal.
+		release()
 		a.log.Info("request abandoned by the requester", "identity", req.Identity, "request_id", req.RequestID)
-		return
+		return admitted{}, false
 	}
 	for _, o := range outcomes {
 		if o.Outcome == OutcomeEnded {
 			// The daemon says it gave up on this request, or a restarted
 			// daemon cannot tell: discarded like an abandoned request.
+			release()
 			a.log.Info("request ended at the machine", "identity", req.Identity, "request_id", req.RequestID, "detail", o.Detail)
 			a.writeError(w, http.StatusForbidden, protocol.ErrDenied, "")
-			return
+			return admitted{}, false
 		}
 	}
 	obs.Checks = outcomes
@@ -186,27 +248,15 @@ func (a *Authority) handleToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if result != ResultIssued {
-		a.deny(ctx, w, result, obs, "")
-		return
+		release()
+		a.deny(ctx, w, kind, result, obs, "")
+		return admitted{}, false
 	}
-
-	token, claims, err := a.issue(key, b, outcomes)
-	if err != nil {
-		a.log.Error("signing token failed", "err", err)
-		a.writeError(w, http.StatusServiceUnavailable, protocol.ErrUnavailable, "")
-		return
-	}
-	obs.TokenID = claims.ID
-	a.record(ctx, ResultIssued, obs)
-	writeJSON(w, http.StatusOK, protocol.TokenResponse{
-		V: protocol.Version, Token: token,
-		ExpiresAt:  time.Unix(claims.Expiry, 0).UTC(),
-		ServerTime: a.now().UTC(),
-	})
+	return admitted{binding: b, obs: obs, release: release}, true
 }
 
-func validateRequest(req *protocol.TokenRequest) (*ecdsa.PublicKey, []netip.Addr, error) {
-	if req.Type != protocol.TypeTokenRequest {
+func validateRequest(req *protocol.TokenRequest, typ string) (*ecdsa.PublicKey, []netip.Addr, error) {
+	if req.Type != typ {
 		return nil, nil, errors.New("wrong message type")
 	}
 	if !protocol.ValidDNSName(req.Identity) {
@@ -416,9 +466,9 @@ func (a *Authority) issue(key *ecdsa.PrivateKey, b *journal.Binding, outcomes []
 
 // deny answers a failed request with a uniform "denied"; the reason goes to
 // the audit log and the journal only.
-func (a *Authority) deny(ctx context.Context, w http.ResponseWriter, result string, obs Observation, reason string) {
+func (a *Authority) deny(ctx context.Context, w http.ResponseWriter, kind requestKind, result string, obs Observation, reason string) {
 	obs.Reason = reason
-	a.record(ctx, result, obs)
+	a.record(ctx, kind, result, obs)
 	a.writeError(w, http.StatusForbidden, protocol.ErrDenied, "")
 }
 
@@ -428,16 +478,17 @@ func (a *Authority) deny(ctx context.Context, w http.ResponseWriter, result stri
 // count in the metric and reach the audit log within an overall limit, but
 // never the journal. Refusals that a key holder can repeat at will (wrong
 // location, replay) are journaled once per identity and minute. Proven key
-// duplicates and replays are logged as alerts.
-func (a *Authority) record(ctx context.Context, result string, obs Observation) {
-	a.requests.Inc(result)
+// duplicates and replays are logged as alerts. Exchange requests leave the
+// same observations as token requests.
+func (a *Authority) record(ctx context.Context, kind requestKind, result string, obs Observation) {
+	kind.metric.Inc(result)
 	obs.Kind = journal.KindObservation + "." + result
 	now := a.now()
 	verified := result != ResultForeignKey && result != ResultUnknownIdentity
 	switch {
 	case !verified:
 		if a.unverified.allow(now) {
-			a.audit.Warn("token request "+result, "event", "token_request", "result", result,
+			a.audit.Warn(kind.message(result), "event", kind.event, "result", result,
 				"identity", obs.Identity, "key", obs.Key, "remote", obs.Remote, "reason", obs.Reason)
 		}
 		return
@@ -447,7 +498,7 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 		}
 	}
 	attrs := []any{
-		"event", "token_request", "result", result, "identity", obs.Identity,
+		"event", kind.event, "result", result, "identity", obs.Identity,
 		"request_id", obs.RequestID, "key", obs.Key, "remote", obs.Remote, "epoch", obs.Epoch,
 	}
 	if obs.Reason != "" {
@@ -475,7 +526,7 @@ func (a *Authority) record(ctx context.Context, result string, obs Observation) 
 	case ResultWrongLocation:
 		level = slog.LevelWarn
 	}
-	a.audit.Log(ctx, level, "token request "+result, attrs...)
+	a.audit.Log(ctx, level, kind.message(result), attrs...)
 
 	// Peers accept only observations of a bounded shape; free texts are
 	// clipped to it, and anything else would stop replication there.
