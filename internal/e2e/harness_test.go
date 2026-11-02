@@ -14,10 +14,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -142,14 +144,44 @@ func quietLogger(t *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// Ports for freePort, below the ephemeral ranges of Linux (from 32768),
+// macOS and Windows (from 49152).
+const (
+	firstFreePort = 20000
+	lastFreePort  = 32767
+)
+
+var (
+	portsMu    sync.Mutex
+	portsGiven = map[int]bool{}
+)
+
+// freePort returns an address on 127.0.0.1 that nothing listens on, for a
+// listener a test opens later or for a URL that does not answer. The kernel
+// takes a port from its ephemeral range for every listener on port 0 and
+// every outgoing connection, and one of those could take a port from that
+// range before the test binds it ("address already in use"). freePort
+// therefore takes a random port below that range, and none twice.
 func freePort(t *testing.T) string {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	t.Helper()
+	portsMu.Lock()
+	defer portsMu.Unlock()
+	for range 100 {
+		port := firstFreePort + rand.IntN(lastFreePort-firstFreePort+1)
+		if portsGiven[port] {
+			continue
+		}
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			continue // in use, or excluded as on Windows
+		}
+		ln.Close()
+		portsGiven[port] = true
+		return addr
 	}
-	addr := ln.Addr().String()
-	ln.Close()
-	return addr
+	t.Fatal("no free port below the ephemeral range")
+	return ""
 }
 
 func newEnv(t *testing.T, o envOptions) *env {
