@@ -78,6 +78,10 @@ if $install >/tmp/out 2>&1; then fail "installed without --anchor"; fi
 grep -q 'needs --anchor' /tmp/out || { cat /tmp/out; fail "no hint at --anchor"; }
 if $install --anchor nonsense >/tmp/out 2>&1; then fail "installed with a bad anchor"; fi
 grep -q 'KEY@URL' /tmp/out || { cat /tmp/out; fail "no hint at the anchor's form"; }
+for key in "SHA256:$(printf '%064d' 0)" "SHA256:AAAA" "SHA256:$(printf '%042d' 0)-"; do
+	if $install --anchor "$key@https://192.0.2.10:7432" >/tmp/out 2>&1; then fail "installed with the key $key"; fi
+	grep -q "$key in --anchor is no key fingerprint" /tmp/out || { cat /tmp/out; fail "key $key not refused"; }
+done
 if $install --signers "$T/other-signers" --anchor "$anchor" >/tmp/out 2>&1; then
 	fail "installed a release signed with another key"
 fi
@@ -111,11 +115,13 @@ grep -q 'identity "hosts-macbook-pro.local" from hostname -f is a multicast DNS 
 ! id "$svc_user" >/dev/null 2>&1 || fail "refused runs created the user $svc_user"
 
 log "configuration that ergosumd refuses"
-# A fingerprint of the wrong length passes the script's check of the
-# anchor's form; ergosumd refuses it after the binary and the user are in
-# place, which a second run keeps.
-if $install --anchor "SHA256:AAAA@https://192.0.2.10:7432" >/tmp/out 2>&1; then fail "installed with a bad fingerprint"; fi
-grep -q 'refuses the configuration' /tmp/out || { cat /tmp/out; fail "bad fingerprint not refused by ergosumd"; }
+# A URL without a port passes the script's check of the anchor's form;
+# ergosumd refuses it after the binary and the user are in place, which a
+# second run keeps.
+if $install --anchor "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@https://192.0.2.10" >/tmp/out 2>&1; then
+	fail "installed with a URL without a port"
+fi
+grep -q 'refuses the configuration: .*needs a port' /tmp/out || { cat /tmp/out; fail "URL without a port not refused by ergosumd"; }
 [ ! -e /etc/ergosum/ergosumd.yaml ] || fail "configuration left by a refused run"
 [ ! -e /etc/ergosum/ergosumd.yaml.new ] || fail "draft configuration left by a refused run"
 ! running || fail "daemon started by a refused run"

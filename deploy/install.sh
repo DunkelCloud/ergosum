@@ -184,6 +184,13 @@ if [ -n "$unbound" ] && [ ! -e "$config" ]; then
 	SHA256:*@https://*) ;;
 	*) die "--anchor needs KEY@URL[,URL...], such as SHA256:...@https://192.0.2.10:7432" ;;
 	esac
+	# The form ergosum keygen prints: SHA256: and 43 characters of base64.
+	key=${anchor%%@*}
+	case ${key#SHA256:} in
+	*[!A-Za-z0-9+/]*) key= ;;
+	esac
+	[ ${#key} -eq 50 ] ||
+		die "${anchor%%@*} in --anchor is no key fingerprint: SHA256: and 43 characters of base64 (not hex), as ergosum keygen prints it and the authority logs at its start"
 	if [ -n "$identity" ]; then
 		[ -z "$domain" ] || die "--identity and --domain exclude each other"
 		from=--identity

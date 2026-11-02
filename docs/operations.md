@@ -79,7 +79,9 @@ sh install.sh --domain example.com --anchor 'SHA256:...@https://100.64.0.10:7432
 ```
 
 `--anchor` names one authority instance: its key fingerprint and its URLs,
-separated by commas (see `authorities` below). The identity names the
+separated by commas (see `authorities` below). The fingerprint is the one
+`ergosum keygen` printed, `SHA256:` and 43 characters of base64; the
+authority also logs it when it starts. The identity names the
 machine in its binding, in its token and in Vault: a DNS name in lower
 case, which need not resolve. `--domain example.com` makes it the host name
 in that domain, such as `host1.example.com`, so the same line serves every

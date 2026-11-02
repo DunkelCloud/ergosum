@@ -121,7 +121,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("authorities[%d]: %w", i, err))
 		}
 		if !keys.ValidFingerprint(a.Key) {
-			errs = append(errs, fmt.Errorf("authorities[%d]: key must be a SHA256 fingerprint", i))
+			errs = append(errs, fmt.Errorf("authorities[%d]: key %q is no key fingerprint (SHA256: and 43 characters of base64, as ergosum keygen prints it)", i, a.Key))
 		}
 	}
 	if _, err := protocol.ParseAddresses(c.Addresses); err != nil {
