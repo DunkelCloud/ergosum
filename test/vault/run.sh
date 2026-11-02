@@ -13,7 +13,9 @@
 # examples/vault-agent, and a restic backup runs with them. After the Vault
 # token's max TTL the agent logs in again with the token that is in the file
 # at that time. The authority key changes (a new instance; both keys, then only
-# the new one), and the rollback removes mount and policy and nothing else.
+# the new one). With -all-identities the role admits every identity of the
+# trust domain and none of another, and each machine still reads only its own
+# secrets. The rollback removes mount and policy and nothing else.
 #
 # Needs root, iproute2, curl, jq, ssh-keygen, restic and vault. Usage:
 #   sudo BIN=dist VAULT_BIN=/usr/local/bin/vault test/vault/run.sh
@@ -113,15 +115,15 @@ authorities:
     key: "$(fingerprint "$4")"
 EOF
 }
-event() { # identity daemon-dir
-	local fp
+event() { # identity daemon-dir [trust-domain]
+	local fp td=${3:-example.com}
 	fp=$(in_ns host1 "$BIN/ergosumd" fingerprint --config "$W/$2/ergosumd.yaml")
-	printf 'ergosum binding v1\nkind binding.set\ntrust-domain example.com\nidentity %s\nepoch 1\nkey %s\ncheck net 198.51.100.0/24\n' "$1" "$fp" > "$W/$1.txt"
-	ssh-keygen -q -Y sign -f "$W/alice" -n ergosum-binding "$W/$1.txt"
-	jq -n --arg id "$1" --arg key "$fp" --rawfile sig "$W/$1.txt.sig" '{
-		v: 1, kind: "binding.set", trust_domain: "example.com", identity: $id,
+	printf 'ergosum binding v1\nkind binding.set\ntrust-domain %s\nidentity %s\nepoch 1\nkey %s\ncheck net 198.51.100.0/24\n' "$td" "$1" "$fp" > "$W/$1.$td.txt"
+	ssh-keygen -q -Y sign -f "$W/alice" -n ergosum-binding "$W/$1.$td.txt"
+	jq -n --arg td "$td" --arg id "$1" --arg key "$fp" --rawfile sig "$W/$1.$td.txt.sig" '{
+		v: 1, kind: "binding.set", trust_domain: $td, identity: $id,
 		epoch: 1, key: $key, checks: [{type: "net", target: "198.51.100.0/24"}], signatures: [$sig]
-	}' > "$W/$1.json"
+	}' > "$W/$1.$td.json"
 }
 daemon_config host1 "$H1" 7432 a
 daemon_config host2 "$H2" 7432 a
@@ -129,11 +131,12 @@ event "$H1" host1
 event "$H2" host2
 
 ops_up() { [ "$(in_ns authority curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$1/healthz" || true)" = 200 ]; }
-authority() { # name key port issuer audience
+authority() { # name key port issuer audience [trust-domain]
+	local td=${6:-example.com}
 	mkdir -p "$W/$1"
 	cat > "$W/$1/serve.yaml" <<EOF
 instance: $1
-trust_domain: example.com
+trust_domain: $td
 issuer: $4
 audience: $5
 signing_key: $W/$2.key
@@ -157,8 +160,9 @@ EOF
 	PID[$1]=$!
 	wait_for 10 "authority $1" ops_up $(($3 + 2))
 	for id in "$H1" "$H2"; do
+		[ -f "$W/$id.$td.json" ] || continue
 		code=$(in_ns host1 curl -sk -o "$W/bind.out" -w '%{http_code}' -H 'Content-Type: application/json' \
-			--data @"$W/$id.json" "https://198.51.100.2:$3/v1/bindings")
+			--data @"$W/$id.$td.json" "https://198.51.100.2:$3/v1/bindings")
 		[ "$code" = 201 ] || { cat "$W/bind.out"; fail "binding $id at $1 returned $code"; }
 	done
 }
@@ -304,13 +308,40 @@ cp "$W/host1/run/token" "$W/a2.jwt"
 T2=$(login "$W/a2.jwt") || { cat "$W/login.err"; fail "token from a2 refused"; }
 echo "key change ok"
 
+log "every identity of the trust domain, none of another"
+setup plan -key "$W/a2.pem" -all-identities -ttl 20s | tee "$W/plan.out"
+grep -q '^~ auth/machine/role/host: update' "$W/plan.out" || fail "plan does not update the role"
+grep -q '^= auth/machine/config: unchanged' "$W/plan.out" || fail "plan changes the keys"
+grep -q '^= policy host-secrets: unchanged' "$W/plan.out" || fail "plan changes the policy"
+setup apply -yes -key "$W/a2.pem" -identity "$H1" -all-identities 2> /dev/null && fail "accepted -identity with -all-identities"
+setup apply -yes -key "$W/a2.pem" -all-identities -ttl 20s
+setup plan -key "$W/a2.pem" -all-identities -ttl 20s | tee "$W/plan.out"
+grep -q '^No changes.' "$W/plan.out" || fail "second plan with -all-identities is not empty"
+v read -format=json auth/machine/role/host | jq -e '.data | .bound_claims_type == "glob" and
+	.bound_claims == {sub: "spiffe://example.com/host/*"}' >/dev/null || fail "unexpected role"
+n=$(logins)
+wait_for 60 "login of host1's agent" more_logins "$n"
+stop host1
+daemon_config host2 "$H2" 7472 a2
+token_once host2
+T3=$(login "$W/host2.jwt") || { cat "$W/login.err"; fail "host2 refused"; }
+as_host2() { in_ns host1 env VAULT_TOKEN="$T3" "$VAULT_BIN" "$@"; }
+as_host2 kv get -field=restic_password "secret/host/$H2/backup/credentials" >/dev/null || fail "host2 cannot read its credentials"
+as_host2 kv get "secret/host/$H1/backup/config" >/dev/null 2>&1 && fail "host2 read host1's config"
+event "$H1" host1 other.example
+authority other a2 7482 "$ISS" vault other.example
+token_once via-other "$H1" 7482 a2
+stop other
+refused "$W/via-other.jwt" 'bound claim|claim' "identity of another trust domain"
+echo "all identities ok"
+
 log "rollback"
 rollback -yes
 v auth list -format=json | jq -e 'has("machine/") | not' >/dev/null || fail "mount still there"
 v policy list -format=json | jq -e 'index("host-secrets") == null' >/dev/null || fail "policy still there"
 after=$(v auth list -format=json | jq -S 'with_entries(.value |= {type, accessor, description})'; v policy read existing; v policy read taken)
 [ "$before" = "$after" ] || fail "rollback changed existing configuration"
-for t in "$T1" "$T2"; do
+for t in "$T1" "$T2" "$T3"; do
 	in_ns host1 env VAULT_TOKEN="$t" "$VAULT_BIN" token lookup >/dev/null 2>&1 && fail "a token of the mount survived"
 done
 rollback -yes | grep -q 'nothing to roll back' || fail "second rollback"

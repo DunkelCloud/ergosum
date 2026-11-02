@@ -155,7 +155,8 @@ jobs:
     # configuration it must not touch, refused tokens (audience, issuer,
     # unknown key, identity not admitted), secrets of other machines out of
     # reach, rendered backup settings and a restic backup with them, a new
-    # login after the token's max TTL, a key change and the rollback.
+    # login after the token's max TTL, a key change, every identity of the
+    # trust domain admitted (and none of another) and the rollback.
     runs-on: ubuntu-latest
     env:
       VAULT_VERSION: "1.19.2"
