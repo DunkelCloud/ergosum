@@ -131,8 +131,8 @@ jobs:
     # convergence after a partition, compaction, and a new instance built
     # from a sync; then secrets without Vault: ergosumd secret create and
     # get with a threshold of 2, a restart, an instance down, a re-split
-    # when the list adds an instance, and a copy elsewhere that opens
-    # nothing.
+    # when the list adds an instance, a copy elsewhere that opens nothing,
+    # and part A at a relative -file that get opens only with that file.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0

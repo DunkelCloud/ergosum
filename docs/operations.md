@@ -181,6 +181,10 @@ RESTIC_PASSWORD_COMMAND='ergosumd secret get restic' restic snapshots
   the threshold, naming the instances that did not answer and why. It writes
   part A to `/etc/ergosum/secrets/NAME` (or `-file`), mode 0600, and never
   overwrites one. It removes one trailing newline from stdin; `-raw` keeps it.
+- With `-file`, part A lies at that path, a relative one taken from the
+  working directory. `get` and `info` look for NAME only in
+  `/etc/ergosum/secrets` and need the same `-file`; `create` names it as an
+  absolute path, the form a password command needs.
 - `get` writes the secret to stdout as stored, without a newline, and
   nothing else; on any failure stdout stays empty and the exit code is 1. It
   fits every tool with a password command (`restic --password-command`,

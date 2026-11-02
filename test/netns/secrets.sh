@@ -13,6 +13,10 @@
 # cannot read part A gets nothing. List 2 adds c: the daemon re-splits the
 # held secret, the next get replaces part A, and the new part A opens with
 # b and c while a is down. A copy of host1's disk elsewhere opens nothing.
+# Part A created with a relative -file lies in the working directory:
+# create names the absolute -file that get needs, get NAME alone says that
+# it looked only in the secrets directory, and get with that -file opens it
+# from elsewhere.
 #
 # Needs root, iproute2, curl, jq, ssh-keygen and setpriv. Usage:
 #   sudo BIN=dist test/netns/secrets.sh
@@ -254,5 +258,20 @@ fi
 [ ! -s "$W/got" ] || fail "stdout not empty for the clone"
 denied=$(metric a machine_identity_exchanges_total '{result="wrong_location"}')
 [ "${denied:-0}" -ge 1 ] || fail "no wrong_location exchange at a"
+
+log "a relative -file is from the working directory, and get needs it"
+stop clone
+daemon host1
+wait_for 20 "socket" test -S "$SOCK"
+mkdir -p "$W/cwd"
+printf 'elsewhere\n' | (cd "$W/cwd" && secret create netns-elsewhere -threshold 2 -file elsewhere) 2> "$W/create.err" ||
+	{ cat "$W/create.err"; fail "create with a relative -file"; }
+[ -f "$W/cwd/elsewhere" ] || fail "part A is not in the working directory of create"
+if secret get netns-elsewhere > "$W/got" 2> "$W/get.err"; then fail "get NAME opened part A outside the secrets directory"; fi
+[ ! -s "$W/got" ] || fail "stdout not empty on failure"
+grep -q -- '-file' "$W/get.err" || { cat "$W/get.err"; fail "get NAME does not point to -file"; }
+grep -q -- "-file $W/cwd/elsewhere\$" "$W/create.err" || { cat "$W/create.err"; fail "create does not name the -file for get"; }
+secret get -file "$W/cwd/elsewhere" > "$W/got" || fail "get with the absolute -file"
+printf 'elsewhere' | cmp - "$W/got" || fail "get with the absolute -file returned other bytes"
 
 log "OK"
