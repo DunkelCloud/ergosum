@@ -195,27 +195,13 @@ func (d *Daemon) refreshList(ctx context.Context, a *authorityClient, trustDomai
 	if trustDomain == "" && cur != nil {
 		return
 	}
-	resp, err := d.do(ctx, a, func(base string) (*http.Request, error) {
-		return http.NewRequestWithContext(ctx, http.MethodGet, base+protocol.PathAuthorities, http.NoBody)
-	})
-	if err != nil {
-		d.log.Warn("cannot read the authority list", "authority", a.name(), "err", err)
+	l, err := d.readList(ctx, a)
+	if errors.Is(err, errNoList) {
 		return
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	_ = resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return // the instance serves no list
-	}
-	var l protocol.AuthorityList
-	if err == nil && resp.StatusCode != http.StatusOK {
-		err = errors.New(resp.Status)
-	}
-	if err == nil {
-		err = json.Unmarshal(data, &l)
-	}
-	if err == nil {
-		err = l.Validate()
+	if err != nil && l == nil {
+		d.log.Warn("cannot read the authority list", "authority", a.name(), "err", err)
+		return
 	}
 	if err == nil && trustDomain != "" && l.TrustDomain != trustDomain {
 		err = fmt.Errorf("list for %s, token for %s", l.TrustDomain, trustDomain)
@@ -241,12 +227,43 @@ func (d *Daemon) refreshList(ctx context.Context, a *authorityClient, trustDomai
 	default:
 		return
 	}
-	stored, _ := json.Marshal(&l)
+	stored, _ := json.Marshal(l)
 	if err := keys.WriteFileAtomic(filepath.Join(d.cfg.StateDir, listFile), stored, 0o600); err != nil {
 		d.log.Warn("cannot store the authority list", "err", err)
 	}
-	d.setAuthorities(&l)
+	d.setAuthorities(l)
 	d.log.Info("authority list taken", "authority", a.name(), "serial", l.Serial, "instances", len(l.Authorities))
+}
+
+// errNoList: the instance serves no authority list.
+var errNoList = errors.New("the instance serves no authority list")
+
+// readList fetches an instance's authority list. A list that arrives but
+// does not validate comes back with the error, so that the caller can name
+// it; an unreachable instance returns no list.
+func (d *Daemon) readList(ctx context.Context, a *authorityClient) (*protocol.AuthorityList, error) {
+	resp, err := d.do(ctx, a, func(base string) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, base+protocol.PathAuthorities, http.NoBody)
+	})
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errNoList
+	}
+	var l protocol.AuthorityList
+	if err == nil && resp.StatusCode != http.StatusOK {
+		err = errors.New(resp.Status)
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &l)
+	}
+	if err == nil {
+		err = l.Validate()
+	}
+	return &l, err
 }
 
 // trustDomainOf returns the trust domain of a token's SPIFFE subject.

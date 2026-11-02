@@ -28,10 +28,18 @@ func usage() {
   ergosumd check [-config %[1]s]
   ergosumd version
 
+Secrets without Vault (part A in %[2]s/NAME unless -file is given):
+  ergosumd secret create NAME -threshold K [-recovery RECIPIENT]... [-raw] [-file PATH]
+  ergosumd secret get NAME [-file PATH]
+  ergosumd secret info NAME [-file PATH]
+
 Run request and fingerprint as the service user (sudo -u ergosum ...):
 they create the key on first use. check connects to each authority URL
 and fails if one presents another key than the configured one.
-`, defaultConfig)
+secret create reads the secret from stdin and removes one trailing
+newline (-raw keeps it); secret get writes it to stdout as stored, and
+fits as a password command (restic --password-command and the like).
+`, defaultConfig, defaultSecretDir)
 }
 
 func main() {
@@ -51,6 +59,8 @@ func main() {
 		err = fingerprint(os.Args[2:])
 	case "check":
 		err = check(os.Args[2:])
+	case "secret":
+		err = secretCmd(os.Args[2:])
 	case "version":
 		fmt.Println("ergosumd", version.String())
 	case "help", "-h", "--help":

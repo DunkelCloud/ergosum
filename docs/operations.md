@@ -154,8 +154,66 @@ Metrics (node_exporter textfile collector, `metrics_file`):
 | `machine_identity_key_change_pending` | 1 while a new key waits for its binding |
 | `machine_identity_build_info{version,commit}` | 1; version and commit of the running binary |
 | `machine_identity_authorities_serial` | serial of the authority list in use; 0 while the daemon knows only its configuration |
+| `machine_identity_secret_threshold{name}` | threshold of each secret the daemon holds open (see *Secrets without Vault*) |
+| `machine_identity_secret_pins{name}` | pinned instances of that secret that answered its last refresh |
+| `machine_identity_secret_reshare_pending{name}` | 1 while a re-split part A waits for the next `get` to write it |
 
 Short token lifetimes need synchronized clocks.
+
+### Secrets without Vault
+
+A machine can keep a secret on its disk only sealed, as *part A*, and open
+it after it has passed the checks of its binding at a threshold of authority
+instances ([ADR 0004](adr/0004-releasing-secrets-without-vault.md)). Part A
+may lie in backups and repositories: a copy elsewhere fails the checks and
+opens nothing. The instances need an exchange key (see *Exchange key*).
+
+```sh
+# as root on the machine; reads the secret from stdin
+printf '%s\n' "$RESTIC_PASSWORD" | ergosumd secret create restic -threshold 2 \
+  -recovery 'age1...' -recovery 'ssh-ed25519 AAAA... admin@example.com'
+ergosumd secret info restic
+RESTIC_PASSWORD_COMMAND='ergosumd secret get restic' restic snapshots
+```
+
+- `create` pins a share to every instance of the authority list that hands
+  out a release key for the machine (at most 16), and fails with fewer than
+  the threshold, naming the instances that did not answer and why. It writes
+  part A to `/etc/ergosum/secrets/NAME` (or `-file`), mode 0600, and never
+  overwrites one. It removes one trailing newline from stdin; `-raw` keeps it.
+- `get` writes the secret to stdout as stored, without a newline, and
+  nothing else; on any failure stdout stays empty and the exit code is 1. It
+  fits every tool with a password command (`restic --password-command`,
+  `RESTIC_PASSWORD_COMMAND`, `BORG_PASSCOMMAND`).
+- `info` shows name, identity, threshold, pins and whether a recovery copy
+  exists; it needs no daemon.
+- Who may read part A may open the secret: the CLI reads the file with the
+  caller's rights and hands it to the daemon over its socket
+  (`secret_socket`, mode 0600; `secret_socket_group` opens it to one group).
+  The daemon logs every request with the caller's UID.
+- The daemon holds an opened secret in memory and answers from there while
+  it holds a valid token and no pin denied the last refresh. After each
+  token round it refreshes every held secret at its pinned instances, one
+  request per instance. A revoked binding stops the secret at the next
+  round; an outage of the authorities does not, while the token lasts.
+  After a restart of the daemon, the first `get` needs the threshold of
+  pinned instances.
+- When the authority list changes, the daemon re-splits held secrets: it
+  drops instances no longer listed and pins listed ones that hand out a
+  release key, but only if at least the threshold of pinned instances serve
+  the same list, and never below the threshold. The next `get` replaces part
+  A atomically with the same owner and mode and says so on stderr; if it
+  cannot write the file, the re-split stays pending.
+- The way back without any instance: `recovery` in part A is an age file to
+  the `-recovery` recipients. Copy that member to a file and run
+  `age -d -i KEY file` with the stock `age` tool; ergosum is not needed.
+- Alert when `machine_identity_secret_pins` drops below
+  `machine_identity_secret_threshold` (`ErgosumSecretPinsBelowThreshold` in
+  `deploy/prometheus/ergosum-alerts.yml`), not by lowering the threshold.
+- Limits: no rotation (a changed secret needs a new part A; old copies open
+  as long as their pins' exchange keys exist), root on the machine reads
+  part A and reaches the socket, and with a threshold of 1 one instance's
+  exchange key plus a copy of part A opens the secret without any check.
 
 ### On a Mac
 

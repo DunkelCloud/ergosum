@@ -181,6 +181,8 @@ A JSON file, written by the CLI:
 }
 ```
 
+- Binary members (`client_point`, `share`, `ciphertext`) are unpadded
+  base64url, like the points; `recovery` is ASCII-armored.
 - A random 32-byte **master** `m` encrypts the secret: AES-256-GCM with the
   key `HKDF-SHA256(ikm = m, salt = "ergosum/v1/secret", info = td || 0x00
   || id || 0x00 || name, L = 32)`, a random 96-bit nonce and the associated

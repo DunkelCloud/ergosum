@@ -38,3 +38,12 @@ authorities:
     urls:
       - https://100.64.0.10:7432
       - https://192.0.2.10:7432
+
+# Secrets without Vault ("ergosumd secret", ADR 0004). The CLI talks to the
+# running daemon over this socket. Default: secret.sock next to token_file;
+# "-" disables it. Mode 0600 (root and the daemon's user); a group opens it
+# to that group's members, mode 0660, and the daemon's user must be a member
+# (systemd: SupplementaryGroups=). Every secret opened costs exchanges out of
+# the identity's rate budget at the authorities.
+# secret_socket: /run/ergosum/secret.sock
+# secret_socket_group: ""

@@ -81,3 +81,15 @@ groups:
           severity: warning
         annotations:
           summary: "{{ $labels.instance }}: no own checkpoint for {{ $value | humanizeDuration }}"
+
+      # A held secret (ADR 0004, daemon metrics) has fewer answering pins
+      # than its threshold: after a restart of the daemon it would not
+      # open. Bring the instances back or re-split; never lower the
+      # threshold.
+      - alert: ErgosumSecretPinsBelowThreshold
+        expr: machine_identity_secret_pins < machine_identity_secret_threshold
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}: secret {{ $labels.name }} has {{ $value }} answering pins, below its threshold"
