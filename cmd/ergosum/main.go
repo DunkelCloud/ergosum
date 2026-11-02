@@ -30,7 +30,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `usage:
   ergosum serve [-config %[1]s] [-log-format json|text]
   ergosum unseal [-socket %[2]s]
-  ergosum keygen -out FILE [-encrypt] [-exchange]
+  ergosum keygen -out FILE [-encrypt] [-exchange] [-from PLAIN-KEY-FILE]
   ergosum version
 
 Journal of the local instance (through its control socket):
@@ -144,12 +144,36 @@ func keygen(args []string) error {
 	out := fs.String("out", "", "file to write the private key to (must not exist)")
 	encrypt := fs.Bool("encrypt", false, "encrypt the key with a passphrase; the instance then starts sealed")
 	exchange := fs.Bool("exchange", false, "write an exchange key for releasing secrets (exchange_key_file) instead of a signing key")
+	from := fs.String("from", "", "encrypt this existing plain key file instead of generating a key (with -encrypt)")
 	_ = fs.Parse(args)
 	if *out == "" {
 		return errors.New("-out is required")
 	}
 	if _, err := os.Stat(*out); err == nil {
 		return fmt.Errorf("%s exists; refusing to overwrite a key", *out)
+	}
+	if *from != "" {
+		if !*encrypt {
+			return errors.New("-from needs -encrypt: it encrypts an existing key")
+		}
+		prompt := "New passphrase: "
+		if *exchange {
+			prompt = "Passphrase of the signing key: "
+		}
+		pass, err := readPassphrase(prompt, true)
+		if err != nil {
+			return err
+		}
+		defer wipe(pass)
+		data, summary, err := encryptExisting(*from, *exchange, pass)
+		if err != nil {
+			return err
+		}
+		if err := keys.WriteFileAtomic(*out, data, 0o600); err != nil {
+			return err
+		}
+		fmt.Print(summary)
+		return nil
 	}
 	if *exchange {
 		return keygenExchange(*out, *encrypt)

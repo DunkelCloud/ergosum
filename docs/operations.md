@@ -300,6 +300,21 @@ operator runs, on the same host,
 ergosum unseal                       # reads the passphrase from the terminal or stdin
 ```
 
+To change a running instance to an encrypted key without a new key (Vault
+and the authority lists stay as they are):
+
+```sh
+cd /etc/ergosum
+ergosum keygen -from signing.key -encrypt -out signing.key.enc   # prints kid and fingerprint: unchanged
+chgrp ergosum-authority signing.key.enc && chmod 0640 signing.key.enc
+mv signing.key.enc signing.key        # then restart the instance and unseal it
+```
+
+`-from` refuses a key that is encrypted already, and checks the result by
+decrypting it again. With `-exchange` it does the same for an exchange key,
+with the signing key's passphrase. Copies of the plain key in earlier
+backups or snapshots stay plain; where they matter, change the key instead.
+
 The control socket (`/var/lib/ergosum-authority/control.sock`, mode 0600, run
 `ergosum unseal` as `ergosum-authority` or root) is the only
 way in; it is not reachable over the network. A sealed instance does not
