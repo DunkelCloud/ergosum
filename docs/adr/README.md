@@ -13,4 +13,3 @@ that supersedes the old one.
 | [0002](0002-token-format.md) | Identity token format | proposed |
 | [0003](0003-journal-format-and-replication.md) | Binding journal format and replication | proposed |
 | [0004](0004-releasing-secrets-without-vault.md) | Releasing secrets without Vault | proposed |
-| [0005](0005-unsealing-through-the-other-instances.md) | Unsealing an instance through the other instances | proposed |
