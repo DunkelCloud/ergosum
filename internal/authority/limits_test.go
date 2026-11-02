@@ -156,7 +156,7 @@ func TestKeyMode(t *testing.T) {
 		if err := os.Chmod(path, mode); err != nil {
 			t.Fatal(err)
 		}
-		if err := checkKeyMode(path); (err == nil) != ok {
+		if err := checkKeyMode("signing key", path); (err == nil) != ok {
 			t.Errorf("mode %04o: %v", mode, err)
 		}
 	}

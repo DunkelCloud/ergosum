@@ -78,21 +78,26 @@ type Authority struct {
 	perID      *identityLimit
 	lists      listCache
 
-	metrics  *metrics.Registry
-	requests *metrics.Vec
-	sealedG  *metrics.Vec
-	bindings *metrics.Vec
-	jm       *journalMetrics
+	metrics   *metrics.Registry
+	requests  *metrics.Vec
+	exchanges *metrics.Vec
+	sealedG   *metrics.Vec
+	bindings  *metrics.Vec
+	jm        *journalMetrics
+
+	tokenKind, exchangeKind requestKind
 
 	repl *replicationState
 
-	keyFile *keys.KeyFile
-	public  *ecdsa.PublicKey
-	kid     string
-	list    *authorityList // nil without Config.AuthoritiesFile
+	keyFile      *keys.KeyFile
+	exchangeFile *keys.ExchangeKeyFile // nil without Config.ExchangeKeyFile
+	public       *ecdsa.PublicKey
+	kid          string
+	list         *authorityList // nil without Config.AuthoritiesFile
 
 	mu       sync.RWMutex
 	key      *ecdsa.PrivateKey // nil while sealed
+	xkey     []byte            // the exchange key; nil without one or while sealed
 	cert     tls.Certificate
 	unsealed chan struct{}
 
@@ -144,7 +149,7 @@ func New(cfg Config, opts Options) (*Authority, error) {
 		a.net = &SystemNetwork{TailnetPrefixes: rs.overlay, Timeout: cfg.Callbacks.Timeout}
 	}
 
-	if err := checkKeyMode(cfg.SigningKey); err != nil {
+	if err := checkKeyMode("signing key", cfg.SigningKey); err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(cfg.SigningKey)
@@ -157,6 +162,12 @@ func New(cfg Config, opts Options) (*Authority, error) {
 	}
 	a.public = a.keyFile.Public
 	a.kid = keys.Thumbprint(a.public)
+	if err := a.loadExchangeKey(); err != nil {
+		return nil, err
+	}
+	if a.exchangeFile != nil && !a.exchangeFile.Encrypted() {
+		a.xkey = a.exchangeFile.Key
+	}
 	if cfg.AuthoritiesFile != "" {
 		if a.list, err = newAuthorityList(cfg.AuthoritiesFile, cfg.TrustDomain, keys.Fingerprint(a.public), a.log); err != nil {
 			return nil, err
@@ -179,6 +190,12 @@ func New(cfg Config, opts Options) (*Authority, error) {
 		"Token requests by result.", "result",
 		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity, ResultReplay, ResultMisdirected,
 		ResultRateLimited)
+	a.exchanges = a.metrics.Counter("machine_identity_exchanges_total",
+		"Exchange requests (ADR 0004) by result; issued: the points were evaluated.", "result",
+		ResultIssued, ResultKeyDuplicate, ResultWrongLocation, ResultForeignKey, ResultUnknownIdentity, ResultReplay, ResultMisdirected,
+		ResultRateLimited)
+	a.tokenKind = requestKind{event: "token_request", context: protocol.ContextRequest, metric: a.requests}
+	a.exchangeKind = requestKind{event: "exchange_request", context: protocol.ContextExchangeRequest, metric: a.exchanges}
 	a.sealedG = a.metrics.Gauge("machine_identity_authority_sealed",
 		"1 while the signing key is still encrypted and the instance issues nothing.")
 	a.bindings = a.metrics.Counter("machine_identity_binding_events_total",
@@ -225,6 +242,9 @@ func (a *Authority) Metrics() *metrics.Registry { return a.metrics }
 // RequestCount returns machine_identity_requests_total for a result.
 func (a *Authority) RequestCount(result string) float64 { return a.requests.Get(result) }
 
+// ExchangeCount returns machine_identity_exchanges_total for a result.
+func (a *Authority) ExchangeCount(result string) float64 { return a.exchanges.Get(result) }
+
 // EquivocationCount returns how many contradicting events of origin were
 // skipped.
 func (a *Authority) EquivocationCount(origin string) float64 { return a.jm.equivocations.Get(origin) }
@@ -256,7 +276,9 @@ func (a *Authority) signingKey() (*ecdsa.PrivateKey, tls.Certificate) {
 	return a.key, a.cert
 }
 
-// Unseal decrypts the signing key with a passphrase.
+// Unseal decrypts the signing key with a passphrase, and an encrypted
+// exchange key with the same one. If either does not open, the instance
+// stays sealed.
 func (a *Authority) Unseal(passphrase []byte) error {
 	if !a.Sealed() {
 		return nil
@@ -264,6 +286,15 @@ func (a *Authority) Unseal(passphrase []byte) error {
 	k, err := a.keyFile.Decrypt(passphrase)
 	if err != nil {
 		return err
+	}
+	if a.exchangeFile != nil && a.exchangeFile.Encrypted() {
+		xkey, err := a.exchangeFile.Decrypt(passphrase)
+		if err != nil {
+			return fmt.Errorf("exchange key: %w", err)
+		}
+		a.mu.Lock()
+		a.xkey = xkey
+		a.mu.Unlock()
 	}
 	if err := a.setKey(k); err != nil {
 		return err
@@ -416,6 +447,7 @@ func shutdown(servers []*http.Server) {
 func (a *Authority) apiHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+protocol.PathToken, a.handleToken)
+	mux.HandleFunc("POST "+protocol.PathExchange, a.handleExchange)
 	mux.HandleFunc("POST "+protocol.PathBindings, a.handleBindingWrite)
 	mux.HandleFunc("GET "+protocol.PathBindings, a.handleBindingList)
 	mux.HandleFunc("GET "+protocol.PathBindings+"/{identity}", a.handleBindingRead)

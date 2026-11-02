@@ -248,6 +248,41 @@ way in; it is not reachable over the network. A sealed instance does not
 restart into service on its own; another instance keeps issuing meanwhile.
 `machine_identity_authority_sealed` is 1 while sealed — alert on it.
 
+### Exchange key
+
+An instance takes part in releasing secrets without Vault
+([ADR 0004](adr/0004-releasing-secrets-without-vault.md)) only with an
+exchange key: 32 random bytes from which it derives one release key per
+identity.
+
+```sh
+ergosum keygen -exchange -out /etc/ergosum/exchange.key            # plain key file
+ergosum keygen -exchange -out /etc/ergosum/exchange.key -encrypt   # with the signing key's passphrase
+chgrp ergosum-authority /etc/ergosum/exchange.key && chmod 0640 /etc/ergosum/exchange.key
+```
+
+and in `serve.yaml`:
+
+```yaml
+exchange_key_file: /etc/ergosum/exchange.key
+```
+
+- The same mode rule as for the signing key applies. An encrypted exchange
+  key opens at `ergosum unseal` with the signing key's passphrase; if it does
+  not open, the instance stays sealed. An encrypted exchange key next to a
+  plain signing key is refused.
+- **Never back it up.** The machines' sealed secrets lie in their backups; a
+  copy of the exchange key next to one opens it without any check.
+- Losing or replacing it takes the instance out of every secret pinned to
+  it; the daemons re-split those secrets over the remaining instances.
+- Without an exchange key, `POST /v1/exchange` answers 404 `no_exchange`,
+  and daemons pin no secret to the instance.
+
+Exchange requests run the same procedure as token requests (checks, rate
+limit shared with token requests, replay set, observations of failures), but
+issue no token: a successful exchange writes nothing to the journal, only an
+audit line with the number of points.
+
 Upgrading from the first release: the setting `unseal_socket` is now
 `control_socket`, and `instance` must consist of lowercase letters, digits,
 `-` and `.` (at most 63 characters). A journal is pinned to its instance
@@ -338,6 +373,7 @@ or VLANs:
 | Metric | Meaning |
 | --- | --- |
 | `machine_identity_requests_total{result}` | `issued`, `key_duplicate`, `wrong_location`, `replay`, `misdirected`, `rate_limited`, `foreign_key`, `unknown_identity` |
+| `machine_identity_exchanges_total{result}` | exchange requests (ADR 0004), with the same results; `issued`: the points were evaluated |
 | `machine_identity_authority_sealed` | 1 while sealed |
 | `machine_identity_build_info{version,commit}` | 1; version and commit of the running binary |
 | `machine_identity_binding_events_total{outcome}` | write API: `accepted`, `rejected` |
