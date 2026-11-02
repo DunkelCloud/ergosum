@@ -54,6 +54,8 @@ func (d *Daemon) Exchange(ctx context.Context, authority string, points [][]byte
 		return nil, err
 	}
 	defer d.releaseListener()
+	d.rmu.Lock()
+	defer d.rmu.Unlock()
 
 	id := protocol.NewRequestID()
 	d.inflight.add(id, a.pin)

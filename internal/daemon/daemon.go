@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/jwt"
@@ -87,6 +88,16 @@ type Daemon struct {
 	mCallbacks  *metrics.Vec
 	mPending    *metrics.Vec
 	mListSerial *metrics.Vec
+
+	// rmu lets one token or exchange request out at a time: an instance
+	// takes one request of an identity at a time and refuses the next.
+	rmu      sync.Mutex
+	tokenExp atomic.Int64 // expiry of the last token, Unix seconds
+
+	secrets          *secretStore
+	mSecretThreshold *metrics.Vec
+	mSecretPins      *metrics.Vec
+	mSecretReshare   *metrics.Vec
 
 	lmu      sync.Mutex
 	users    int
@@ -162,6 +173,7 @@ func New(cfg Config, opts Options) (*Daemon, error) {
 	}
 	d.mListSerial = d.metrics.Gauge("machine_identity_authorities_serial",
 		"Serial of the authority list in use; 0 while only the configured authorities are known.")
+	d.initSecrets()
 	d.setAuthorities(d.loadList())
 	return d, nil
 }
@@ -418,6 +430,12 @@ func (d *Daemon) CallbackCount(status string) float64 { return d.mCallbacks.Get(
 // until ctx ends.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.log.Info("starting", "identity", d.cfg.Identity, "fingerprint", d.Fingerprint(), "next_key", d.PendingFingerprint())
+	// Without the socket the daemon still keeps its token fresh.
+	if stop, err := d.serveSecrets(ctx); err != nil {
+		d.log.Error("no secret socket; ergosumd secret is not available", "err", err)
+	} else {
+		defer stop()
+	}
 	bo := backoff{base: 5 * time.Second, max: 5 * time.Minute}
 	for {
 		d.adoptPendingKey(ctx)
@@ -436,6 +454,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			bo.reset()
 			d.mExpiry.Set("", float64(claims.Expiry))
 			d.mSuccess.Set("", float64(d.now().Unix()))
+			// Secrets are released per round (ADR 0004).
+			d.RefreshSecrets(ctx)
+			d.ReshareSecrets(ctx)
 			wait = renewDelay(claims, d.now())
 			d.log.Info("token issued", "expires", time.Unix(claims.Expiry, 0).UTC(), "renew_in", wait.Round(time.Second).String())
 		} else {
@@ -509,6 +530,7 @@ func (d *Daemon) Obtain(ctx context.Context) (string, jwt.Claims, error) {
 		tried[a.pin] = true
 		token, claims, err := d.request(ctx, a)
 		if err == nil {
+			d.tokenExp.Store(claims.Expiry)
 			d.setPreferred(a)
 			d.refreshList(ctx, a, trustDomainOf(claims))
 			return token, claims, nil
@@ -557,6 +579,8 @@ func (e *RequestError) Error() string {
 // request sends one token request. Its request ID is new, is never reused,
 // and counts as in flight to this instance until the answer arrives.
 func (d *Daemon) request(ctx context.Context, a *authorityClient) (string, jwt.Claims, error) {
+	d.rmu.Lock()
+	defer d.rmu.Unlock()
 	id := protocol.NewRequestID()
 	d.inflight.add(id, a.pin)
 	defer d.inflight.remove(id)

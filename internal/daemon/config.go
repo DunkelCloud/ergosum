@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -43,6 +44,14 @@ type Config struct {
 	// RequestTimeout bounds one request including its callbacks.
 	// Default: 60s.
 	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// SecretSocket is the local socket of "ergosumd secret" (ADR 0004),
+	// mode 0600. Default: secret.sock next to the token file; "-"
+	// disables it.
+	SecretSocket string `yaml:"secret_socket"`
+	// SecretSocketGroup, if set, opens the socket to one group (mode
+	// 0660). Every opened secret costs exchanges at the authorities, out
+	// of the identity's rate budget.
+	SecretSocketGroup string `yaml:"secret_socket_group"`
 }
 
 // AuthorityConfig names one authority instance and pins its key.
@@ -104,6 +113,9 @@ func (c *Config) SetDefaults() {
 	}
 	if c.RequestTimeout == 0 {
 		c.RequestTimeout = 60 * time.Second
+	}
+	if c.SecretSocket == "" {
+		c.SecretSocket = filepath.Join(filepath.Dir(c.TokenFile), "secret.sock")
 	}
 }
 

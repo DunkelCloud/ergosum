@@ -129,7 +129,10 @@ jobs:
     # deploy/install.sh; then three instances replicating the journal:
     # four-eyes approval with ergosum bind, catch-up after an outage,
     # convergence after a partition, compaction, and a new instance built
-    # from a sync.
+    # from a sync; then secrets without Vault: ergosumd secret create and
+    # get with a threshold of 2, a restart, an instance down, a re-split
+    # when the list adds an instance, and a copy elsewhere that opens
+    # nothing.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -148,6 +151,8 @@ jobs:
         run: sudo BIN="$PWD/dist" NEXT="$PWD/dist-next" bash test/netns/run.sh
       - name: Journal replication in network namespaces
         run: sudo BIN="$PWD/dist" bash test/netns/replication.sh
+      - name: Secrets without Vault in network namespaces
+        run: sudo BIN="$PWD/dist" bash test/netns/secrets.sh
 
   vault:
     # The Vault side with the real binaries, a Vault dev server and Vault
