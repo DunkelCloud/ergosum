@@ -125,6 +125,16 @@ grep -q 'refuses the configuration: .*needs a port' /tmp/out || { cat /tmp/out; 
 [ ! -e /etc/ergosum/ergosumd.yaml ] || fail "configuration left by a refused run"
 [ ! -e /etc/ergosum/ergosumd.yaml.new ] || fail "draft configuration left by a refused run"
 ! running || fail "daemon started by a refused run"
+if [ -n "${ANCHOR:-}" ]; then
+	# An authority that answers with another key than the one in --anchor.
+	if $install --anchor "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB@${ANCHOR#*@}" >/tmp/out 2>&1; then
+		fail "installed with another key than the authority's"
+	fi
+	grep -q 'does not present the key in --anchor' /tmp/out || { cat /tmp/out; fail "another key than the authority's not refused"; }
+	grep -qF "presents ${ANCHOR%%@*}, not the configured SHA256:BBBB" /tmp/out || { cat /tmp/out; fail "the authority's key not named"; }
+	[ ! -e /etc/ergosum/ergosumd.yaml ] || fail "configuration left by a run with another key"
+	! running || fail "daemon started by a run with another key"
+fi
 rm -f "$bindir/ergosumd"
 
 log "new machine"
@@ -137,6 +147,11 @@ id -nG "$svc_user" | tr ' ' '\n' | grep -qx ergosum-token || fail "$svc_user not
 [ "$(owner_mode "$state")" = "$svc_user $svc_user 700" ] ||
 	fail "state directory is $(owner_mode "$state")"
 grep -qx 'identity: host1.example.com' /etc/ergosum/ergosumd.yaml || fail "identity not from hostname -f"
+if [ -n "${ANCHOR:-}" ]; then
+	grep -q '^install.sh: authority .*, as configured$' /tmp/out || fail "the authority's key not checked"
+else
+	grep -q '^install.sh: authority https://192.0.2.10:7432: not reached' /tmp/out || fail "unreachable authority not reported"
+fi
 fp=$(grep '^key ' /tmp/out | awk '{print $2}')
 [ -n "$fp" ] || fail "no binding request printed"
 grep -q '^identity host1.example.com$' /tmp/out || fail "request names another identity"

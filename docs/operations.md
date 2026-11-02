@@ -93,7 +93,10 @@ The script
 the latest signed release and creates what is missing: the user `ergosum`
 and the group `ergosum-token`, the state directory, the systemd unit or
 OpenRC script, and `/etc/ergosum/ergosumd.yaml` with the identity and the
-anchor. Then it starts the daemon and prints the binding request for the
+anchor. Before it writes the configuration, `ergosumd check` connects to
+the anchor's URLs: one that presents another key than the one in
+`--anchor` stops the setup, one that cannot be reached yet does not. Then
+it starts the daemon and prints the binding request for the
 administrators (see [Administration](#administration)). Once they have
 recorded the binding, the daemon receives its token on its own: until then
 it asks again at intervals of up to five minutes. Run the same line again, and it
@@ -112,7 +115,8 @@ By hand instead:
    first use and writes the binding request for the administrators;
    `ergosumd fingerprint` prints only the fingerprint. Run both as the
    service user: a key created by root belongs to root, and the service
-   cannot read it.
+   cannot read it. `ergosumd check` shows the key each authority URL
+   presents and fails if it is not the configured one.
 3. Start the service. The daemon requests a token, writes it to
    `/run/ergosum/token`, and renews it from half its lifetime on.
 

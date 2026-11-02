@@ -489,6 +489,17 @@ write_config() {
 		rm -f "$config.new"
 		die "ergosumd refuses the configuration: $out"
 	fi
+	# The authority must present the key in --anchor; one that cannot be
+	# reached yet does not stop the setup. Releases before v0.1.1 have no
+	# check.
+	if "$BINDIR/ergosumd" help 2>&1 | grep -q 'ergosumd check'; then
+		if ! out=$(as_ergosum "$BINDIR/ergosumd" check -config "$config.new" 2>&1); then
+			rm -f "$config.new"
+			die "the authority does not present the key in --anchor:
+$out"
+		fi
+		printf '%s\n' "$out" | sed 's/^/install.sh: authority /'
+	fi
 	mv -f "$config.new" "$config"
 	say "$config written for $identity"
 }
