@@ -108,7 +108,11 @@ that it can call back on TCP 7433, over the tailnet or at a fixed address.
    later. On a Mac the same two lines enroll it, the second with `sudo`
    (see [Operations](docs/operations.md#on-a-mac)).
 3. **Approve the binding.** Save the request as a file and run
-   `ergosum bind host1.txt` on an administrator's machine. Once the
+   `ergosum bind host1.txt` on an administrator's machine. The request
+   proposes a fixed address, public or private, as an `ip` check, and the
+   network of an address from DHCP as a `net` check, which a clone
+   anywhere in that network passes as well
+   ([Choosing checks](docs/operations.md#choosing-checks)). Once the
    approvals suffice, the daemon receives its token on its own and keeps it
    in `/run/ergosum/token` (on a Mac `/var/db/ergosum/token`).
 4. **Use it.** Let Vault Agent log in with the token
