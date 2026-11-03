@@ -202,10 +202,14 @@ type CallbackConfig struct {
 	Timeout time.Duration `yaml:"timeout"`
 	// Tailnet routes tailnet callbacks.
 	Tailnet TailnetRoute `yaml:"tailnet"`
-	// IP routes ip callbacks; they must use the public underlay.
+	// IP routes ip callbacks to addresses outside Networks; they must use
+	// the public underlay.
 	IP RouteConfig `yaml:"ip"`
-	// Networks lists the networks attached directly to this instance; net
-	// checks are performed only for prefixes inside one of them.
+	// Networks lists the networks this instance reaches, attached or
+	// through a router of the operator's. net checks are performed only for
+	// prefixes inside one of them; an ip check on an address inside one
+	// takes its route, and one on a private address outside all of them is
+	// not performed.
 	Networks []NetworkRoute `yaml:"networks"`
 }
 
@@ -436,4 +440,20 @@ func (rs routes) network(p netip.Prefix) (attachedNetwork, bool) {
 		}
 	}
 	return attachedNetwork{}, false
+}
+
+// ipRoute returns the route of an ip callback to addr: that of the attached
+// network containing it, otherwise the ip route. A private address outside
+// all attached networks has none: it names another machine in every
+// network that uses it, and only an instance in the right one can call it.
+func (rs routes) ipRoute(addr netip.Addr) (Route, bool) {
+	if n, ok := rs.network(netip.PrefixFrom(addr, addr.BitLen())); ok {
+		r := n.route
+		r.Check = protocol.CheckIP
+		return r, true
+	}
+	if addr.IsPrivate() {
+		return Route{}, false
+	}
+	return rs.ip, true
 }

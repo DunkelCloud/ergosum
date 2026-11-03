@@ -27,8 +27,8 @@ overlay_prefixes: []
 # list of all instances that the authorities serve (/v1/authorities),
 # keeps it in state_dir and uses it from then on; these stay as the way
 # back. Before the first token it takes the list from an authority that
-# cannot run the machine's net checks. key is the fingerprint printed by
-# "ergosum keygen". urls are tried
+# cannot run the machine's net checks or ip checks on private addresses.
+# key is the fingerprint printed by "ergosum keygen". urls are tried
 # in order, those the machine cannot reach from its addresses not at all
 # (an overlay address needs an overlay address here, IPv4 an IPv4 address,
 # IPv6 an IPv6 address). Prefer addresses to names: a name makes renewal

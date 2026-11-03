@@ -540,8 +540,9 @@ func (d *Daemon) Obtain(ctx context.Context) (string, jwt.Claims, error) {
 			break
 		}
 		// Until its first token a new machine knows only its anchor. An
-		// anchor that cannot run a net check names the instances that can,
-		// and the round goes on with them.
+		// anchor that cannot run a net check or an ip check on a private
+		// address names the instances that can, and the round goes on with
+		// them.
 		var re *RequestError
 		if errors.As(err, &re) && re.Code == protocol.ErrNotResponsible {
 			d.refreshList(ctx, a, "")

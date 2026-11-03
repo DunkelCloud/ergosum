@@ -48,12 +48,15 @@ callbacks:
     # Overlay address ranges; tailnet callbacks must land inside them.
     prefixes: ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
   ip:
-    # Public source address and interface for ip callbacks. On a shared host
-    # this keeps the overlay or an exit node from rerouting the callback.
+    # Public source address and interface for ip callbacks to addresses
+    # outside the networks below. On a shared host this keeps the overlay or
+    # an exit node from rerouting the callback.
     source: 203.0.113.2
     # interface: eth0
-  # Networks attached directly to this instance. A net check runs only for
-  # prefixes inside one of them; other instances answer "not responsible".
+  # Networks this instance reaches, attached or through a router of yours.
+  # A net check runs only for prefixes inside one of them, an ip check on an
+  # address inside one leaves from its source, and an ip check on a private
+  # address runs only there; other instances answer "not responsible".
   networks:
     - cidr: 198.51.100.0/24
       source: 198.51.100.2
