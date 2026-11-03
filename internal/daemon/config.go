@@ -33,7 +33,8 @@ type Config struct {
 	// CallbackListen is the callback listener address. Default: :7433.
 	CallbackListen string `yaml:"callback_listen"`
 	// Addresses are the underlay addresses reported in requests. Empty
-	// means: all global unicast addresses outside the overlay.
+	// means: all global unicast addresses outside the overlay. A binding
+	// request takes them as fixed.
 	Addresses []string `yaml:"addresses"`
 	// OverlayPrefixes are left out of the detected addresses, as the
 	// authority's tailnet prefixes are. Default: 100.64.0.0/10,

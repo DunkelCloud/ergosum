@@ -678,10 +678,11 @@ func (d *Daemon) addresses() []string {
 
 // ifaceAddr is a detected address with the interface it belongs to.
 type ifaceAddr struct {
-	addr   string
-	iface  string
-	index  int
-	prefix netip.Prefix // the network of the address on that interface
+	addr     string
+	iface    string
+	index    int
+	prefix   netip.Prefix // the network of the address on that interface
+	lifetime addrLifetime // filled in for binding requests only
 }
 
 // detectAddresses lists the global unicast addresses outside the overlay on
