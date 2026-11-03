@@ -49,17 +49,16 @@ ergosum adds what a copy cannot take along: the machine's place.
 
 ## How it works
 
-```mermaid
-sequenceDiagram
-    participant M as ergosumd on the machine
-    participant A as authority (ergosum serve)
-    participant V as Vault or OpenBao
-    M->>A: token request, signed with the machine's key
-    A->>A: look up the binding in the signed journal
-    A->>M: callback at every bound place
-    M-->>A: signed "confirmed"
-    A-->>M: JWT, valid for 30 minutes
-    M->>V: JWT login through Vault Agent
+```text
+ ergosumd on the machine              authority (ergosum serve)
+           |                                      |
+           |--- token request, signed ----------->|  looks up the binding
+           |                                      |  in the signed journal
+           |<-- callback at every bound place ----|
+           |--- signed "confirmed" -------------->|
+           |<-- JWT, valid for 30 minutes --------|
+           |
+           +--- JWT login through Vault Agent ---> Vault or OpenBao
 ```
 
 A small daemon on each machine holds a key pair and asks an authority for a
