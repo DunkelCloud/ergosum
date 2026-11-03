@@ -540,8 +540,9 @@ func (d *Daemon) Obtain(ctx context.Context) (string, jwt.Claims, error) {
 			break
 		}
 		// Until its first token a new machine knows only its anchor. An
-		// anchor that cannot run a net check names the instances that can,
-		// and the round goes on with them.
+		// anchor that cannot run a net check or an ip check on a private
+		// address names the instances that can, and the round goes on with
+		// them.
 		var re *RequestError
 		if errors.As(err, &re) && re.Code == protocol.ErrNotResponsible {
 			d.refreshList(ctx, a, "")
@@ -677,10 +678,11 @@ func (d *Daemon) addresses() []string {
 
 // ifaceAddr is a detected address with the interface it belongs to.
 type ifaceAddr struct {
-	addr   string
-	iface  string
-	index  int
-	prefix netip.Prefix // the network of the address on that interface
+	addr     string
+	iface    string
+	index    int
+	prefix   netip.Prefix // the network of the address on that interface
+	lifetime addrLifetime // filled in for binding requests only
 }
 
 // detectAddresses lists the global unicast addresses outside the overlay on

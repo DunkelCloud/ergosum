@@ -186,7 +186,7 @@ type ErrorResponse struct {
 // Error codes of ErrorResponse.
 const (
 	ErrDenied         = "denied"          // 403: a check failed; details only in the audit log
-	ErrNotResponsible = "not_responsible" // 421: a net check needs another authority instance
+	ErrNotResponsible = "not_responsible" // 421: a net check or a private ip check needs another authority instance
 	ErrBadRequest     = "bad_request"     // 400
 	ErrClockSkew      = "clock_skew"      // 400: timestamp outside the accepted window
 	ErrUnsupported    = "unsupported_version"

@@ -216,7 +216,7 @@ authority discards the request like one whose requester went away.
 | --- | --- | --- |
 | 400 | `bad_request`, `clock_skew`, `unsupported_version` | malformed or stale request |
 | 403 | `denied` | a check failed; the reason is in the audit log only |
-| 421 | `not_responsible` | a `net` check needs an instance attached to that network |
+| 421 | `not_responsible` | a `net` check, or an `ip` check on a private address, needs an instance attached to that network |
 | 429 | `rate_limited` | the identity has a request in flight at this instance, or asked too often |
 | 503 | `unavailable` | instance sealed or journal unavailable |
 
@@ -268,8 +268,11 @@ after the real machine restarted, never a token.
 6. Request ID already processed for this identity: `replay`. No callback is
    made.
 7. Plan one callback per bound check; targets and ports come from the
-   binding. A `net` check whose prefix is not inside a network attached to
-   this instance: answer `not_responsible` before any callback.
+   binding. An `ip` check on an address inside a network attached to this
+   instance leaves by that network's route. A `net` check whose prefix is
+   not inside an attached network, or an `ip` check on a private address
+   (RFC 1918, IPv6 unique local) outside all of them: answer
+   `not_responsible` before any callback.
 8. Run the callbacks (in parallel, each with a timeout, default 5 s). Each
    uses a fresh nonce. For `net`, try up to four reported addresses inside
    the prefix.
@@ -290,6 +293,14 @@ after the real machine restarted, never a token.
   whose configuration names it, with the source address and interface its
   callbacks leave from. Directly or through a router of the operator's is
   the operator's choice (see operations).
+- An `ip` check on an address inside an attached network leaves by that
+  network's route, like a `net` check. An `ip` check on a private address
+  runs only there: the same private address names another machine in
+  every network that uses it, so an instance outside the machine's network
+  would call a stranger, or nobody, and report `wrong_location`. Other
+  `ip` checks leave by the route for the public underlay. Routed private
+  networks need no configuration of their own: an operator lists them as
+  attached networks, as for `net` checks.
 
 ### Authority list
 
@@ -318,9 +329,10 @@ preference, and a serial from 1 to 2^53−1. Without a list it answers 404
   it does not name. Callbacks are accepted only from these instances.
 - Until it has a list, a daemon also takes one from a configured instance
   that answers `not_responsible`, and asks the listed instances in the same
-  round: a new machine with a `net` check would otherwise wait forever for
-  a first token from an anchor that cannot run that check. The list must
-  name that instance; its trust domain is checked with the next token.
+  round: a new machine with a `net` check, or an `ip` check on a private
+  address, would otherwise wait forever for a first token from an anchor
+  that cannot run that check. The list must name that instance; its trust
+  domain is checked with the next token.
 - The list is as trustworthy as the pinned connection to an instance the
   daemon already trusts. A wrong list can keep a daemon from reaching an
   authority, but cannot make it accept a token or let another instance use

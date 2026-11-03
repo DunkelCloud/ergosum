@@ -738,6 +738,67 @@ func TestNetCheckFromAnchorOnly(t *testing.T) {
 	}
 }
 
+// A private network and a machine's fixed address in it.
+const (
+	lan      = "10.99.0.0/24"
+	host1LAN = "10.99.0.20"
+)
+
+// TestPrivateIPCheckNeedsAttachedNetwork: an ip check on a private address
+// runs only at an instance attached to that network. Another instance would
+// call another machine or nobody; it answers "not responsible" without a
+// callback, and the daemon moves on to the instance that has the network.
+func TestPrivateIPCheckNeedsAttachedNetwork(t *testing.T) {
+	sim := newSimNet()
+	admins := jt.NewAdmins(t, "alice", "bob", "carol")
+	remote := newEnv(t, envOptions{instance: "authority-remote", net: sim, admins: admins})
+	local := newEnv(t, envOptions{instance: "authority-local", net: sim, admins: admins, networks: []string{lan}})
+	m := remote.machine(host1, machineOptions{
+		targets:     []string{at(host1Tailnet), at(host1LAN)},
+		addresses:   []string{host1LAN},
+		authorities: []*env{remote, local},
+	})
+	for _, e := range []*env{remote, local} {
+		e.bind(host1, m.d.Fingerprint(), 1, tailnetCheck(host1Tailnet), ipCheck(host1LAN))
+	}
+	if _, _, err := m.d.Obtain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireCount(t, remote.auth, authority.ResultWrongLocation, 0)
+	requireCount(t, remote.auth, authority.ResultIssued, 0)
+	requireCount(t, local.auth, authority.ResultIssued, 1)
+	sim.mu.Lock()
+	defer sim.mu.Unlock()
+	if len(sim.dials) != 2 {
+		t.Fatalf("callbacks %v, want one per check from the attached instance only", sim.dials)
+	}
+}
+
+// TestPrivateIPCheckCatchesCloneInNetwork: a copy of a machine inside the
+// machine's own network, at another address, would pass a net check. An ip
+// check on the machine's fixed address reaches the original instead, whose
+// signed "no open request" proves the copy.
+func TestPrivateIPCheckCatchesCloneInNetwork(t *testing.T) {
+	e := newEnv(t, envOptions{networks: []string{lan}})
+	real := e.machine(host1, machineOptions{targets: []string{at(host1LAN)}, addresses: []string{host1LAN}})
+	e.bind(host1, real.d.Fingerprint(), 1, ipCheck(host1LAN))
+	// The original is in the middle of its own renewal.
+	release, err := real.d.HoldCallbackListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	const cloneAddr = "10.99.0.30"
+	clone := e.machine(host1, machineOptions{stateDir: cloneState(t, real.stateDir), targets: []string{at(cloneAddr)}, addresses: []string{cloneAddr}})
+	if _, _, err := clone.d.Obtain(context.Background()); !denied(err) {
+		t.Fatalf("got %v", err)
+	}
+	requireCount(t, e.auth, authority.ResultKeyDuplicate, 1)
+	requireCount(t, e.auth, authority.ResultIssued, 0)
+	verifyEvidence(t, e, real.d.Fingerprint())
+}
+
 // observations decodes the journal's observations of one kind.
 func (e *env) observations(t *testing.T, kind string) []authority.Observation {
 	t.Helper()

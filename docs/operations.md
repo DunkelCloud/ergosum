@@ -130,9 +130,10 @@ then.
 the first token the daemon takes the [authority list](#authority-list)
 that the instance serves, keeps it as `authorities.json` in `state_dir`,
 and from then on tries the listed instances in their order, the configured
-ones last. An anchor that cannot run the machine's `net` checks answers
-"not responsible"; a daemon without a list then takes the anchor's list
-at once and asks the instances that can. It takes a newer list (higher
+ones last. An anchor that cannot run the machine's `net` checks, or its
+`ip` checks on private addresses, answers "not responsible"; a daemon
+without a list then takes the anchor's list at once and asks the
+instances that can. It takes a newer list (higher
 serial) from any listed instance, and any list from a configured instance
 that the list in use does not name;
 so a new anchor in the configuration replaces a list from an old trust
@@ -414,8 +415,9 @@ on a host of its own or on a shared host.
   move, and the authority must run exactly the binary that was checked.
 
   Host networking keeps source addresses and attached networks as on the
-  host; with bridged networking `net` checks see only the bridge. The
-  signing key must be readable by 65532 and by no other user:
+  host; with bridged networking `net` checks and `ip` checks on private
+  addresses see only the bridge. The signing key must be readable by 65532
+  and by no other user:
   `chown 65532 /etc/ergosum/signing.key`, mode 0600.
 
 ### Callback rules
@@ -423,13 +425,17 @@ on a host of its own or on a shared host.
 - `tailnet` callbacks must reach an overlay address (`callbacks.tailnet.prefixes`).
 - `ip` and `net` callbacks must neither reach nor leave from an overlay
   address.
-- `net` checks run only for prefixes inside `callbacks.networks`; other
-  instances answer "not responsible" and the daemon moves on.
+- `net` checks run only for prefixes inside `callbacks.networks`, and
+  `ip` checks on private addresses (RFC 1918, IPv6 unique local) only for
+  addresses inside them; other instances answer "not responsible" and the
+  daemon moves on.
+- An `ip` check on an address inside `callbacks.networks` leaves by that
+  network's route, any other by `callbacks.ip`.
 
 Each entry of `callbacks.networks` names a network and the `source`
-address and `interface` its callbacks leave from. The authority does not
-check how the network is reached, so one instance can serve many networks
-or VLANs:
+address and `interface` its callbacks leave from, for `net` and `ip`
+checks alike. The authority does not check how the network is reached, so
+one instance can serve many networks or VLANs:
 
 - **Attached:** the instance has an address in the network, on an
   interface of its own or on a VLAN subinterface of a trunk, one per VLAN,
@@ -442,6 +448,10 @@ or VLANs:
   segment and holds only while no other path carries the prefix, such as a
   VPN with an overlapping network. Allow the callback port from `source`
   into those networks.
+
+Machines with fixed private addresses are bound with `ip` checks and need
+the same entries as machines in DHCP networks with `net` checks: list the
+network on every instance that should check them.
 
 ### Metrics and audit
 
@@ -664,9 +674,11 @@ from step to step and that the people involved pass on:
 1. The machine's administrator writes the request on the machine:
    `sudo -u ergosum ergosumd request -out host1.txt`. It holds the
    identity, the key and the checks the machine proposes from where it
-   stands: its tailnet name, public addresses as `ip` checks, the networks
-   of private addresses as `net` checks. IPv6 addresses and virtual
-   interfaces are proposed commented out.
+   stands: its tailnet name, fixed addresses as `ip` checks, public and
+   private alike, and the networks of private addresses from DHCP as `net`
+   checks (see [Choosing checks](#choosing-checks)). A public address from
+   DHCP or SLAAC, IPv6 addresses that are not fixed and virtual interfaces
+   are proposed commented out.
 2. An ergosum administrator checks the proposed checks, edits the file if
    needed and runs `ergosum bind host1.txt`. The tool adds kind, trust
    domain and the next epoch (read from an authority), shows the text to
@@ -683,7 +695,7 @@ identity host1.example.com
 key SHA256:...
 # tailnet name (tailscale status)
 check tailnet host1.tailnet.example.com
-# eth0: public address
+# eth0: fixed public address
 check ip 192.0.2.10
 # added by ergosum bind at ..., epoch from https://100.64.0.10:7432
 kind binding.set
@@ -709,6 +721,33 @@ The tool refuses what would otherwise fail later or go unnoticed:
   no change replaces another one unnoticed. Start with a new file.
 - A key that the registry does not allow for the kind cannot sign, and a
   key signs only once.
+
+### Choosing checks
+
+`ip` is the check for a machine with a fixed address, in a public network
+or a private one. `net` is for networks that hand out addresses by DHCP.
+The difference shows with a copy of the machine's key: a copy anywhere
+inside a bound `net` prefix passes that check, while an `ip` check reaches
+only the bound address. While the original runs, it answers there that it
+made no request, which proves the copy (`key_duplicate`); while it is off,
+the copy fails unless it takes the original's address.
+
+- `ergosumd request` proposes accordingly. On Linux it tells fixed
+  addresses from leases by their lifetime in the kernel (`dynamic` in
+  `ip addr` is a lease from DHCP or SLAAC). An older dhclient sets leases
+  without a lifetime; they look fixed and are proposed as `ip` checks, so
+  bind the network instead where the address can change.
+- Addresses named in the daemon's `addresses` count as fixed. On macOS,
+  which does not tell, public addresses are proposed as `ip` checks and
+  private ones as `net` checks.
+- A fixed IPv6 address is proposed as an `ip` check like an IPv4 address.
+  Every authority that runs the check must reach the machine over IPv6;
+  one whose `callbacks.ip.source` is an IPv4 address cannot reach a public
+  IPv6 address. Delete the check where the authorities have only IPv4.
+- An `ip` check on a private address runs only at an instance whose
+  `callbacks.networks` holds the network, like a `net` check (see
+  [Callback rules](#callback-rules)); the other instances answer "not
+  responsible".
 
 ### Configuration
 
@@ -853,9 +892,8 @@ place always needs a binding with the new place's checks at the next epoch.
 4. Stop `ergosumd` and delete its state directory, so that no copy of the
    key remains on the disk.
 5. Only now release the machine's addresses and overlay node. A released
-   public address can be handed to someone else; while a binding still
-   names it, that machine together with a stolen backup would pass the
-   checks.
+   address can be handed to someone else; while a binding still names it,
+   that machine together with a stolen backup would pass the checks.
 6. Remove the machine from monitoring and backups.
 
 ## Alerts
@@ -969,10 +1007,10 @@ the machine's backups is a trade-off:
   its binding and its overlay node, and no administrator has to sign a new
   binding. A stolen backup then carries both keys. A copy restored
   elsewhere still fails the callbacks to the place the binding names (`ip`,
-  `net`); a copy restored inside the bound network, or on a released
-  address that was handed to someone else, passes them. `tailnet` alone
-  does not stop such a copy. Protect the backup repository like the keys
-  it holds.
+  `net`); a copy restored at a bound address, anywhere inside a bound `net`
+  prefix, or on a released address that was handed to someone else,
+  passes them. `tailnet` alone does not stop such a copy. Protect the
+  backup repository like the keys it holds.
 - **Excluded:** a stolen backup carries neither key, and a copy of it fails
   everywhere. Every restore then needs a new key, a binding at the next
   epoch and a new overlay node.

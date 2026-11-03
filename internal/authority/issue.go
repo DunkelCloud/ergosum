@@ -209,7 +209,7 @@ func (a *Authority) admit(w http.ResponseWriter, r *http.Request, kind requestKi
 	plan, notResponsible := a.plan(b, addrs)
 	if notResponsible != "" {
 		release()
-		a.log.Info("net check needs another instance", "identity", req.Identity, "prefix", notResponsible)
+		a.log.Info("check needs another instance", "identity", req.Identity, "check", notResponsible)
 		a.writeError(w, http.StatusMisdirectedRequest, protocol.ErrNotResponsible, notResponsible)
 		return admitted{}, false
 	}
@@ -285,8 +285,11 @@ func validateRequest(req *protocol.TokenRequest, typ string) (*ecdsa.PublicKey, 
 
 // plan turns the binding's checks into callbacks. Callback targets come
 // from the binding only; from the request it takes just the underlay
-// addresses that lie inside a net check's prefix. A net check whose prefix
-// is not attached to this instance makes the instance not responsible.
+// addresses that lie inside a net check's prefix. An ip check inside an
+// attached network takes that network's route. A net check whose prefix is
+// not attached to this instance, or an ip check on a private address
+// outside all attached networks, makes the instance not responsible; the
+// check is returned as "type target".
 func (a *Authority) plan(b *journal.Binding, addrs []netip.Addr) (plan []plannedCheck, notResponsible string) {
 	for _, c := range b.Checks {
 		switch c.Type {
@@ -297,14 +300,17 @@ func (a *Authority) plan(b *journal.Binding, addrs []netip.Addr) (plan []planned
 			}
 			route := a.routes.tailnet
 			if c.Type == protocol.CheckIP {
-				route = a.routes.ip
+				var ok bool
+				if route, ok = a.routes.ipRoute(netip.MustParseAddr(host)); !ok {
+					return nil, c.Type + " " + c.Target
+				}
 			}
 			plan = append(plan, plannedCheck{check: c.Type, host: host, port: port, route: route})
 		case protocol.CheckNet:
 			p := netip.MustParsePrefix(c.Target)
 			n, ok := a.routes.network(p)
 			if !ok {
-				return nil, c.Target
+				return nil, c.Type + " " + c.Target
 			}
 			pc := plannedCheck{check: c.Type, prefix: c.Target, port: a.cfg.Callbacks.Port, route: n.route}
 			for _, ad := range addrs {
