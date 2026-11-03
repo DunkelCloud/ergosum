@@ -109,8 +109,8 @@ func (d *Daemon) propose(ctx context.Context) []proposal {
 // leased address (DHCP, SLAAC) can change: in a private network it becomes
 // a net check, a public one an ip check commented out. Of an address with
 // unknown lifetime, a public one becomes an ip check and a private one a
-// net check. IPv6 addresses and virtual interfaces are proposed commented
-// out.
+// net check. IPv6 addresses other than fixed ones and virtual interfaces
+// are proposed commented out.
 func proposeAddresses(cands []ifaceAddr) []proposal {
 	var out []proposal
 	orderAddresses(cands)
@@ -120,7 +120,7 @@ func proposeAddresses(cands []ifaceAddr) []proposal {
 		if err != nil {
 			continue
 		}
-		p := proposal{active: a.Is4() && !virtualInterface(c.iface)}
+		p := proposal{active: (a.Is4() || c.lifetime == addrFixed) && !virtualInterface(c.iface)}
 		where := c.iface
 		if where == "" {
 			where = "configured"
@@ -155,7 +155,7 @@ func proposeAddresses(cands []ifaceAddr) []proposal {
 		case c.lifetime == addrUnknown:
 			p.note += "; IPv6, bind it only if the address is fixed"
 		case c.lifetime == addrFixed:
-			p.note += "; IPv6, bind it if the authorities reach the machine over IPv6"
+			p.note += "; IPv6, delete it unless the authorities reach the machine over IPv6"
 		default:
 			p.note += "; IPv6"
 		}

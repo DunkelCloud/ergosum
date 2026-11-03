@@ -146,10 +146,10 @@ func TestTailscaleCLI(t *testing.T) {
 	}
 }
 
-// A fixed address becomes an ip check, public or private; a leased one a
-// net check in a private network, a commented-out ip check if public. Of
-// an address with unknown lifetime, public ones become ip checks and
-// private ones net checks.
+// A fixed address becomes an ip check, public or private, IPv4 or IPv6; a
+// leased one a net check in a private network, a commented-out ip check if
+// public. Of an address with unknown lifetime, public ones become ip checks
+// and private ones net checks.
 func TestProposeAddresses(t *testing.T) {
 	lan := netip.MustParsePrefix("10.99.0.0/24")
 	ula := netip.MustParsePrefix("fd00:99::/64")
@@ -164,8 +164,10 @@ func TestProposeAddresses(t *testing.T) {
 		{ifaceAddr{addr: "198.51.100.20", iface: "eth0"}, "check ip 198.51.100.20"},
 		{ifaceAddr{addr: "10.99.0.20", iface: "eth0", prefix: lan}, "check net 10.99.0.0/24"},
 		{ifaceAddr{addr: "10.99.0.20"}, "# check net 10.99.0.20/??"},
-		// IPv6 and virtual interfaces stay commented out.
-		{ifaceAddr{addr: "2001:db8::20", iface: "eth0", lifetime: addrFixed}, "# check ip 2001:db8::20"},
+		{ifaceAddr{addr: "2001:db8::20", iface: "eth0", lifetime: addrFixed}, "check ip 2001:db8::20"},
+		{ifaceAddr{addr: "fd00:99::20", iface: "eth0", prefix: ula, lifetime: addrFixed}, "check ip fd00:99::20"},
+		// Other IPv6 addresses and virtual interfaces stay commented out.
+		{ifaceAddr{addr: "2001:db8::20", iface: "eth0"}, "# check ip 2001:db8::20"},
 		{ifaceAddr{addr: "fd00:99::20", iface: "eth0", prefix: ula, lifetime: addrLeased}, "# check net fd00:99::/64"},
 		{ifaceAddr{addr: "10.99.0.20", iface: "docker0", prefix: lan, lifetime: addrFixed}, "# check ip 10.99.0.20"},
 	} {
@@ -184,8 +186,8 @@ func TestProposeAddresses(t *testing.T) {
 }
 
 // A request proposes the tailnet name and checks for the addresses.
-// Configured addresses count as fixed: public and private IPv4 active, IPv6
-// commented out.
+// Configured addresses count as fixed: public and private, IPv4 and IPv6,
+// all active.
 func TestRequest(t *testing.T) {
 	cfg := Config{
 		Identity: "host1.example.com", StateDir: t.TempDir(), TokenGroup: "-",
@@ -206,7 +208,7 @@ func TestRequest(t *testing.T) {
 		"\nkey " + d.Fingerprint() + "\n",
 		"\ncheck tailnet host1.tailnet.example.com\n",
 		"\ncheck ip 198.51.100.20\n",
-		"\n# check ip 2001:db8::20\n",
+		"\ncheck ip 2001:db8::20\n",
 		"\ncheck ip 10.99.0.7\n",
 	} {
 		if !strings.Contains(string(out), want) {

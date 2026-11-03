@@ -677,8 +677,8 @@ from step to step and that the people involved pass on:
    stands: its tailnet name, fixed addresses as `ip` checks, public and
    private alike, and the networks of private addresses from DHCP as `net`
    checks (see [Choosing checks](#choosing-checks)). A public address from
-   DHCP or SLAAC, IPv6 addresses and virtual interfaces are proposed
-   commented out.
+   DHCP or SLAAC, IPv6 addresses that are not fixed and virtual interfaces
+   are proposed commented out.
 2. An ergosum administrator checks the proposed checks, edits the file if
    needed and runs `ergosum bind host1.txt`. The tool adds kind, trust
    domain and the next epoch (read from an authority), shows the text to
@@ -740,6 +740,10 @@ the copy fails unless it takes the original's address.
 - Addresses named in the daemon's `addresses` count as fixed. On macOS,
   which does not tell, public addresses are proposed as `ip` checks and
   private ones as `net` checks.
+- A fixed IPv6 address is proposed as an `ip` check like an IPv4 address.
+  Every authority that runs the check must reach the machine over IPv6;
+  one whose `callbacks.ip.source` is an IPv4 address cannot reach a public
+  IPv6 address. Delete the check where the authorities have only IPv4.
 - An `ip` check on a private address runs only at an instance whose
   `callbacks.networks` holds the network, like a `net` check (see
   [Callback rules](#callback-rules)); the other instances answer "not

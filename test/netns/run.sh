@@ -128,12 +128,14 @@ HOST1_FP=$(in_ns host1 "$BIN/ergosumd" fingerprint --config "$W/host1/ergosumd.y
 log "binding request: fixed addresses as ip checks, a DHCP lease as a net check"
 in_ns host1 ip addr add 10.99.0.20/24 dev eth0
 in_ns host1 ip addr add 10.98.0.20/24 dev eth0 valid_lft 300 preferred_lft 300
+in_ns host1 ip addr add 2001:db8:99::20/64 dev eth0 nodad
 req=$(in_ns host1 "$BIN/ergosumd" request --config "$W/host1/ergosumd.yaml")
-for want in 'check ip 198.51.100.20' 'check ip 10.99.0.20' 'check net 10.98.0.0/24'; do
+for want in 'check ip 198.51.100.20' 'check ip 10.99.0.20' 'check net 10.98.0.0/24' 'check ip 2001:db8:99::20'; do
 	grep -qxF "$want" <<< "$req" || { echo "$req"; fail "request lacks: $want"; }
 done
 in_ns host1 ip addr del 10.99.0.20/24 dev eth0
 in_ns host1 ip addr del 10.98.0.20/24 dev eth0
+in_ns host1 ip addr del 2001:db8:99::20/64 dev eth0
 printf 'ergosum binding v1\nkind binding.set\ntrust-domain example.com\nidentity host1.example.com\nepoch 1\nkey %s\ncheck net 198.51.100.0/24\n' "$HOST1_FP" > "$W/event.txt"
 ssh-keygen -q -Y sign -f "$W/alice" -n ergosum-binding "$W/event.txt"
 jq -n --arg key "$HOST1_FP" --rawfile sig "$W/event.txt.sig" '{
