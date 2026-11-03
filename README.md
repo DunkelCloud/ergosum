@@ -1,6 +1,6 @@
 # ergosum
 
-**Short-lived machine identities that a copied disk does not get.**
+**Short-lived machine identities that a cloned machine does not get.**
 
 ergosum gives each machine an identity token only after calling it back at
 the places it was bound to: its tailnet name, a fixed address, an address
@@ -127,6 +127,9 @@ that it can call back on TCP 7433, over the tailnet or at a fixed address.
 - It does not protect a machine that is taken over while it runs: root on
   the machine can use its key, its token and its secrets, as the machine
   itself can.
+- A clone that takes the machine's place passes its checks: at the bound
+  address, or anywhere in the network a `net` check names. The place is the
+  identity.
 - The token is a bearer token: whoever copies it can use it until it
   expires.
 - There is no hosted service: the authorities are yours to run.
