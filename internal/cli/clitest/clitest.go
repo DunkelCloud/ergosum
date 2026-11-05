@@ -26,7 +26,7 @@ func Main(m *testing.M, main func()) {
 // each problem of its help.
 func Help(t *testing.T, args string) {
 	t.Helper()
-	cmd := exec.Command(os.Args[0]) //nolint:gosec // the test binary itself
+	cmd := exec.CommandContext(t.Context(), os.Args[0]) //nolint:gosec // the test binary itself
 	cmd.Env = append(os.Environ(), argsEnv+"="+args+" -h")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
