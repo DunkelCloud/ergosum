@@ -24,7 +24,7 @@ func TestSecretPath(t *testing.T) {
 		{[]string{"-file", "sub/restic", "restic"}, "restic", filepath.Join(dir, "sub", "restic")},
 		{[]string{"-file", abs}, "", abs},
 	} {
-		name, path, err := newSecretFlags("get").parse(tc.args)
+		name, path, err := newSecretFlags("get", readFileUsage, true).parse(tc.args)
 		if err != nil || name != tc.name || path != tc.path {
 			t.Errorf("%q: %q, %q, %v; want %q, %q", tc.args, name, path, err, tc.name, tc.path)
 		}
@@ -37,7 +37,7 @@ func TestSecretPath(t *testing.T) {
 func TestSecretMissingPartA(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "restic")
 
-	f := newSecretFlags("get")
+	f := newSecretFlags("get", readFileUsage, true)
 	if _, _, err := f.parse([]string{"restic"}); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestSecretMissingPartA(t *testing.T) {
 		t.Fatalf("NAME alone: %v", err)
 	}
 
-	f = newSecretFlags("get")
+	f = newSecretFlags("get", readFileUsage, true)
 	if _, _, err := f.parse([]string{"restic", "-file", missing}); err != nil {
 		t.Fatal(err)
 	}

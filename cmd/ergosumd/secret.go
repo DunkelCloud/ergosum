@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DunkelCloud/ergosum/internal/cli"
 	"github.com/DunkelCloud/ergosum/internal/daemon"
 	"github.com/DunkelCloud/ergosum/internal/secret"
 )
@@ -46,7 +47,8 @@ type recipients []string
 func (r *recipients) String() string     { return strings.Join(*r, ", ") }
 func (r *recipients) Set(s string) error { *r = append(*r, s); return nil }
 
-// secretFlags are the flags every secret command takes.
+// secretFlags are the flags of the secret commands: -file for all, -config
+// and -socket for those that ask the daemon.
 type secretFlags struct {
 	fs     *flag.FlagSet
 	config *string
@@ -54,15 +56,25 @@ type secretFlags struct {
 	file   *string
 }
 
-func newSecretFlags(name string) *secretFlags {
+// nameArg is the NAME of every secret command.
+var nameArg = cli.Arg{Name: "NAME", Text: "the secret's name: lower-case letters, digits and hyphens, at most 63 " +
+	"characters. Part A lies at " + defaultSecretDir + "/NAME unless -file says otherwise."}
+
+func newSecretFlags(name, fileUsage string, daemonFlags bool) *secretFlags {
 	fs := flag.NewFlagSet("secret "+name, flag.ExitOnError)
-	return &secretFlags{
-		fs:     fs,
-		config: fs.String("config", defaultConfig, "daemon configuration, for the socket"),
-		socket: fs.String("socket", "", "the daemon's secret socket (default: from the configuration)"),
-		file:   fs.String("file", "", "part A (default: "+defaultSecretDir+"/NAME)"),
+	f := &secretFlags{fs: fs, config: new(string), socket: new(string)}
+	f.file = fs.String("file", "", fileUsage)
+	if daemonFlags {
+		f.config = fs.String("config", defaultConfig, "read secret_socket, the daemon's socket, from the daemon configuration `FILE`")
+		f.socket = fs.String("socket", "", "ask the daemon on the socket `PATH`, instead of secret_socket from the "+
+			"configuration; without either, "+daemon.SecretSocketDefault())
 	}
+	return f
 }
+
+// readFileUsage is -file of the commands that read part A.
+const readFileUsage = "read part A from `PATH` instead of " + defaultSecretDir + "/NAME: needed for a part A that " +
+	"create wrote elsewhere. A relative PATH is taken from the working directory. With -file, NAME may be left out."
 
 // parse takes NAME before or after the flags and returns it with the path
 // of part A. Without -file a NAME is required. A relative -file is taken
@@ -113,11 +125,32 @@ func (f *secretFlags) socketPath() string {
 }
 
 func secretCreate(args []string) error {
-	f := newSecretFlags("create")
-	threshold := f.fs.Int("threshold", 0, "instances needed to open the secret (required)")
-	raw := f.fs.Bool("raw", false, "keep a trailing newline of the input")
+	f := newSecretFlags("create", "write part A to `PATH` instead of "+defaultSecretDir+"/NAME. A relative PATH is "+
+		"taken from the working directory; create names it absolute. get and info then need the same -file.", true)
+	threshold := f.fs.Int("threshold", 0, "the number `K` of pinned instances that must release their shares "+
+		"to open the secret: required, 1 to 16. With 1, the exchange key of one instance and a copy of part A "+
+		"open the secret without any check; 2 or more keep it closed while one instance is lost or broken into.")
+	raw := f.fs.Bool("raw", false, "keep the input as it is; without -raw, one trailing newline (LF or CRLF), "+
+		"as echo or an editor leaves it, is removed")
 	var rec recipients
-	f.fs.Var(&rec, "recovery", "age X25519 or ssh-ed25519 public key for the recovery copy (repeatable)")
+	f.fs.Var(&rec, "recovery", "also seal a recovery copy of the secret to `RECIPIENT`: an age X25519 public "+
+		"key (age1...) or an ssh-ed25519 public key line (\"ssh-ed25519 AAAA... comment\", quoted as one "+
+		"argument). The copy lies in part A as the member recovery and opens with the stock age tool and the "+
+		"matching private key (age -d -i KEY), without ergosum and without any instance. Repeat -recovery "+
+		"for more recipients; each one opens the copy alone. Without it there is no way back once fewer than "+
+		"K pinned instances can release their shares.")
+	cli.Usage(f.fs, "ergosumd secret create NAME -threshold K [-recovery RECIPIENT]... [-raw] [-file PATH]",
+		`Seals a secret read from stdin, at most 64 KiB, into part A, a file that may
+lie in backups and repositories: it opens only on this machine, after the
+machine has passed the checks of its binding at K authority instances.
+create pins a share to every instance of the authority list that hands out
+a release key for the machine, at most 16, and fails with fewer than K,
+naming the instances that did not answer and why. It writes part A with
+mode 0600 and never overwrites one. Run it as root, or as a user that may
+use secret_socket:
+  printf '%s\n' "$PASSWORD" | ergosumd secret create restic -threshold 2 \
+    -recovery 'age1...' -recovery 'ssh-ed25519 AAAA... admin@example.com'
+`, nameArg)
 	name, path, err := f.parse(args)
 	if err != nil {
 		return err
@@ -189,7 +222,17 @@ func secretCreate(args []string) error {
 // secretGet writes the secret to stdout: the bytes as stored, nothing
 // else. On any failure stdout stays empty.
 func secretGet(args []string) error {
-	f := newSecretFlags("get")
+	f := newSecretFlags("get", readFileUsage, true)
+	cli.Usage(f.fs, "ergosumd secret get NAME [-file PATH]", `Opens the secret and writes it to stdout as stored, without a newline, and
+nothing else; on any failure stdout stays empty and the exit code is 1. It
+fits as a password command:
+  RESTIC_PASSWORD_COMMAND='ergosumd secret get restic' restic snapshots
+Who may read part A and use secret_socket may open the secret. The daemon
+answers from memory while it holds the secret open; after the daemon
+starts, the first get needs K of the pinned instances. If the authority
+list has changed, get replaces part A with the re-split one and says so on
+stderr.
+`, nameArg)
 	name, path, err := f.parse(args)
 	if err != nil {
 		return err
@@ -254,7 +297,11 @@ func replaceFile(path string, data []byte) error {
 
 // secretInfo shows part A without the secret; it needs no daemon.
 func secretInfo(args []string) error {
-	f := newSecretFlags("info")
+	f := newSecretFlags("info", readFileUsage, false)
+	cli.Usage(f.fs, "ergosumd secret info NAME [-file PATH]", `Shows what part A holds, without the secret: name, identity, trust domain,
+threshold, the pinned instances and whether a recovery copy exists. It asks
+no daemon and no instance.
+`, nameArg)
 	name, path, err := f.parse(args)
 	if err != nil {
 		return err

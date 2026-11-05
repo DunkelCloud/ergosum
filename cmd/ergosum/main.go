@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/DunkelCloud/ergosum/internal/authority"
+	"github.com/DunkelCloud/ergosum/internal/cli"
 	"github.com/DunkelCloud/ergosum/internal/keys"
 	"github.com/DunkelCloud/ergosum/internal/version"
 )
@@ -48,8 +49,12 @@ Bindings, from an administrator's machine (configuration: %[3]s):
   ergosum authorities                                    the authority lists, and whether they agree
 
 Releases (same configuration: release_key, release_signers):
-  ergosum release sign [-key KEY] [-signers FILE] [-yes] SHA256SUMS   sign a release's checksums
-  ergosum release verify [-signers FILE] DIR                          check a downloaded release
+  ergosum release sign [-key KEY] [-signers FILE] [-yes] [-force] SHA256SUMS   sign a release's checksums
+  ergosum release verify [-signers FILE] DIR                                  check a downloaded release
+
+Each command explains its arguments and flags with -h, such as
+  ergosum bind -h
+  ergosum journal sync -h
 `, defaultConfig, defaultSocket, defaultAdminConfig())
 }
 
@@ -94,10 +99,22 @@ func main() {
 	}
 }
 
+// socketFlag registers -socket, the control socket of the local instance.
+func socketFlag(fs *flag.FlagSet) *string {
+	return fs.String("socket", defaultSocket, "reach the instance on its control socket `PATH`: control_socket in its configuration")
+}
+
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfig, "configuration file")
-	logFormat := fs.String("log-format", "json", "log format: json or text")
+	cfgPath := fs.String("config", defaultConfig, "read the instance configuration from `FILE`: instance, listen, its keys, "+
+		"replication peers and the other settings (examples/serve.yaml in the repository)")
+	logFormat := fs.String("log-format", "json", "write the log to stdout in `FORMAT`: json, or text to read by eye")
+	cli.Usage(fs, "ergosum serve [-config FILE] [-log-format json|text]", `Runs an authority instance, as its service does: checks machines against
+their bindings and issues identity tokens, releases the shares of sealed
+secrets if it has an exchange key, and replicates the journal with its
+peers. With an encrypted key it starts sealed and issues nothing until
+"ergosum unseal". It stops on SIGINT or SIGTERM.
+`)
 	_ = fs.Parse(args)
 	cfg, err := authority.LoadConfig(*cfgPath)
 	if err != nil {
@@ -123,7 +140,13 @@ func serve(args []string) error {
 // with access to the socket can do this.
 func unseal(args []string) error {
 	fs := flag.NewFlagSet("unseal", flag.ExitOnError)
-	socket := fs.String("socket", defaultSocket, "control socket of the running instance")
+	socket := socketFlag(fs)
+	cli.Usage(fs, "ergosum unseal [-socket PATH]", `Opens the encrypted keys of the instance on this host, which starts sealed
+after every start: reads the passphrase from the terminal, or one line from
+stdin, and hands it to the instance over its control socket. Run it as
+ergosum-authority or root on the instance's host, in a container with
+  docker exec -it CONTAINER ergosum unseal
+`)
 	_ = fs.Parse(args)
 	pass, err := readPassphrase("Passphrase: ", false)
 	if err != nil {
@@ -141,10 +164,23 @@ func unseal(args []string) error {
 // daemons need: the public key (PEM), the key ID and the fingerprint.
 func keygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
-	out := fs.String("out", "", "file to write the private key to (must not exist)")
-	encrypt := fs.Bool("encrypt", false, "encrypt the key with a passphrase; the instance then starts sealed")
-	exchange := fs.Bool("exchange", false, "write an exchange key for releasing secrets (exchange_key_file) instead of a signing key")
-	from := fs.String("from", "", "encrypt this existing plain key file instead of generating a key (with -encrypt)")
+	out := fs.String("out", "", "write the private key to `FILE` (required); an existing file is never overwritten")
+	encrypt := fs.Bool("encrypt", false, "encrypt the key with a passphrase, asked twice on the terminal. The "+
+		"instance then starts sealed and needs \"ergosum unseal\" after every start. An exchange key takes "+
+		"the passphrase of the signing key, so that one unseal opens both.")
+	exchange := fs.Bool("exchange", false, "write an exchange key, for exchange_key_file, instead of a signing key: "+
+		"with it the instance takes part in releasing secrets (ergosumd secret). Never back it up: next to a "+
+		"copy of a machine's part A it opens the secret without any check.")
+	from := fs.String("from", "", "encrypt the existing plain key `PLAIN-KEY-FILE` instead of generating one; "+
+		"needs -encrypt, and with -exchange it is an exchange key. Key ID and fingerprint stay the same, so "+
+		"Vault and the authority lists stay as they are. A key that is encrypted already is refused.")
+	cli.Usage(fs, "ergosum keygen -out FILE [-encrypt] [-exchange] [-from PLAIN-KEY-FILE]", `Writes a new key of an authority instance to FILE, with mode 0600 for the
+user who runs it. For a signing key it prints the key ID, the fingerprint
+for the daemons' and the administrators' authorities, and the public key
+in PEM for the token verifier and the instance's peers. Hand the file to
+the service user before the first start:
+  chgrp ergosum-authority FILE && chmod 0640 FILE
+`)
 	_ = fs.Parse(args)
 	if *out == "" {
 		return errors.New("-out is required")
