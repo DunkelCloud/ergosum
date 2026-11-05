@@ -68,7 +68,13 @@ func newSecretFlags(name, fileUsage string, daemonFlags bool) *secretFlags {
 		f.config = fs.String("config", defaultConfig, "read secret_socket, the daemon's socket, from the daemon configuration `FILE`")
 		f.socket = fs.String("socket", "", "ask the daemon on the socket `PATH`, instead of secret_socket from the "+
 			"configuration; without either, "+daemon.SecretSocketDefault())
+		return f
 	}
+	// Taken and ignored, so that one command line serves every secret command.
+	fs.String("config", "", "ignored, since "+name+" asks no daemon: the daemon configuration `FILE`, taken as "+
+		"create and get take it, so that one command line serves all three")
+	fs.String("socket", "", "ignored, since "+name+" asks no daemon: the daemon's socket `PATH`, taken as "+
+		"create and get take it")
 	return f
 }
 

@@ -31,6 +31,22 @@ func TestSecretPath(t *testing.T) {
 	}
 }
 
+// TestSecretInfoTakesDaemonFlags: info takes -config and -socket, as create
+// and get do, so that one command line serves all three.
+func TestSecretInfoTakesDaemonFlags(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "restic")
+	f := newSecretFlags("info", readFileUsage, false)
+	for _, n := range []string{"config", "socket"} {
+		if f.fs.Lookup(n) == nil {
+			t.Fatalf("info does not take -%s", n)
+		}
+	}
+	name, path, err := f.parse([]string{"restic", "-config", "c.yaml", "-socket", "s.sock", "-file", abs})
+	if err != nil || name != "restic" || path != abs {
+		t.Errorf("%q, %q, %v; want %q, %q", name, path, err, "restic", abs)
+	}
+}
+
 // TestSecretMissingPartA: NAME alone looks only in the secrets directory
 // and, when part A is not there, points to -file; a missing -file keeps the
 // plain error.
