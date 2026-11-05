@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/DunkelCloud/ergosum/internal/admin"
+	"github.com/DunkelCloud/ergosum/internal/cli"
 	"github.com/DunkelCloud/ergosum/internal/release"
 	"github.com/DunkelCloud/ergosum/internal/sshsig"
 )
@@ -42,8 +43,11 @@ type releaseFlags struct {
 }
 
 func (f *releaseFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.config, "config", defaultAdminConfig(), "administrator configuration (release_key, release_signers)")
-	fs.StringVar(&f.signers, "signers", "", "keys that may sign releases (release-signers from the repository), instead of release_signers")
+	fs.StringVar(&f.config, "config", defaultAdminConfig(), "read the administrator configuration from `FILE`: "+
+		"release_key and release_signers. A missing default file is no error; ERGOSUM_ADMIN_CONFIG sets another "+
+		"default.")
+	fs.StringVar(&f.signers, "signers", "", "check against the release keys in `FILE`, release-signers from the "+
+		"repository, instead of release_signers; without either, "+defaultReleaseSigners+" if it exists")
 }
 
 func (f *releaseFlags) load() (admin.Config, error) {
@@ -76,13 +80,21 @@ func releaseSign(args []string) error {
 	fs := flag.NewFlagSet("release sign", flag.ExitOnError)
 	var f releaseFlags
 	f.register(fs)
-	keySpec := fs.String("key", "", "release key, instead of release_key (default "+defaultReleaseKey+"): a public key held by ssh-agent, "+
-		"with the private key file next to it if the agent lacks it, or a private key file")
-	yes := fs.Bool("yes", false, "sign without asking")
+	keySpec := fs.String("key", "", "sign with `KEY` instead of release_key, or else "+defaultReleaseKey+": "+
+		"a public key, as a file or the key line, whose private key ssh-agent holds, or else the private key "+
+		"file next to it; or a private key file")
+	yes := fs.Bool("yes", false, "sign without asking; without a terminal, signing needs it")
 	force := fs.Bool("force", false, "replace an existing "+release.SigFile)
+	cli.Usage(fs, "ergosum release sign [-key KEY] [-signers FILE] [-yes] [-force] SHA256SUMS", `Signs the checksum file of a release with the release key, as an SSH
+signature in the namespace `+release.Namespace+`: shows the files it
+lists, asks, signs, checks the signature against the release keys if it
+has them and writes `+release.SigFile+` next to it, for the release to
+carry.
+`, cli.Arg{Name: "SHA256SUMS", Text: "the checksum file of the draft release, as the release workflow built it"})
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		return errors.New("usage: ergosum release sign [-key KEY] [-signers FILE] [-yes] [-force] SHA256SUMS")
+		fs.Usage()
+		os.Exit(2)
 	}
 	sumsPath := fs.Arg(0)
 	sigPath := sumsPath + ".sig"
@@ -196,9 +208,15 @@ func releaseVerify(args []string) error {
 	fs := flag.NewFlagSet("release verify", flag.ExitOnError)
 	var f releaseFlags
 	f.register(fs)
+	cli.Usage(fs, "ergosum release verify [-signers FILE] DIR", `Checks a downloaded release: the signature `+release.SigFile+` over
+`+release.SumsFile+` against the release keys, then each listed file that is in DIR
+against its checksum. Listed files that are not there are named, not failed.
+`, cli.Arg{Name: "DIR", Text: "the directory with " + release.SumsFile + ", " + release.SigFile +
+		" and the downloaded files; a file in it stands for the directory"})
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		return errors.New("usage: ergosum release verify [-signers FILE] DIR")
+		fs.Usage()
+		os.Exit(2)
 	}
 	dir := fs.Arg(0)
 	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {

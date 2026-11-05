@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DunkelCloud/ergosum/internal/cli"
 	"github.com/DunkelCloud/ergosum/internal/daemon"
 	"github.com/DunkelCloud/ergosum/internal/version"
 )
@@ -39,6 +40,9 @@ and fails if one presents another key than the configured one.
 secret create reads the secret from stdin and removes one trailing
 newline (-raw keeps it); secret get writes it to stdout as stored, and
 fits as a password command (restic --password-command and the like).
+
+Each command explains its arguments and flags with -h, such as
+  ergosumd secret create -h
 `, defaultConfig, defaultSecretDir)
 }
 
@@ -82,10 +86,23 @@ func logger(format string) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, nil))
 }
 
+// configFlag registers -config, the daemon configuration.
+func configFlag(fs *flag.FlagSet) *string {
+	return fs.String("config", defaultConfig, "read the daemon configuration from `FILE`: identity, authorities, "+
+		"addresses, state_dir, token_file and the other settings (examples/ergosumd.yaml in the repository)")
+}
+
 func run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfig, "configuration file")
-	logFormat := fs.String("log-format", "json", "log format: json or text")
+	cfgPath := configFlag(fs)
+	logFormat := fs.String("log-format", "json", "write the log to stdout in `FORMAT`: json, or text to read by eye")
+	cli.Usage(fs, "ergosumd run [-config FILE] [-log-format json|text]", `Runs the daemon, as its service does: requests an identity token from the
+authorities, writes it to token_file and renews it from half its lifetime
+on, answering the authorities' callbacks on the callback port while a
+request is in flight. It answers "ergosumd secret" on secret_socket and
+holds the secrets opened there. It stops on SIGINT or SIGTERM. Start it
+through the service, not by hand next to it.
+`)
 	_ = fs.Parse(args)
 	cfg, err := daemon.LoadConfig(*cfgPath)
 	if err != nil {
@@ -105,9 +122,19 @@ func run(args []string) error {
 // to complete with "ergosum bind".
 func request(args []string) error {
 	fs := flag.NewFlagSet("request", flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfig, "configuration file")
-	newKey := fs.Bool("new-key", false, "request a binding for a new key; the daemon keeps the current key until the binding names the new one")
-	out := fs.String("out", "", "write the request to this file (must not exist) instead of stdout")
+	cfgPath := configFlag(fs)
+	newKey := fs.Bool("new-key", false, "request a binding for a new key: creates the next key next to the "+
+		"current one (identity.key.new in state_dir), or names the one an earlier -new-key created. The "+
+		"daemon keeps the current key until every authority that answers names the new one in its binding.")
+	out := fs.String("out", "", "write the request to `FILE` instead of stdout; an existing file is never overwritten")
+	cli.Usage(fs, "ergosumd request [-config FILE] [-new-key] [-out FILE]", `Writes a binding request for this machine: its identity, the fingerprint of
+its key and the checks it proposes from where it stands (its tailnet name,
+fixed addresses as ip checks, the networks of DHCP addresses as net
+checks). An ergosum administrator checks it and records it with
+"ergosum bind FILE". Run it as the service user, since it creates the key
+on first use:
+  sudo -u ergosum ergosumd request -out host1.txt
+`)
 	_ = fs.Parse(args)
 	cfg, err := daemon.LoadConfig(*cfgPath)
 	if err != nil {
@@ -137,7 +164,11 @@ func request(args []string) error {
 // first use, so that provisioning can read it for the binding.
 func fingerprint(args []string) error {
 	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfig, "configuration file")
+	cfgPath := configFlag(fs)
+	cli.Usage(fs, "ergosumd fingerprint [-config FILE]", `Prints the fingerprint of the machine's key (SHA256:...), as its binding
+names it. Run it as the service user, since it creates the key on first
+use: sudo -u ergosum ergosumd fingerprint
+`)
 	_ = fs.Parse(args)
 	cfg, err := daemon.LoadConfig(*cfgPath)
 	if err != nil {
@@ -156,7 +187,12 @@ func fingerprint(args []string) error {
 // not, since a new machine may reach its authorities only later.
 func check(args []string) error {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfig, "configuration file")
+	cfgPath := configFlag(fs)
+	cli.Usage(fs, "ergosumd check [-config FILE]", `Connects to each authority URL of the configuration and prints the key it
+presents. It fails if one presents another key than the configured one; a
+URL that cannot be reached does not fail it, since a new machine may reach
+its authorities only later. An authority logs its key when it starts.
+`)
 	_ = fs.Parse(args)
 	cfg, err := daemon.LoadConfig(*cfgPath)
 	if err != nil {

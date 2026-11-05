@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/DunkelCloud/ergosum/internal/admin"
+	"github.com/DunkelCloud/ergosum/internal/cli"
 	"github.com/DunkelCloud/ergosum/internal/keys"
 )
 
@@ -46,14 +47,21 @@ func defaultAdminConfig() string {
 }
 
 func (f *adminFlags) register(fs *flag.FlagSet, signs bool) {
-	fs.StringVar(&f.config, "config", defaultAdminConfig(), "administrator configuration (trust_domain, authorities, sign_key)")
-	fs.StringVar(&f.trustDomain, "trust-domain", "", "trust domain of the authorities, instead of the configured one")
-	fs.StringVar(&f.authority, "authority", "", "authority URL, instead of the configured ones")
-	fs.StringVar(&f.authorityKey, "authority-key", "", "key fingerprint of -authority (SHA256:...)")
+	fs.StringVar(&f.config, "config", defaultAdminConfig(), "read the administrator configuration from `FILE`: "+
+		"trust_domain, authorities and sign_key. A missing default file is no error; ERGOSUM_ADMIN_CONFIG sets "+
+		"another default.")
+	fs.StringVar(&f.trustDomain, "trust-domain", "", "take `DOMAIN` (such as example.com) as the authorities' "+
+		"trust domain, instead of trust_domain; the authorities must serve the same")
+	fs.StringVar(&f.authority, "authority", "", "ask the authority at `URL` (https://HOST:7432) instead of the "+
+		"configured ones; needs -authority-key")
+	fs.StringVar(&f.authorityKey, "authority-key", "", "the key `FINGERPRINT` (SHA256:...) that the authority "+
+		"at -authority must present, as \"ergosum keygen\" printed it")
 	if signs {
-		fs.StringVar(&f.signKey, "sign-key", "", "sign with this key instead of sign_key: public key held by ssh-agent, or private key file")
-		fs.StringVar(&f.keygen, "ssh-keygen", "ssh-keygen", "ssh-keygen program, for private key files")
-		fs.BoolVar(&f.yes, "yes", false, "sign without asking")
+		fs.StringVar(&f.signKey, "sign-key", "", "sign with `KEY` instead of sign_key: a public key, as a file "+
+			"or the key line, whose private key ssh-agent holds, or else the private key file next to it; or a "+
+			"private key file")
+		fs.StringVar(&f.keygen, "ssh-keygen", "ssh-keygen", "the ssh-keygen `PROGRAM` that signs with a private key file")
+		fs.BoolVar(&f.yes, "yes", false, "sign without asking; without a terminal, signing needs it")
 	}
 }
 
@@ -137,23 +145,24 @@ func adminContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Minute)
 }
 
+// identityArg is the NAME of revoke and show.
+var identityArg = cli.Arg{Name: "NAME", Text: "the machine's identity, as its binding names it (host1.example.com)"}
+
 // bind implements "ergosum bind FILE".
 func bind(args []string) error {
 	fs := flag.NewFlagSet("bind", flag.ExitOnError)
 	var af adminFlags
 	af.register(fs, true)
-	text := fs.String("text", "", "complete FILE and write the text to sign to this file, for signing by hand; no signature")
-	fs.Usage = func() {
-		_, _ = fmt.Fprintf(fs.Output(), `usage: ergosum bind [flags] FILE
-
-Takes a binding file one step further: adds kind, trust domain and the next
+	text := fs.String("text", "", "complete FILE and write the text to sign to `OUT`, for signing by hand "+
+		"(ssh-keygen -Y sign -n ergosum-binding OUT); signs nothing")
+	cli.Usage(fs, "ergosum bind [flags] FILE", `Takes a binding file one step further: adds kind, trust domain and the next
 epoch, shows the text to sign and what changes, signs with your key, and
 records the event once enough administrators have signed. The next
 administrator runs the same command on the same file.
-
-`)
-		fs.PrintDefaults()
-	}
+`, cli.Arg{Name: "FILE", Text: "the binding file: a request from \"ergosumd request\", a binding from " +
+		"\"ergosum show -out\" or a revocation from \"ergosum revoke\", edited as needed, or one that " +
+		"another administrator has signed. bind completes it and appends the signature, and once it is " +
+		"recorded, where."})
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
 		fs.Usage()
@@ -176,10 +185,18 @@ func revoke(args []string) error {
 	fs := flag.NewFlagSet("revoke", flag.ExitOnError)
 	var af adminFlags
 	af.register(fs, true)
-	out := fs.String("out", "", "revocation file to write (default NAME.revoke.txt)")
+	out := fs.String("out", "", "write the revocation to `FILE` instead of NAME.revoke.txt in the working "+
+		"directory; an existing file is refused")
+	cli.Usage(fs, "ergosum revoke [flags] NAME", `Revokes the binding of NAME: shows what it ends, writes the revocation to a
+file and continues as "ergosum bind" on it. If the registry demands more
+approvals, the next administrator runs "ergosum bind" on the same file.
+Every instance stops issuing to NAME as soon as the revocation reaches it;
+a token already issued stays valid until it expires.
+`, identityArg)
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		return errors.New("usage: ergosum revoke [flags] NAME")
+		fs.Usage()
+		os.Exit(2)
 	}
 	t, err := af.tool()
 	if err != nil {
@@ -195,10 +212,15 @@ func show(args []string) error {
 	fs := flag.NewFlagSet("show", flag.ExitOnError)
 	var af adminFlags
 	af.register(fs, false)
-	out := fs.String("out", "", "write to this file instead of stdout (must not exist)")
+	out := fs.String("out", "", "write the binding to `FILE` instead of stdout; an existing file is never overwritten")
+	cli.Usage(fs, "ergosum show [flags] NAME", `Prints the current binding of NAME in the binding file format: epoch, key,
+checks and who approved it. Edited and passed to "ergosum bind", it
+changes the binding, for a new address, another network or another check.
+`, identityArg)
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		return errors.New("usage: ergosum show [flags] NAME")
+		fs.Usage()
+		os.Exit(2)
 	}
 	t, err := af.tool()
 	if err != nil {
@@ -224,9 +246,13 @@ func list(args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	var af adminFlags
 	af.register(fs, false)
+	cli.Usage(fs, "ergosum list [flags]", `Lists every binding with identity, epoch, state, key and checks, and names
+the identities on which the authorities disagree.
+`)
 	_ = fs.Parse(args)
 	if fs.NArg() != 0 {
-		return errors.New("usage: ergosum list [flags]")
+		fs.Usage()
+		os.Exit(2)
 	}
 	t, err := af.tool()
 	if err != nil {
@@ -260,9 +286,14 @@ func authorities(args []string) error {
 	fs := flag.NewFlagSet("authorities", flag.ExitOnError)
 	var af adminFlags
 	af.register(fs, false)
+	cli.Usage(fs, "ergosum authorities [flags]", `Shows the authority list that each configured authority serves, and
+whether they agree: which listed instances are not configured here, and
+which configured ones the list lacks. It fails if the lists disagree.
+`)
 	_ = fs.Parse(args)
 	if fs.NArg() != 0 {
-		return errors.New("usage: ergosum authorities [flags]")
+		fs.Usage()
+		os.Exit(2)
 	}
 	client, cfg, err := af.client()
 	if err != nil {
