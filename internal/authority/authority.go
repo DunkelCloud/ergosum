@@ -101,6 +101,10 @@ type Authority struct {
 	cert     tls.Certificate
 	unsealed chan struct{}
 
+	maintMu    sync.Mutex
+	maintErr   error     // why the latest journal maintenance failed; nil if it did not
+	maintSince time.Time // when the journal maintenance started failing
+
 	addrMu   sync.Mutex
 	apiAddr  net.Addr
 	opsAddr  net.Addr
@@ -460,9 +464,17 @@ func (a *Authority) apiHandler() http.Handler {
 func (a *Authority) opsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", a.metrics.Handler())
+	// Healthy ("ok"), degraded (still issuing, but something needs an
+	// operator) or unhealthy ("sealed", 503). Degraded answers 200, so that
+	// a liveness check does not restart an instance that a restart would
+	// seal; machine_identity_journal_maintenance_failing alerts on it.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		if a.Sealed() {
 			http.Error(w, "sealed", http.StatusServiceUnavailable)
+			return
+		}
+		if d := a.Degraded(); d != "" {
+			_, _ = fmt.Fprintf(w, "degraded: %s\n", d)
 			return
 		}
 		_, _ = w.Write([]byte("ok\n"))

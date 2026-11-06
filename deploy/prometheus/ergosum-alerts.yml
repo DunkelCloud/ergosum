@@ -82,6 +82,16 @@ groups:
         annotations:
           summary: "{{ $labels.instance }}: no own checkpoint for {{ $value | humanizeDuration }}"
 
+      # The latest checkpoint or compaction failed. The instance still
+      # issues, but its journal gets no checkpoint or stops shrinking;
+      # /healthz answers degraded with the step, the error and since when.
+      - alert: ErgosumJournalMaintenanceFailing
+        expr: machine_identity_journal_maintenance_failing == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }}: journal maintenance failing; /healthz and the log say why"
+
       # A held secret (ADR 0004, daemon metrics) has fewer answering pins
       # than its threshold: after a restart of the daemon it would not
       # open. Bring the instances back or re-split; never lower the
