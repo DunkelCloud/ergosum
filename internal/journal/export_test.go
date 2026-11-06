@@ -33,6 +33,14 @@ func DeleteForTest(s *Store, origin string, seq int64) error {
 // SetMaxUncoveredForTest lowers MaxUncovered for one store.
 func SetMaxUncoveredForTest(s *Store, n int) { s.maxUncovered = n }
 
+// TempStoreForTest returns the temp_store setting of the connection: 2 is
+// MEMORY.
+func TempStoreForTest(s *Store) (int, error) {
+	var v int
+	err := s.db.QueryRowContext(context.Background(), `PRAGMA temp_store`).Scan(&v)
+	return v, err
+}
+
 // SetFrontierForTest raises the compaction frontier of an origin directly.
 func SetFrontierForTest(s *Store, origin string, seq int64) error {
 	_, err := s.db.ExecContext(context.Background(), `INSERT INTO compaction (origin, seq) VALUES (?, ?)
