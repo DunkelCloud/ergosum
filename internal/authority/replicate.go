@@ -41,6 +41,8 @@ type journalMetrics struct {
 	frontier      *metrics.Vec
 	checkpointAge *metrics.Vec
 	compacted     *metrics.Vec
+	// maintenanceFailing is 1 while the latest journal maintenance failed.
+	maintenanceFailing *metrics.Vec
 }
 
 func (a *Authority) setupReplication(ps []peer) error {
@@ -89,7 +91,10 @@ func (a *Authority) setupReplication(ps []peer) error {
 			"Age of the latest own checkpoint; -1 if there is none yet."),
 		compacted: m.Counter("machine_identity_journal_compacted_events_total",
 			"Events deleted by compaction.", ""),
+		maintenanceFailing: m.Gauge("machine_identity_journal_maintenance_failing",
+			"1 while the latest journal maintenance (checkpoint or compaction) failed; /healthz then answers degraded."),
 	}
+	a.jm.maintenanceFailing.Set("", 0)
 	for _, p := range ps {
 		a.jm.rejected.Add(p.name, 0)
 		if p.url != "" {
@@ -326,30 +331,14 @@ func (a *Authority) Compact(ctx context.Context) (CompactResult, error) {
 	return res, nil
 }
 
-// maintain writes a checkpoint when one is due and the journal changed
-// since the last one, and compacts; at start and then every compaction
-// interval.
+// maintain runs the journal maintenance at start and then every compaction
+// interval, and keeps its outcome for /healthz and the metrics.
 func (a *Authority) maintain(ctx context.Context) {
 	t := time.NewTicker(a.cfg.Compaction.Interval)
 	defer t.Stop()
 	for {
-		last, err := a.store.LastCheckpoint(ctx)
-		changed := false
-		if err == nil {
-			changed, err = a.store.ChangedSinceCheckpoint(ctx)
-		}
-		switch {
-		case err != nil:
-			if ctx.Err() == nil {
-				a.log.Error("journal maintenance", "err", err)
-			}
-		case changed && a.now().Sub(last) >= a.cfg.Compaction.CheckpointInterval:
-			if _, err := a.Checkpoint(ctx); err != nil && ctx.Err() == nil {
-				a.log.Error("checkpoint failed", "err", err)
-			}
-		}
-		if _, err := a.Compact(ctx); err != nil && ctx.Err() == nil {
-			a.log.Error("compaction failed", "err", err)
+		if err := a.maintainOnce(ctx); ctx.Err() == nil {
+			a.recordMaintenance(err)
 		}
 		select {
 		case <-ctx.Done():
@@ -357,6 +346,67 @@ func (a *Authority) maintain(ctx context.Context) {
 		case <-t.C:
 		}
 	}
+}
+
+// maintainOnce writes a checkpoint when one is due and the journal changed
+// since the last one, and compacts. It logs every failure and returns the
+// first.
+func (a *Authority) maintainOnce(ctx context.Context) error {
+	var first error
+	fail := func(msg, step string, err error) {
+		if ctx.Err() != nil {
+			return
+		}
+		a.log.Error(msg, "err", err)
+		if first == nil {
+			first = fmt.Errorf("%s: %w", step, err)
+		}
+	}
+	last, err := a.store.LastCheckpoint(ctx)
+	changed := false
+	if err == nil {
+		changed, err = a.store.ChangedSinceCheckpoint(ctx)
+	}
+	switch {
+	case err != nil:
+		fail("journal maintenance", "journal", err)
+	case changed && a.now().Sub(last) >= a.cfg.Compaction.CheckpointInterval:
+		if _, err := a.Checkpoint(ctx); err != nil {
+			fail("checkpoint failed", "checkpoint", err)
+		}
+	}
+	if _, err := a.Compact(ctx); err != nil {
+		fail("compaction failed", "compaction", err)
+	}
+	return first
+}
+
+// recordMaintenance keeps the outcome of the latest journal maintenance.
+func (a *Authority) recordMaintenance(err error) {
+	a.maintMu.Lock()
+	defer a.maintMu.Unlock()
+	if err == nil {
+		a.maintErr = nil
+		a.jm.maintenanceFailing.Set("", 0)
+		return
+	}
+	if a.maintErr == nil {
+		a.maintSince = a.now()
+	}
+	a.maintErr = err
+	a.jm.maintenanceFailing.Set("", 1)
+}
+
+// Degraded says why the instance needs attention although it still issues:
+// the journal maintenance that keeps failing, and since when. It is empty
+// while there is nothing to report.
+func (a *Authority) Degraded() string {
+	a.maintMu.Lock()
+	defer a.maintMu.Unlock()
+	if a.maintErr == nil {
+		return ""
+	}
+	return fmt.Sprintf("journal maintenance failing since %s: %v", a.maintSince.UTC().Format(time.RFC3339), a.maintErr)
 }
 
 // JournalStatus is the journal state with the outbox of every peer.

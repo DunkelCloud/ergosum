@@ -89,7 +89,7 @@ daemon has no token yet is set up and started without waiting for one
 (see [operations](operations.md#daemon)).
 
 An authority is not restarted, since it comes back sealed: restart it,
-unseal it, and check `/healthz`. The way back is
+unseal it, and check that `/healthz` answers `ok`. The way back is
 `mv /usr/bin/ergosum.old /usr/bin/ergosum` and another restart. Update
 authorities one at a time.
 

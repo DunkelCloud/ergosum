@@ -474,6 +474,17 @@ network on every instance that should check them.
 | `machine_identity_journal_compaction_frontier{origin}` | sequence number up to which events of an origin may be deleted |
 | `machine_identity_journal_checkpoint_age_seconds` | age of the latest own checkpoint; -1 before the first |
 | `machine_identity_journal_compacted_events_total` | events deleted by compaction |
+| `machine_identity_journal_maintenance_failing` | 1 while the latest checkpoint or compaction failed; `/healthz` then answers degraded |
+
+`/healthz` on the same listener answers `ok` while all is well, and
+`sealed` with status 503 until the instance is unsealed. While the
+instance issues but its journal maintenance keeps failing, it answers
+`degraded:` with status 200, followed by the step that failed (`journal`,
+`checkpoint` or `compaction`), the error and since when, for example
+`degraded: journal maintenance failing since 2026-11-06T09:39:15Z:
+compaction: disk I/O error (6410)`. Degraded is not 503, so that a
+liveness check does not restart an instance that the restart would seal;
+alert on `machine_identity_journal_maintenance_failing` instead.
 
 `key_duplicate` is proof that a machine key exists twice and deserves a
 critical alert. `replay` means that someone with the machine key reused a
@@ -619,8 +630,11 @@ compaction:
 ```
 
 With an archive, compaction first writes the events not yet archived to a
-new file there (JSON lines), and deletes only archived events. Commands on
-the local instance:
+new file there (JSON lines), and deletes only archived events. A failed
+checkpoint or compaction is logged at level `error` and tried again at the
+next interval; until a run succeeds, `/healthz` answers degraded and
+`machine_identity_journal_maintenance_failing` is 1 (see *Metrics and
+audit*). Commands on the local instance:
 
 ```sh
 ergosum journal state                  # state hash, coverage, frontier, outboxes
