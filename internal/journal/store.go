@@ -135,7 +135,11 @@ func Open(path, origin, trustDomain string, registry *Registry) (*Store, error) 
 		return nil, errors.New("journal: empty origin")
 	}
 	q := url.Values{}
-	for _, p := range []string{"busy_timeout(5000)", "journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)"} {
+	// temp_store(MEMORY): SQLite keeps temporary data, such as the statement
+	// journal of a large compaction, in memory. Otherwise it needs a writable
+	// temporary directory, which a read-only container may not have
+	// ("disk I/O error (6410)").
+	for _, p := range []string{"busy_timeout(5000)", "journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "temp_store(MEMORY)"} {
 		q.Add("_pragma", p)
 	}
 	db, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())

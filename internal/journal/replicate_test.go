@@ -89,6 +89,40 @@ func TestVerifyChecksPosition(t *testing.T) {
 	}
 }
 
+// TestCompactWithTemporaryDataInMemory: SQLite keeps temporary data in
+// memory, so that compaction needs no writable temporary directory, which a
+// read-only container without /tmp does not have. The delete trigger makes
+// SQLite keep a statement journal of the pages that the compaction's DELETE
+// changes; deleting 100 events of about 1 KiB takes it past the 64 KiB at
+// which it would spill to a temporary file (in such a container, it failed
+// with "disk I/O error (6410)").
+func TestCompactWithTemporaryDataInMemory(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, jt.NewAdmins(t, "alice"), 1)
+	if v, err := journal.TempStoreForTest(s); err != nil || v != 2 {
+		t.Fatalf("temp_store %d, %v; want 2 (MEMORY)", v, err)
+	}
+	body := []byte(`{"pad":"` + strings.Repeat("x", 1100) + `"}`)
+	const n = 100
+	for range n {
+		if _, err := s.AppendObservation(ctx, "observation.issued", "host1.example.com", "h", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.WriteCheckpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cp, _ := s.LatestAt(ctx, "instance-a", journal.KindCheckpoint, math.MaxInt64)
+	cov, _ := s.Coverages(ctx)
+	if err := s.SetFrontier(ctx, *cp, cov); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got, err := s.Compact(ctx, journal.CompactOptions{Retention: journal.Retention{Observations: time.Nanosecond}}); err != nil || got != n {
+		t.Fatalf("compacted %d of %d: %v", got, n, err)
+	}
+}
+
 // TestReadPagesAfterCompaction: paging from below the compaction frontier
 // delivers every event that survived compaction, not only the first page.
 func TestReadPagesAfterCompaction(t *testing.T) {
