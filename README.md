@@ -81,8 +81,7 @@ through signed checkpoints.
 
 Early development. Interfaces and formats are described in
 [`docs/adr/`](docs/adr) and may still change. Secrets without Vault
-(`ergosumd secret`) are on `main` and in the pre-release `v0.2.0-rc.1`
-(`install.sh --version v0.2.0-rc.1`), not yet in a release.
+(`ergosumd secret`) are in every release since `v0.2.0`.
 
 ## Getting started
 
