@@ -87,7 +87,7 @@ The request is a short text:
 # Keep the checks that hold for this machine and delete the others, then
 # hand the file to an ergosum administrator, who runs "ergosum bind FILE".
 identity host1.example.com
-key SHA256:pUlP2fNzgbWeyB0Rkp4FgEBcE2Mq4mYOlUz8Qy2Wq1A
+key SHA256:...
 # tailnet name (tailscale status)
 check tailnet host1.tailnet.example.com
 # Fixed addresses have no lifetime in the kernel. An older dhclient sets DHCP leases without one too: check that each is really fixed.
