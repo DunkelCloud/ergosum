@@ -2,7 +2,10 @@
 # the trust domain with the URLs daemons reach it on, in order of
 # preference. Keep the same file on every instance and raise serial with
 # each change; daemons take a list only with a higher serial. An instance
-# reads the file again when it changes, without a restart.
+# reads the file again when it changes, without a restart. List only
+# addresses an instance answers on: "listen" in serve.yaml names one
+# address, so several URLs per instance need listen: ":7432" with
+# listen_all_interfaces: true, or a port forward.
 serial: 1
 authorities:
   - key: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"   # authority-a

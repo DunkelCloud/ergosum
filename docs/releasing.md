@@ -1,5 +1,9 @@
 # Releases
 
+This page describes what a release contains and how to check that a
+download is genuine. The second half, [Making a
+release](#making-a-release), is for maintainers.
+
 A release is a GitHub release of a tag `vMAJOR.MINOR.PATCH`: the
 binaries, the image as an archive, `SHA256SUMS` over all of them, and
 `SHA256SUMS.sig`, an SSH signature over `SHA256SUMS` in the namespace
@@ -56,54 +60,20 @@ sha256sum /tmp/rebuild/ergosumd
 
 ## Installing and updating
 
-On the machine, as root:
+Installing and updating are described where they happen:
 
-```sh
-curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
-sh install.sh                      # the daemon, latest release
-sh install.sh --version vX.Y.Z     # the daemon, a given release
-```
+- machines (`ergosumd`): [Machines](machines.md#updating-ergosumd);
+- authorities (`ergosum`), natively or as a container: [Running an
+  authority](authority.md#updating-an-authority);
+- administrators' workstations: download the new `ergosum` binary and
+  replace the old one.
 
-The script downloads the release with `curl` or `wget`. Where the files
-are already on the machine, it takes them from their directory instead:
-
-```sh
-sh install.sh /tmp/ergosum-vX.Y.Z           # the daemon
-sh install.sh /tmp/ergosum-vX.Y.Z ergosum   # an authority
-```
-
-It checks the signature against `/etc/ergosum/release-signers` and the
-checksum of every file it uses, refuses an older version unless given
-`--allow-downgrade`, and keeps the installed binary as
-`/usr/bin/NAME.old` (on macOS `/usr/local/bin/NAME.old`). It restarts
-`ergosumd` (systemd, OpenRC or launchd) and waits for a new token; without
-one it puts the old binary back and restarts it. On a machine that has a
-token, it changes neither configuration nor state.
-
-A machine without `/etc/ergosum/release-signers` gets the release keys
-that the script carries, the same as `release-signers` in the repository
-at that release; later updates check against them. Whoever does not want
+`install.sh` checks every release it installs against the release keys in
+`/etc/ergosum/release-signers`. A machine without that file gets the keys
+that the script carries, the same as `release-signers` in the repository at
+that release, and keeps them there for later updates. Whoever does not want
 to trust the download of `install.sh` alone checks it first like any
-release file, against a verified `SHA256SUMS` (above). A machine whose
-daemon has no token yet is set up and started without waiting for one
-(see [operations](operations.md#daemon)).
-
-An authority is not restarted, since it comes back sealed: restart it,
-unseal it, and check that `/healthz` answers `ok`. The way back is
-`mv /usr/bin/ergosum.old /usr/bin/ergosum` and another restart. Update
-authorities one at a time.
-
-For an authority in a container, verify the release as above, then:
-
-```sh
-docker load -i ergosum-image-linux-amd64.tar   # loads ergosum:vX.Y.Z
-```
-
-name `ergosum:vX.Y.Z` in the Compose file, recreate the container and
-unseal it.
-
-Roll out to one machine first, then to a few, then to the rest.
-`machine_identity_build_info{version,commit}` shows which build runs where.
+release file, against a verified `SHA256SUMS` (above).
 
 ## Making a release
 
