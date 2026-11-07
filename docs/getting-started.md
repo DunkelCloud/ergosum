@@ -16,10 +16,11 @@ details; you do not need them for a first installation.
 **Hosts.**
 
 - A Linux host for the authority (x86-64 or ARM64) with systemd or OpenRC,
-  or with Docker, and `ssh-keygen` from OpenSSH 8.1 or later, which the
-  installer uses to check the release signature. A small VM is enough. It is the most sensitive part of
-  the installation: whoever controls it can issue tokens. Do not use a
-  host that many people can log in to.
+  or with Docker. The installer needs `curl` or `wget` and `ssh-keygen`
+  from OpenSSH 8.1 or later, which checks the release signature. A small
+  VM is enough. It is the most sensitive part of the installation:
+  whoever controls it can issue tokens. Do not use a host that many people
+  can log in to.
 - A Linux server or a Mac to enroll as the first machine. It needs `curl`
   or `wget` and `ssh-keygen` from OpenSSH 8.1 or later (on Alpine: `apk
   add openssh-keygen`).
@@ -72,42 +73,25 @@ Run these commands as root on the authority host. On a host with Docker
 you can [run the authority as a container](authority.md#running-in-a-container)
 instead; the configuration is the same.
 
-### 2.1 Install the binary
+### 2.1 Install the authority
 
-`install.sh` downloads nothing for an authority by itself, so download the
-release files first, then let the script check their signature and install
-`ergosum`:
+Download the installer and run it with `--authority`:
 
 ```sh
-mkdir -p /root/ergosum-release && cd /root/ergosum-release
-base=https://github.com/DunkelCloud/ergosum/releases/latest/download
-arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-for f in install.sh SHA256SUMS SHA256SUMS.sig ergosum-linux-$arch; do
-  curl -fsSLO "$base/$f"
-done
-sh install.sh "$PWD" ergosum
+curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
+sh install.sh --authority
 ```
 
-The script checks the release signature and the checksum, and installs
-`/usr/bin/ergosum`. Check it with `ergosum version`.
+The script checks the release signature and installs `/usr/bin/ergosum`.
+It also creates the user `ergosum-authority` that the authority runs as,
+its data directory `/var/lib/ergosum-authority`, the directory
+`/etc/ergosum`, and the service (systemd or OpenRC). It does not start the
+authority yet, because the authority needs a signing key and a
+configuration first. Check the installation with `ergosum version`.
 
-### 2.2 Create the service user
-
-The authority runs as a user of its own, `ergosum-authority`:
-
-```sh
-useradd --system --user-group --no-create-home \
-  --home-dir /var/lib/ergosum-authority --shell /usr/sbin/nologin ergosum-authority
-```
-
-On Alpine: `addgroup -S ergosum-authority && adduser -S -D -H -h
-/var/lib/ergosum-authority -s /sbin/nologin -G ergosum-authority
-ergosum-authority`.
-
-### 2.3 Create the signing key
+### 2.2 Create the signing key
 
 ```sh
-install -d -m 0755 /etc/ergosum
 ergosum keygen -out /etc/ergosum/signing.key -encrypt
 chgrp ergosum-authority /etc/ergosum/signing.key
 chmod 0640 /etc/ergosum/signing.key
@@ -139,7 +123,7 @@ K5BsfKmA6jKC6cIwVZvsAjI0Ed/uhnarysq70BLz49WMsRRKyVJcfqqDFg==
 You can get both again later: the authority logs the fingerprint at every
 start, and serves the public key at `http://127.0.0.1:7434/v1/keys.pem`.
 
-### 2.4 Write the configuration
+### 2.3 Write the configuration
 
 Create `/etc/ergosum/serve.yaml`. This is the smallest useful
 configuration; replace the values marked below:
@@ -191,22 +175,16 @@ machine alone. All settings are explained in [Running an
 authority](authority.md#configuration) and in
 [`examples/serve.yaml`](../examples/serve.yaml).
 
-### 2.5 Start the service
+### 2.4 Start the service
 
-With systemd, take the unit file from the repository, in the version you
-installed:
+With systemd:
 
 ```sh
-v=$(ergosum version | awk 'NR == 1 {print $2}')
-curl -fsSL -o /etc/systemd/system/ergosum.service \
-  "https://raw.githubusercontent.com/DunkelCloud/ergosum/$v/deploy/systemd/ergosum.service"
-systemctl daemon-reload
 systemctl enable --now ergosum
 ```
 
-With OpenRC (Alpine), take `deploy/openrc/ergosum` instead, save it as
-`/etc/init.d/ergosum` with mode 0755, and run `rc-update add ergosum
-default && rc-service ergosum start`.
+With OpenRC (Alpine): `rc-update add ergosum default && rc-service ergosum
+start`.
 
 If you created the key with `-encrypt`, unseal the authority now. It asks
 for the passphrase:
@@ -226,7 +204,7 @@ the service does not start, `journalctl -u ergosum` shows why; the most
 common causes are a typo in `serve.yaml` and a key file with the wrong
 owner or mode.
 
-### 2.6 Open the firewall
+### 2.5 Open the firewall
 
 Allow TCP 7432 to the authority from your machines and from the
 administrators' workstations. Keep port 7434 closed to the outside; it
@@ -253,7 +231,7 @@ listens on `127.0.0.1` anyway.
    sign_key: ~/.ssh/ergosum-admin.pub      # your public key from step 1
    authorities:
      - url: https://100.64.0.10:7432       # the authority's address and port
-       key: SHA256:Elq+oe+ce3oYlfjEk7G4WTk4ymiWjlWJJRA5k8TYYsQ   # fingerprint from step 2.3
+       key: SHA256:Elq+oe+ce3oYlfjEk7G4WTk4ymiWjlWJJRA5k8TYYsQ   # fingerprint from step 2.2
    ```
 
 4. Test the connection:
@@ -285,7 +263,7 @@ sh install.sh --domain example.com --anchor 'SHA256:Elq+oe+ce3oYlfjEk7G4WTk4ymiW
 | Option | What it is | Where you get it |
 | --- | --- | --- |
 | `--domain example.com` | the domain of the machine's identity; the machine becomes `<its host name>.example.com` | your choice from "Before you start"; use the same for all machines |
-| `--anchor FINGERPRINT@URL` | the authority the machine talks to first, and the key it must present | the fingerprint from step 2.3, an `@`, and `https://` with an authority address *this machine* can reach and the port from `listen` |
+| `--anchor FINGERPRINT@URL` | the authority the machine talks to first, and the key it must present | the fingerprint from step 2.2, an `@`, and `https://` with an authority address *this machine* can reach and the port from `listen` |
 
 The quotes keep the shell away from the special characters. (An authority
 that answers on several addresses can be given with several URLs,
@@ -378,7 +356,7 @@ The token alone does nothing yet. Use it in one of two ways:
 
 - **With HashiCorp Vault or OpenBao.** Vault accepts the token as a login,
   and Vault Agent on the machine fetches the machine's secrets.
-  [Vault](vault.md) shows the setup; it needs the public key from step 2.3.
+  [Vault](vault.md) shows the setup; it needs the public key from step 2.2.
 - **Without Vault.** `ergosumd secret` seals a secret, such as a backup
   password, so that it opens only on this machine at its place. This needs
   at least two authority instances to be worthwhile; see [Secrets without

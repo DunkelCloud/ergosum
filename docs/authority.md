@@ -13,8 +13,8 @@ through a first installation step by step.
 ## Requirements
 
 - Linux on x86-64 or ARM64, with systemd or OpenRC, or Docker.
-- `ssh-keygen` from OpenSSH 8.1 or later, which `install.sh` uses to check
-  the release signature.
+- `curl` or `wget`, and `ssh-keygen` from OpenSSH 8.1 or later, which
+  `install.sh` uses to check the release signature.
 - A host of its own if possible; see [Shared host](#shared-host) for the
   alternative.
 - TCP 7432 reachable from the machines and the administrators'
@@ -31,39 +31,32 @@ As root on the authority host. The commands are explained in [Getting
 started](getting-started.md#step-2-set-up-the-authority).
 
 ```sh
-# 1. The binary, checked against the release signature
-mkdir -p /root/ergosum-release && cd /root/ergosum-release
-base=https://github.com/DunkelCloud/ergosum/releases/latest/download
-arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-for f in install.sh SHA256SUMS SHA256SUMS.sig ergosum-linux-$arch; do curl -fsSLO "$base/$f"; done
-sh install.sh "$PWD" ergosum
+# 1. The binary, checked against the release signature, its user and the service
+curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
+sh install.sh --authority
 
-# 2. The service user
-useradd --system --user-group --no-create-home \
-  --home-dir /var/lib/ergosum-authority --shell /usr/sbin/nologin ergosum-authority
-
-# 3. The signing key; note the fingerprint and the public key it prints
-install -d -m 0755 /etc/ergosum
+# 2. The signing key; note the fingerprint and the public key it prints
 ergosum keygen -out /etc/ergosum/signing.key -encrypt
 chgrp ergosum-authority /etc/ergosum/signing.key && chmod 0640 /etc/ergosum/signing.key
 
-# 4. The configuration: /etc/ergosum/serve.yaml (see below)
+# 3. The configuration: /etc/ergosum/serve.yaml (see below)
 
-# 5. The service
-v=$(ergosum version | awk 'NR == 1 {print $2}')
-curl -fsSL -o /etc/systemd/system/ergosum.service \
-  "https://raw.githubusercontent.com/DunkelCloud/ergosum/$v/deploy/systemd/ergosum.service"
-systemctl daemon-reload && systemctl enable --now ergosum
+# 4. Start it; with OpenRC: rc-update add ergosum default && rc-service ergosum start
+systemctl enable --now ergosum
 ergosum unseal                              # only with an encrypted key
 curl -s http://127.0.0.1:7434/healthz       # answers "ok"
 ```
 
-On Alpine, create the user with `addgroup -S ergosum-authority && adduser
--S -D -H -h /var/lib/ergosum-authority -s /sbin/nologin -G
-ergosum-authority ergosum-authority`, and use the OpenRC script
-[`deploy/openrc/ergosum`](../deploy/openrc/ergosum) as
-`/etc/init.d/ergosum`. With systemd you can also create the user from
-[`deploy/sysusers.d/ergosum-authority.conf`](../deploy/sysusers.d/ergosum-authority.conf).
+`install.sh --authority` sets up what is missing and leaves what is
+there: the user `ergosum-authority`, its directory
+`/var/lib/ergosum-authority`, and the service, either the systemd unit
+[`deploy/systemd/ergosum.service`](../deploy/systemd/ergosum.service) or
+the OpenRC script [`deploy/openrc/ergosum`](../deploy/openrc/ergosum). It
+neither enables nor starts the authority. On a host without internet
+access, download `install.sh`, `SHA256SUMS`, `SHA256SUMS.sig`,
+`ergosum-linux-amd64` (or `-arm64`), `ergosum.service`, `ergosum.openrc`
+and `ergosum-authority.sysusers` from the release into one directory and
+run `sh install.sh --authority DIR`.
 
 Where the authority keeps its files:
 
@@ -277,19 +270,18 @@ from the wrong address. Name the exact version you verified, not `latest`.
 encrypted key comes back sealed. Update one instance at a time:
 
 ```sh
-cd "$(mktemp -d)"
-base=https://github.com/DunkelCloud/ergosum/releases/latest/download
-arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-for f in install.sh SHA256SUMS SHA256SUMS.sig ergosum-linux-$arch; do curl -fsSLO "$base/$f"; done
-sh install.sh "$PWD" ergosum         # checks the signature, keeps /usr/bin/ergosum.old
-systemctl restart ergosum
+curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
+sh install.sh --authority            # checks the signature, keeps /usr/bin/ergosum.old
+systemctl restart ergosum            # OpenRC: rc-service ergosum restart
 ergosum unseal                       # only with an encrypted key
 curl -s http://127.0.0.1:7434/healthz
 ```
 
-The way back is `mv /usr/bin/ergosum.old /usr/bin/ergosum` and another
-restart. For a container, load the new image archive, change the image tag,
-recreate the container and unseal it.
+`--version vX.Y.Z` installs a given release instead of the latest. The
+script refuses an older version than the installed one unless you add
+`--allow-downgrade`. The way back is `mv /usr/bin/ergosum.old
+/usr/bin/ergosum` and another restart. For a container, load the new image
+archive, change the image tag, recreate the container and unseal it.
 
 ## Advanced
 
@@ -304,7 +296,9 @@ authority fits next to other services; set `callbacks.ip.source` (and
 so that the host's overlay network or exit node cannot carry callbacks to
 public addresses. The daemon and the authority run as different users
 (`ergosum` and `ergosum-authority`), so that a daemon that is taken over on
-the same host reaches neither the signing key nor the journal.
+the same host reaches neither the signing key nor the journal. Run
+`install.sh` once for each: with `--authority` for the authority and with
+`--anchor` for the daemon.
 
 ### Callback rules
 

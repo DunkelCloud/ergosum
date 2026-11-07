@@ -37,17 +37,7 @@ else
 	as_nobody() { su -s /bin/sh nobody -c "$*"; }
 
 	log "packages"
-	if command -v apk >/dev/null; then
-		apk add -q --no-cache openssh-keygen openrc
-	else
-		export DEBIAN_FRONTEND=noninteractive
-		. /etc/os-release
-		pkgs="openssh-client wget"
-		[ "$ID" = ubuntu ] && pkgs="openssh-client curl systemd"
-		apt-get update -qq
-		# shellcheck disable=SC2086 # a list of packages
-		apt-get install -qq -y --no-install-recommends $pkgs >/dev/null
-	fi
+	. "$(dirname "$0")/packages.sh"
 
 	# No service manager runs in a container: this starts the daemon the
 	# way its unit would, after stopping one that runs.
