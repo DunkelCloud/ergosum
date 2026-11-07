@@ -10,7 +10,8 @@
 # Mac's network, and the daemon writes its token, group-owned by
 # ergosum-token, which tests the group lookup of a build without cgo.
 # Last, install.sh updates the daemon to the newer release through
-# launchctl and waits for a new token, and refuses the older one.
+# launchctl and waits for a new token, refuses the older one, and refuses
+# to set up an authority host on a Mac.
 #
 # Needs root, curl, jq and python3. BIN holds ergosum and ergosumd, NEXT a
 # newer ergosumd, both native builds with release versions (see
@@ -146,5 +147,9 @@ grep -q "ergosumd $next is running and has a new token" "$W/out" || fail "no new
 [ "$(/usr/local/bin/ergosumd.old version | awk '{print $2}')" = "$version" ] || fail "no way back to $version"
 if $base_path sh "$W/install.sh" --url "$URL" --version "$version" >"$W/out" 2>&1; then fail "installed the older $version"; fi
 grep -q 'older than the installed' "$W/out" || { cat "$W/out"; fail "older version not refused"; }
+
+log "no authority host on a Mac"
+if $base_path sh "$W/install.sh" --url "$URL" --authority >"$W/out" 2>&1; then fail "set up an authority on a Mac"; fi
+grep -q 'an authority runs on Linux only' "$W/out" || { cat "$W/out"; fail "--authority on a Mac not refused"; }
 
 log "PASS"

@@ -6,10 +6,11 @@
 #
 #   test/install/release.sh W OS ARCH BIN...
 #
-# Each BIN is a directory with a build of ergosumd with a release version
-# for OS and ARCH; the last is the latest release. In W the script leaves
-# www/ (the web root: download/VERSION/ and latest/download/), install.sh,
-# release-signers (the test key) and other-signers (another key).
+# Each BIN is a directory with builds of ergosumd, ergosum or both, with one
+# release version, for OS and ARCH; the last is the latest release. In W the
+# script leaves www/ (the web root: download/VERSION/ and latest/download/),
+# install.sh, release-signers (the test key) and other-signers (another
+# key).
 set -euo pipefail
 
 W=$1 OS=$2 ARCH=$3
@@ -30,10 +31,19 @@ for k in release other; do
 done
 rel=
 for bin in "$@"; do
-	version=$("$bin/ergosumd" version | awk '{print $2}')
+	version=
+	for c in ergosumd ergosum; do
+		[ -x "$bin/$c" ] || continue
+		v=$("$bin/$c" version | awk 'NR == 1 {print $2}')
+		[ -z "$version" ] || [ "$v" = "$version" ] || { echo "FAIL: $bin holds $version and $v" >&2; exit 1; }
+		version=$v
+	done
+	[ -n "$version" ] || { echo "FAIL: no ergosumd or ergosum in $bin" >&2; exit 1; }
 	rel=$W/www/download/$version
 	mkdir -p "$rel"
-	cp "$bin/ergosumd" "$rel/ergosumd-$OS-$ARCH"
+	for c in ergosumd ergosum; do
+		[ ! -x "$bin/$c" ] || cp "$bin/$c" "$rel/$c-$OS-$ARCH"
+	done
 	"$ROOT/scripts/release-files.sh" "$rel"
 	(cd "$rel" && sums -- * >SHA256SUMS)
 	ssh-keygen -q -Y sign -f "$W/release-key" -n ergosum-release "$rel/SHA256SUMS"
