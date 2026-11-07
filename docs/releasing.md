@@ -24,6 +24,7 @@ who signs on their own machine. The builds are reproducible
 | `install.sh` | [`deploy/install.sh`](../deploy/install.sh), the installer |
 | `ergosumd.service`, `ergosumd.openrc`, `ergosum.sysusers` | systemd unit, OpenRC script and sysusers file of the daemon, which the installer sets up on a new machine |
 | `ergosumd.plist` | the daemon's launchd job, which the installer sets up on a new Mac |
+| `ergosum.service`, `ergosum.openrc`, `ergosum-authority.sysusers` | systemd unit, OpenRC script and sysusers file of the authority, which `install.sh --authority` sets up |
 | `SHA256SUMS`, `SHA256SUMS.sig` | checksums and their signature |
 
 ## Verifying a release
