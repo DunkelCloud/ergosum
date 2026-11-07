@@ -85,45 +85,39 @@ Early development. Interfaces and formats are described in
 
 ## Getting started
 
-You need one authority instance you run yourself (Linux, native or as an
-OCI image) and machines on Linux or macOS that reach it on TCP 7432 and
-that it can call back on TCP 7433, over the tailnet or at a fixed address.
+A first installation has four steps. [Getting
+started](docs/getting-started.md) walks through each of them with every
+command; [How ergosum works](docs/concepts.md) explains the terms.
 
-1. **Run an authority.** `ergosum keygen` creates its signing key, a
-   `serve.yaml` ([example](examples/serve.yaml)) names its listener, its
-   callbacks and the administrators' keys, and `ergosum serve` runs it; see
-   [Operations](docs/operations.md#authority).
-2. **Enroll a machine**, as root, with the machines' domain and the
-   authority's key fingerprint and URL:
+1. **Run an authority.** The authority is the service that checks machines
+   and signs their tokens. You run it yourself, on a Linux host or as a
+   container. It gets a signing key of its own, and its *fingerprint*
+   (`SHA256:...`) is how machines recognize it.
+2. **Enroll a machine.** On each machine, as root, one script installs the
+   daemon `ergosumd`:
 
    ```sh
    curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
    sh install.sh --domain example.com --anchor 'SHA256:...@https://192.0.2.10:7432'
    ```
 
-   The script installs `ergosumd` from the latest signed release, sets up
-   its user, service and configuration, starts it and prints the binding
-   request for the administrators. The same script updates the machine
-   later. On a Mac the same two lines enroll it, the second with `sudo`
-   (see [Operations](docs/operations.md#on-a-mac)).
-3. **Approve the binding.** Save the request as a file and run
-   `ergosum bind host1.txt` on an administrator's machine. The request
-   proposes a fixed address, public or private, as an `ip` check, and the
-   network of an address from DHCP as a `net` check, which a clone
-   anywhere in that network passes as well
-   ([Choosing checks](docs/operations.md#choosing-checks)). Once the
-   approvals suffice, the daemon receives its token on its own and keeps it
-   in `/run/ergosum/token` (on a Mac `/var/db/ergosum/token`).
-4. **Use it.** Let Vault Agent log in with the token
-   ([`examples/vault-agent`](examples/vault-agent); Vault setup and
-   rollback: [`deploy/vault/machine-auth.sh`](deploy/vault/machine-auth.sh)),
-   or seal a secret without Vault at instances that hold an exchange key
-   ([Operations](docs/operations.md#secrets-without-vault)):
-
-   ```sh
-   printf '%s\n' "$RESTIC_PASSWORD" | ergosumd secret create restic -threshold 2
-   RESTIC_PASSWORD_COMMAND='ergosumd secret get restic' restic snapshots
-   ```
+   `--domain` is the domain of the machine's name in ergosum: `host1`
+   becomes `host1.example.com`. `--anchor` names the authority the machine
+   talks to first: its fingerprint, an `@`, and its address and port. The
+   script checks the release signature, sets up the service, starts it and
+   prints a *binding request*: the machine's name, key and the places where
+   it can be reached. It works the same on a Mac (with `sudo`) and updates
+   the machine later. All options: [Machines](docs/machines.md).
+3. **Approve the machine.** An administrator saves the request as a file
+   and signs it with `ergosum bind host1.txt`. From then on the machine
+   gets its token on its own and keeps it in `/run/ergosum/token` (on a
+   Mac `/var/db/ergosum/token`).
+   [Administration](docs/administration.md) explains how to choose the
+   places to check.
+4. **Use the token.** Vault Agent logs in to Vault or OpenBao with it
+   ([Vault](docs/vault.md)), or `ergosumd secret` opens a sealed secret
+   such as a backup password without Vault ([Secrets without
+   Vault](docs/secrets.md)).
 
 ## What it does not do
 
@@ -153,12 +147,25 @@ read-only root filesystem.
 
 ## Documentation
 
-- [Operations](docs/operations.md): installation, modes of operation, unsealing, secrets without Vault, metrics, audit, Vault
-- [Releases](docs/releasing.md): verifying, installing and updating signed releases; making one
-- [Architecture decisions](docs/adr/): protocol, token format, journal and replication, releasing secrets without Vault
-- Example configuration: [`examples/`](examples), including Vault Agent;
-  service definitions for systemd, OpenRC and launchd: [`deploy/`](deploy)
-- Vault setup and rollback: [`deploy/vault/machine-auth.sh`](deploy/vault/machine-auth.sh)
+Start at the [documentation overview](docs/README.md). The main pages:
+
+- [How ergosum works](docs/concepts.md): the parts, checks, ports, where
+  the installation values come from, and a glossary
+- [Getting started](docs/getting-started.md): a first installation, step by
+  step
+- [Machines](docs/machines.md): `install.sh`, the Mac, troubleshooting,
+  updates, backups
+- [Administration](docs/administration.md): approving and changing
+  bindings
+- [Running an authority](docs/authority.md) and [Several authority
+  instances](docs/multiple-authorities.md)
+- [Vault and OpenBao](docs/vault.md), [Secrets without Vault](docs/secrets.md),
+  [Monitoring](docs/monitoring.md)
+- [Releases](docs/releasing.md): verifying downloads; making a release
+- [Architecture decisions](docs/adr/): protocol, token format, journal and
+  replication, releasing secrets without Vault
+- Example configuration: [`examples/`](examples); service definitions,
+  alert rules and the Vault setup script: [`deploy/`](deploy)
 
 ## Building
 

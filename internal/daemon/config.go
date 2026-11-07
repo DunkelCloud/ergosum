@@ -59,7 +59,7 @@ type Config struct {
 type AuthorityConfig struct {
 	// URL, or URLs in order of preference, reach the instance. The daemon
 	// tries only those it can reach from its own addresses (see
-	// docs/operations.md).
+	// docs/machines.md).
 	URL  string   `yaml:"url"`
 	URLs []string `yaml:"urls"`
 	// Key is the instance's key fingerprint ("SHA256:...", as printed by
