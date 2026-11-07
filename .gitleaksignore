@@ -1,0 +1,8 @@
+# Findings of "gitleaks git" that are no secrets, one fingerprint per line
+# (commit:file:rule:line, as gitleaks prints it).
+#
+# An example machine key fingerprint in a binding request, replaced by
+# "SHA256:..." in the commit after it.
+80b8f4f23f6836a29513e79ac45dc544513a848b:docs/machines.md:generic-api-key:90
+80b8f4f23f6836a29513e79ac45dc544513a848b:docs/administration.md:generic-api-key:63
+80b8f4f23f6836a29513e79ac45dc544513a848b:docs/getting-started.md:generic-api-key:311
