@@ -261,10 +261,12 @@ Roll out to one machine first, then to a few, then to the rest. The metric
 
 ```text
 sh install.sh [OPTIONS] [DIR [BINARY...]]
+sh install.sh --authority [OPTIONS] [DIR]
 ```
 
 | Option | Meaning |
 | --- | --- |
+| `--authority` | install an authority instead of the daemon: `ergosum`, its user and service (see [Running an authority](authority.md#installing)); Linux only |
 | `--anchor KEY@URL[,URL...]` | a new machine's first authority: key fingerprint and URLs |
 | `--domain DOMAIN` | a new machine's identity is its short host name in `DOMAIN` |
 | `--identity NAME` | a new machine's identity, given in full (instead of `--domain`) |
@@ -287,8 +289,9 @@ Mac `ergosumd.plist`). Then:
 sh install.sh --domain example.com --anchor '...' /root/ergosum-v0.2.1
 ```
 
-`BINARY` is `ergosumd` (the default) or `ergosum`; the latter installs the
-authority binary (see [Running an authority](authority.md#installing)).
+`BINARY` is `ergosumd` (the default) or `ergosum`. With `DIR`, `ergosum`
+installs only the binary, such as the administrator tool on a Linux
+workstation; an authority host takes `--authority` instead.
 
 ## Removing ergosumd from a machine
 

@@ -2,10 +2,12 @@
 # Installs ergosum from a signed release, as root on the target machine:
 #
 #   install.sh [options] [DIR [BINARY...]]
+#   install.sh --authority [options] [DIR]
 #
 # Without DIR the script downloads the release (the latest, or --version);
 # with DIR it takes the release files from there. BINARY is ergosumd (the
-# default) or ergosum. The script
+# default) or ergosum; --authority installs ergosum on an authority host.
+# The script
 #
 #   - checks the signature over SHA256SUMS against the release keys and the
 #     checksum of each file it uses. The keys come from
@@ -29,9 +31,15 @@
 # refuses its options changes nothing.
 #
 # An authority (ergosum) is not restarted: after a restart it is sealed.
-# Restart and unseal it by hand; BINARY.old stays for the way back.
+# Restart and unseal it by hand; BINARY.old stays for the way back. With
+# --authority (Linux only) the host also gets what is missing of the user
+# ergosum-authority, its state directory, /etc/ergosum and the service
+# (systemd or OpenRC), which the script neither enables nor starts: the
+# authority needs its signing key and /etc/ergosum/serve.yaml first.
 #
 # Options:
+#   --authority         install the authority (ergosum serve) and set up
+#                       its user and service
 #   --anchor KEY@URL[,URL...]
 #                       a new machine's authority: its key fingerprint
 #                       (printed by "ergosum keygen") and its URLs
@@ -54,7 +62,7 @@
 set -eu
 
 signers=
-config=/etc/ergosum/ergosumd.yaml
+config=
 url=https://github.com/DunkelCloud/ergosum/releases
 version=
 anchor=
@@ -63,6 +71,7 @@ domain=
 wait=120
 downgrade=
 restart=yes
+authority=
 
 # The release keys as of this script, the same as release-signers in the
 # repository (a test in internal/release keeps them equal).
@@ -82,6 +91,7 @@ say() { echo "install.sh: $*"; }
 
 while [ $# -gt 0 ]; do
 	case $1 in
+	--authority) authority=yes ;;
 	--anchor) anchor=${2:?--anchor needs KEY@URL}; shift ;;
 	--identity) identity=${2:?--identity needs a name}; shift ;;
 	--domain) domain=${2:?--domain needs a domain}; shift ;;
@@ -103,7 +113,21 @@ if [ $# -gt 0 ]; then
 	dir=$1
 	shift
 	[ -z "$version" ] || die "--version is for a download; DIR is given"
+	if [ ! -d "$dir" ]; then
+		case $dir in
+		ergosum) die "$dir is no directory with release files; BINARY comes after DIR, and --authority downloads the authority" ;;
+		ergosumd) die "$dir is no directory with release files; without DIR the script downloads ergosumd" ;;
+		*) die "$dir is no directory with release files" ;;
+		esac
+	fi
 fi
+if [ -n "$authority" ]; then
+	[ $# -eq 0 ] || die "--authority installs ergosum; it takes no BINARY"
+	[ -z "$anchor$identity$domain$config" ] ||
+		die "--anchor, --identity, --domain and --config are for a machine, not with --authority"
+	set -- ergosum
+fi
+config=${config:-/etc/ergosum/ergosumd.yaml}
 [ $# -gt 0 ] || set -- ergosumd
 daemon=
 for b in "$@"; do
@@ -130,6 +154,7 @@ esac
 if [ "$os" = darwin ] && [ "$(sysctl -in hw.optional.arm64)" = 1 ]; then
 	arch=arm64
 fi
+[ -z "$authority" ] || [ "$os" = linux ] || die "an authority runs on Linux only"
 command -v ssh-keygen >/dev/null || die "ssh-keygen (OpenSSH 8.1 or later) is needed to check the signature"
 
 # Where things go. macOS keeps /usr/bin for itself, has no /run that its
@@ -149,7 +174,23 @@ else
 	svc_user=ergosum
 	state_default=/var/lib/ergosum
 	token_default=/run/ergosum/token
+	nologin=$(command -v nologin || echo /sbin/nologin)
 fi
+
+# has_service NAME: the service manager has a service NAME (on macOS the
+# daemon's launchd job), or there is no service manager the script knows.
+has_service() {
+	if [ "$os" = darwin ]; then
+		[ -e "$plist" ]
+	elif command -v systemctl >/dev/null; then
+		for u in /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+			[ ! -e "$u/$1.service" ] || return 0
+		done
+		return 1
+	elif [ -x /sbin/openrc-run ]; then
+		[ -e "/etc/init.d/$1" ]
+	fi
+}
 
 # Value of a top-level key in the daemon configuration, without quotes.
 config_value() {
@@ -215,6 +256,15 @@ elif [ -n "$anchor$identity$domain" ]; then
 	say "$config exists and stays; --anchor, --identity and --domain are not used"
 fi
 
+# An authority host without the authority's user or service gets them from
+# the release files; one that has both needs only the binary.
+authority_setup=
+if [ -n "$authority" ]; then
+	if ! id ergosum-authority >/dev/null 2>&1 || ! has_service ergosum; then
+		authority_setup=yes
+	fi
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 ck=$tmp/checked
@@ -248,6 +298,9 @@ if [ -z "$dir" ]; then
 		darwin) files="$files ergosumd.plist" ;;
 		*) files="$files ergosumd.service ergosumd.openrc ergosum.sysusers" ;;
 		esac
+	fi
+	if [ -n "$authority_setup" ]; then
+		files="$files ergosum.service ergosum.openrc ergosum-authority.sysusers"
 	fi
 	say "downloading ${version:-the latest release} from $url"
 	for f in $files; do
@@ -413,6 +466,16 @@ ensure_users_darwin() {
 	[ -z "$eu_changed" ] || dscacheutil -flushcache
 }
 
+# apply_sysusers NAME: the users of the release file NAME.sysusers, kept as
+# /etc/sysusers.d/NAME.conf unless there is one.
+apply_sysusers() {
+	if [ ! -e "/etc/sysusers.d/$1.conf" ]; then
+		checked "$1.sysusers"
+		install -D -m 0644 "$ck/$1.sysusers" "/etc/sysusers.d/$1.conf"
+	fi
+	systemd-sysusers "/etc/sysusers.d/$1.conf"
+}
+
 # ensure_users: the daemon's user (ergosum, on macOS _ergosum), and the
 # group ergosum-token whose members (Vault Agent's user) read the token.
 ensure_users() {
@@ -421,14 +484,9 @@ ensure_users() {
 		return 0
 	fi
 	if command -v systemd-sysusers >/dev/null; then
-		if [ ! -e /etc/sysusers.d/ergosum.conf ]; then
-			checked ergosum.sysusers
-			install -D -m 0644 "$ck/ergosum.sysusers" /etc/sysusers.d/ergosum.conf
-		fi
-		systemd-sysusers /etc/sysusers.d/ergosum.conf
+		apply_sysusers ergosum
 		return 0
 	fi
-	nologin=$(command -v nologin || echo /sbin/nologin)
 	if command -v useradd >/dev/null; then
 		getent group ergosum-token >/dev/null || groupadd -r ergosum-token
 		id ergosum >/dev/null 2>&1 ||
@@ -446,28 +504,76 @@ ensure_users() {
 	fi
 }
 
-# install_service: the launchd job, systemd unit or OpenRC script, unless
-# there is one.
+# install_service NAME: the launchd job (the daemon's only), systemd unit
+# or OpenRC script of the service NAME from the release file NAME.plist,
+# NAME.service or NAME.openrc, unless there is one.
 install_service() {
+	if has_service "$1"; then
+		return 0
+	fi
 	if [ "$os" = darwin ]; then
-		[ ! -e "$plist" ] || return 0
-		checked ergosumd.plist
+		checked "$1.plist"
 		# launchd refuses a job file that is not root's or that others can
 		# change.
-		install -m 0644 -o root -g wheel "$ck/ergosumd.plist" "$plist"
+		install -m 0644 -o root -g wheel "$ck/$1.plist" "$plist"
+		say "launchd job $plist installed"
 	elif command -v systemctl >/dev/null; then
-		for u in /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
-			[ ! -e "$u/ergosumd.service" ] || return 0
-		done
-		checked ergosumd.service
-		install -m 0644 "$ck/ergosumd.service" /etc/systemd/system/ergosumd.service
+		checked "$1.service"
+		install -m 0644 "$ck/$1.service" "/etc/systemd/system/$1.service"
 		if [ -d /run/systemd/system ]; then
 			systemctl daemon-reload
 		fi
+		say "systemd unit /etc/systemd/system/$1.service installed"
 	elif [ -x /sbin/openrc-run ]; then
-		[ ! -e /etc/init.d/ergosumd ] || return 0
-		checked ergosumd.openrc
-		install -m 0755 "$ck/ergosumd.openrc" /etc/init.d/ergosumd
+		checked "$1.openrc"
+		install -m 0755 "$ck/$1.openrc" "/etc/init.d/$1"
+		say "OpenRC script /etc/init.d/$1 installed"
+	fi
+}
+
+# ensure_authority_user: the authority's user ergosum-authority, with a
+# group of its own. It is not in ergosum-token: on a host that also runs
+# the daemon, neither reaches the other's keys.
+ensure_authority_user() {
+	if id ergosum-authority >/dev/null 2>&1; then
+		return 0
+	fi
+	if command -v systemd-sysusers >/dev/null; then
+		apply_sysusers ergosum-authority
+	elif command -v useradd >/dev/null; then
+		useradd -r -U -M -d /var/lib/ergosum-authority -s "$nologin" -c "ergosum authority" ergosum-authority
+	elif command -v adduser >/dev/null; then # BusyBox (Alpine)
+		getent group ergosum-authority >/dev/null || addgroup -S ergosum-authority
+		adduser -S -D -H -h /var/lib/ergosum-authority -s "$nologin" -G ergosum-authority ergosum-authority
+	else
+		die "no systemd-sysusers, useradd or adduser; create the user ergosum-authority by hand"
+	fi
+	say "user ergosum-authority created"
+}
+
+# setup_authority: what an authority host needs, where it is missing. The
+# script does not enable or start the authority: it needs its signing key
+# and configuration first, and with an encrypted key it starts sealed.
+setup_authority() {
+	ensure_authority_user
+	[ -d /var/lib/ergosum-authority ] ||
+		install -d -o ergosum-authority -g ergosum-authority -m 0700 /var/lib/ergosum-authority
+	[ -d /etc/ergosum ] || install -d -m 0755 /etc/ergosum
+	install_service ergosum
+	if command -v systemctl >/dev/null; then
+		start="systemctl enable --now ergosum" restart="systemctl restart ergosum"
+	elif [ -x /sbin/openrc-run ]; then
+		start="rc-update add ergosum default && rc-service ergosum start"
+		restart="rc-service ergosum restart"
+	else
+		start="run \"ergosum serve\" as the user ergosum-authority (no systemd or OpenRC)"
+		restart=
+	fi
+	if [ ! -e /etc/ergosum/serve.yaml ]; then
+		say "the authority is not started: it needs its signing key and /etc/ergosum/serve.yaml"
+		say "  (docs/authority.md in the ergosum repository); then: $start"
+	elif [ -n "$authority_updated" ]; then
+		say "the authority runs the new binary after a restart${restart:+: $restart}; then, with an encrypted key, ergosum unseal"
 	fi
 }
 
@@ -535,7 +641,7 @@ setup() {
 		[ -d "$logdir" ] || install -d -o "$svc_user" -g "$svc_user" -m 0755 "$logdir"
 	fi
 	[ -d "$state" ] || install -d -o "$svc_user" -g "$svc_user" -m 0700 "$state"
-	install_service
+	install_service ergosumd
 	[ -e "$config" ] || write_config
 	if [ -n "$restart" ]; then
 		start_daemon
@@ -574,6 +680,7 @@ wait_fresh() {
 }
 
 installed_daemon=
+authority_updated=
 for b in "$@"; do
 	file=$b-$os-$arch
 	checked "$file"
@@ -600,11 +707,21 @@ for b in "$@"; do
 	mv -f "$BINDIR/.$b.new" "$BINDIR/$b"
 	say "$b ${cur:-(none)} -> $new installed${cur:+, previous binary kept as $BINDIR/$b.old}"
 	case $b in
-	ergosum) say "restart the authority by hand and unseal it" ;;
+	ergosum)
+		if [ -n "$authority" ]; then
+			authority_updated=$cur
+		else
+			say "restart the authority by hand and unseal it"
+		fi
+		;;
 	ergosumd) installed_daemon=$new installed_daemon_old=$cur ;;
 	esac
 done
 
+if [ -n "$authority" ]; then
+	setup_authority
+	exit 0
+fi
 if [ -n "$unbound" ]; then
 	setup
 	exit 0
