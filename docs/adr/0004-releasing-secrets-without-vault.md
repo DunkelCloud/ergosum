@@ -65,9 +65,8 @@ Chosen option 1.
 - Each instance that takes part holds an **exchange key**: 32 random bytes
   in a file (`exchange_key_file`), mode 0600. It is kept like the signing
   key: optionally encrypted with the same passphrase, so that one unseal
-  opens both, and never in a backup. Part A lies in the machines' backups;
-  a backup of the exchange key next to it would open every secret pinned to
-  that instance without any check.
+  opens both. Together with a copy of part A, the exchange keys of a
+  threshold of its pins open the secret without any check.
 - Losing the exchange key, or replacing it, takes the instance out of every
   secret pinned to it. Daemons re-split such secrets over the remaining
   instances (below).
@@ -335,7 +334,7 @@ lower threshold.
   a machine during an outage of too many instances leaves its consumers
   without their secret until the instances return or an administrator uses
   the way back.
-- The exchange key is new key material per instance, with its own backup
-  rule.
+- The exchange key is new key material per instance, to be kept like the
+  signing key.
 - A re-split rewrites part A from inside a `get`.
 - The recovery recipients add the age format to `ergosumd`.
