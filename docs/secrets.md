@@ -46,9 +46,6 @@ Add it to `serve.yaml` and restart (and unseal) the instance:
 exchange_key_file: /etc/ergosum/exchange.key
 ```
 
-- **Never back up the exchange key.** The machines' sealed secrets lie in
-  their backups; a copy of the exchange key next to one opens it without
-  any check.
 - Losing or replacing it takes the instance out of every secret that uses
   it; the machines move those secrets to the remaining instances (see
   below).
@@ -109,6 +106,10 @@ does that. Fix the instances; do not lower the threshold.
 - **Root on the machine** can read part A and use the daemon's socket, so
   it can open the secret, as the machine itself can.
 - **Threshold 1** is weak (see above).
+- **Exchange keys and part A.** A copy of part A together with the
+  exchange keys of a threshold of its instances opens the secret without
+  any check; an encrypted key file needs its passphrase as well. Keep the
+  exchange key like the signing key.
 
 ## Advanced
 
