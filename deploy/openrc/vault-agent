@@ -24,7 +24,7 @@ depend() {
 }
 
 start_pre() {
-	# Rendered files live in memory only: /run/vault-agent/backup.env.
+	# Rendered files live in memory only, below /run/vault-agent.
 	checkpath --directory --owner vault:vault --mode 0700 /run/vault-agent
 }
 

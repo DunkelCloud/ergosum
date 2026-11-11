@@ -164,9 +164,9 @@ jobs:
     # Agent in network namespaces: deploy/vault/machine-auth.sh next to
     # configuration it must not touch, refused tokens (audience, issuer,
     # unknown key, identity not admitted), secrets of other machines out of
-    # reach, rendered backup settings and a restic backup with them, a new
-    # login after the token's max TTL, a key change, every identity of the
-    # trust domain admitted (and none of another) and the rollback.
+    # reach, settings rendered by Vault Agent, a new login after the token's
+    # max TTL, a key change, every identity of the trust domain admitted (and
+    # none of another) and the rollback.
     runs-on: ubuntu-latest
     env:
       VAULT_VERSION: "1.19.2"
@@ -182,15 +182,13 @@ jobs:
           go-version-file: go.mod
       - name: Build
         run: scripts/build.sh dist
-      - name: Install Vault and restic
+      - name: Install Vault
         run: |
           mkdir -p tools
           cd tools
           curl -sSfLO "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
           echo "${VAULT_SHA256}  vault_${VAULT_VERSION}_linux_amd64.zip" | sha256sum -c -
           unzip -q "vault_${VAULT_VERSION}_linux_amd64.zip" vault
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq restic
       - name: Vault and Vault Agent in network namespaces
         run: sudo BIN="$PWD/dist" VAULT_BIN="$PWD/tools/vault" bash test/vault/run.sh
 
