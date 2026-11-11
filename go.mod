@@ -4,7 +4,7 @@ go 1.26.0
 
 // The toolchain of release builds; scripts/build.sh uses it also where a
 // newer Go is installed. Keep the Dockerfile's builder image in step.
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	filippo.io/age v1.3.2
