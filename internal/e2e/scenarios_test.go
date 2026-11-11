@@ -312,7 +312,15 @@ func TestRestartWithoutNegative(t *testing.T) {
 	if second.d.Fingerprint() != first.d.Fingerprint() {
 		t.Fatal("key changed across restart")
 	}
-	if _, _, err := second.d.Obtain(context.Background()); err != nil {
+	// The instance frees the identity once every callback of the crashed
+	// request has returned; until then it answers rate_limited.
+	var err error
+	eventually(t, "the instance to let go of the crashed request", func() bool {
+		_, _, err = second.d.Obtain(context.Background())
+		re := requestError(err)
+		return re == nil || re.Code != protocol.ErrRateLimited
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	requireCount(t, e.auth, authority.ResultIssued, 1)
