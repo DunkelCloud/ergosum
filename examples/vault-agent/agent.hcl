@@ -1,5 +1,5 @@
 # Vault Agent on a machine: logs in with the ergosum identity token and
-# renders the machine's backup settings. The address is an example.
+# renders the machine's database settings. The address is an example.
 
 vault {
   address = "https://vault.example.com:8200"
@@ -20,8 +20,8 @@ auto_auth {
 }
 
 template {
-  source      = "/etc/vault-agent/backup.env.ctmpl"
-  destination = "/run/vault-agent/backup.env"
+  source      = "/etc/vault-agent/db.env.ctmpl"
+  destination = "/run/vault-agent/db.env"
   perms       = "0600"
   error_on_missing_key = true
 }

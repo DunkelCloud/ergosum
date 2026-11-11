@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sets up Vault (or OpenBao) to accept ergosum identity tokens and to hand
-# every machine the backup secrets below its own name, and takes it out again.
+# every machine the secrets below its own name, and takes it out again.
 #
 # The script owns three objects and touches nothing else: a JWT auth mount,
 # one role on it and one policy. An object of the same name that it did not
@@ -32,8 +32,8 @@
 #   -yes                 do not ask before changing anything
 #
 # A machine reads <kv>/<prefix>/<identity>/* and nothing else, one subpath per
-# application, e.g. <kv>/host/<identity>/backup/. Keep what it must not hold
-# (restore and maintenance credentials) outside that path; grant secrets that
+# application, e.g. <kv>/host/<identity>/db/. Keep what it must not hold
+# (administrative credentials) outside that path; grant secrets that
 # several machines share through identity groups instead.
 #
 # Needs the vault CLI with VAULT_ADDR and VAULT_TOKEN (VAULT=bao for OpenBao),
