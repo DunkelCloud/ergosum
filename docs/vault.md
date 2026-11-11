@@ -2,8 +2,9 @@
 
 HashiCorp Vault and OpenBao accept the ergosum token as a login through
 their built-in JWT auth method. Vault Agent on the machine logs in with the
-token file and renders the machine's secrets, for example its backup
-settings. The machine then holds no long-lived Vault credential at all.
+token file and renders the machine's secrets, for example the settings of
+its database client. The machine then holds no long-lived Vault credential
+at all.
 
 This page shows the setup in three parts: Vault itself (once), the secrets
 of each machine, and Vault Agent on each machine.
@@ -57,21 +58,21 @@ logins created nor the secrets.
 
 Each machine reads the secrets below its own name in the KV version 2
 mount `secret`: `secret/host/<identity>/`, with one subpath per
-application. For the backup example:
+application. For the example, a PostgreSQL client:
 
 | Path | Keys |
 | --- | --- |
-| `secret/host/<identity>/backup/config` | `repository`, the restic repository, such as `s3:https://s3.example.com/backup/host1` |
-| `secret/host/<identity>/backup/credentials` | `restic_password`, `access_key_id`, `secret_access_key` |
+| `secret/host/<identity>/db/config` | `host` and `database`, such as `db1.example.com` and `app` |
+| `secret/host/<identity>/db/credentials` | `user`, `password` |
 
 ```sh
-vault kv put secret/host/host1.example.com/backup/config repository=s3:https://s3.example.com/backup/host1
-vault kv put secret/host/host1.example.com/backup/credentials restic_password=... access_key_id=... secret_access_key=...
+vault kv put secret/host/host1.example.com/db/config host=db1.example.com database=app
+vault kv put secret/host/host1.example.com/db/credentials user=app password=...
 ```
 
 A machine can read everything below `secret/host/<identity>/`. Keep
-credentials it must not hold, such as those to restore or to prune its
-backups, outside that tree.
+credentials it must not hold, such as the database administrator's,
+outside that tree.
 
 ## Vault Agent on the machine
 
@@ -88,19 +89,19 @@ backups, outside that tree.
    logs in at `auth/machine` with role `host` and the token file
    `/run/ergosum/token`; on a Mac, change `path` to
    `/var/db/ergosum/token`.
-4. Take [`examples/vault-agent/backup.env.ctmpl`](../examples/vault-agent/backup.env.ctmpl)
-   as `/etc/vault-agent/backup.env.ctmpl`. It renders the backup settings
-   to `/run/vault-agent/backup.env` (mode 0600, in memory only). It takes
-   the machine's identity from the Vault login, so the same file works on
+4. Take [`examples/vault-agent/db.env.ctmpl`](../examples/vault-agent/db.env.ctmpl)
+   as `/etc/vault-agent/db.env.ctmpl`. It renders the database settings
+   to `/run/vault-agent/db.env` (mode 0600, in memory only). It takes the
+   machine's identity from the Vault login, so the same file works on
    every machine.
 5. Install the service: [`deploy/systemd/vault-agent.service`](../deploy/systemd/vault-agent.service)
    or [`deploy/openrc/vault-agent`](../deploy/openrc/vault-agent), and start
    it.
 
-A backup job then runs:
+A job on the machine then runs:
 
 ```sh
-. /run/vault-agent/backup.env && restic backup ...
+. /run/vault-agent/db.env && psql ...
 ```
 
 ## Advanced

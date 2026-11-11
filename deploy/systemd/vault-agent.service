@@ -16,7 +16,7 @@ KillSignal=SIGINT
 Restart=on-failure
 RestartSec=5s
 
-# Rendered files live in memory only: /run/vault-agent/backup.env.
+# Rendered files live in memory only, below /run/vault-agent.
 RuntimeDirectory=vault-agent
 RuntimeDirectoryMode=0700
 UMask=0077

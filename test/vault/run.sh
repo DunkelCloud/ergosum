@@ -9,15 +9,15 @@
 # configuration it must leave alone. Tokens with another audience, another
 # issuer, an unknown key, or for an identity the role does not admit are
 # refused, and host1 cannot read another machine's secrets. Vault Agent on
-# host1 logs in with the identity token, renders the backup settings from
-# examples/vault-agent, and a restic backup runs with them. After the Vault
-# token's max TTL the agent logs in again with the token that is in the file
-# at that time. The authority key changes (a new instance; both keys, then only
+# host1 logs in with the identity token and renders the database settings
+# from examples/vault-agent, quotes and all. After the Vault token's max TTL
+# the agent logs in again with the token that is in the file at that time.
+# The authority key changes (a new instance; both keys, then only
 # the new one). With -all-identities the role admits every identity of the
 # trust domain and none of another, and each machine still reads only its own
 # secrets. The rollback removes mount and policy and nothing else.
 #
-# Needs root, iproute2, curl, jq, ssh-keygen, restic and vault. Usage:
+# Needs root, iproute2, curl, jq, ssh-keygen and vault. Usage:
 #   sudo BIN=dist VAULT_BIN=/usr/local/bin/vault test/vault/run.sh
 set -euo pipefail
 
@@ -210,14 +210,11 @@ v read -format=json auth/machine/role/host | jq -e --arg s "spiffe://example.com
 after=$(v auth list -format=json | jq -S 'with_entries(select(.key != "machine/") | .value |= {type, accessor, description})'; v policy read existing; v policy read taken)
 [ "$before" = "$after" ] || fail "existing configuration changed"
 
-log "backup settings in Vault, restic repository"
-v kv put "secret/host/$H1/backup/config" repository="$W/repo" >/dev/null
+log "database settings in Vault"
+v kv put "secret/host/$H1/db/config" host=db1.example.com database=app >/dev/null
 # A quote and a space in the password exercise the template's shell quoting.
-v kv put "secret/host/$H1/backup/credentials" restic_password="it's secret" \
-	access_key_id=AKIDEXAMPLE secret_access_key=example-secret-key >/dev/null
-v kv put "secret/host/$H2/backup/credentials" restic_password=other \
-	access_key_id=AKIDOTHER secret_access_key=other-secret-key >/dev/null
-RESTIC_REPOSITORY=$W/repo RESTIC_PASSWORD="it's secret" restic init -q
+v kv put "secret/host/$H1/db/credentials" user=app password="it's secret" >/dev/null
+v kv put "secret/host/$H2/db/credentials" user=other password=other >/dev/null
 
 log "tokens Vault must refuse"
 login() { # token-file; prints the Vault token
@@ -248,28 +245,27 @@ token_once via-a "$H1" 7432 a
 T1=$(login "$W/via-a.jwt") || { cat "$W/login.err"; fail "host1 refused"; }
 as_host1() { in_ns host1 env VAULT_TOKEN="$T1" "$VAULT_BIN" "$@"; }
 as_host1 token lookup -format=json | jq -e --arg h "$H1" '.data.meta.host == $h' >/dev/null || fail "no host in token metadata"
-as_host1 kv get -field=repository "secret/host/$H1/backup/config" >/dev/null || fail "host1 cannot read its config"
-as_host1 kv get "secret/host/$H2/backup/credentials" >/dev/null 2>&1 && fail "host1 read host2's credentials"
+as_host1 kv get -field=host "secret/host/$H1/db/config" >/dev/null || fail "host1 cannot read its config"
+as_host1 kv get "secret/host/$H2/db/credentials" >/dev/null 2>&1 && fail "host1 read host2's credentials"
 as_host1 kv get secret/existing/x >/dev/null 2>&1 && fail "host1 read secret/existing"
 echo "isolation ok"
 
-log "Vault Agent renders the backup settings; a backup runs with them"
+log "Vault Agent renders the database settings"
 in_ns host1 "$BIN/ergosumd" run --config "$W/host1/ergosumd.yaml" --log-format text > "$W/host1.log" 2>&1 &
 PID[host1]=$!
 sed -e "s#https://vault.example.com:8200#$VAULT_ADDR#" \
 	-e "s#/run/ergosum/token#$W/host1/run/token#" \
-	-e "s#/etc/vault-agent/backup.env.ctmpl#$SRC/examples/vault-agent/backup.env.ctmpl#" \
-	-e "s#/run/vault-agent/backup.env#$W/host1/run/backup.env#" \
+	-e "s#/etc/vault-agent/db.env.ctmpl#$SRC/examples/vault-agent/db.env.ctmpl#" \
+	-e "s#/run/vault-agent/db.env#$W/host1/run/db.env#" \
 	"$SRC/examples/vault-agent/agent.hcl" > "$W/agent.hcl"
 [ "$(grep -c "$W\|$SRC\|$VAULT_ADDR" "$W/agent.hcl")" = 4 ] || fail "agent.hcl: substitution failed"
 in_ns host1 env -u VAULT_TOKEN -u VAULT_ADDR "$VAULT_BIN" agent -config="$W/agent.hcl" > "$W/agent.log" 2>&1 &
 PID[agent]=$!
-wait_for 30 "rendered backup settings" test -s "$W/host1/run/backup.env"
-[ "$(stat -c %a "$W/host1/run/backup.env")" = 600 ] || fail "backup.env is not 0600"
-in_ns host1 bash -c ". '$W/host1/run/backup.env' && restic backup -q '$SRC/docs' && restic snapshots --json" > "$W/snapshots.json"
-jq -e --arg p "$SRC/docs" 'length == 1 and .[0].paths == [$p]' "$W/snapshots.json" >/dev/null || fail "no snapshot"
-in_ns host1 bash -c ". '$W/host1/run/backup.env' && [ \"\$AWS_ACCESS_KEY_ID\" = AKIDEXAMPLE ]" || fail "wrong credentials rendered"
-echo "backup ok"
+wait_for 30 "rendered database settings" test -s "$W/host1/run/db.env"
+[ "$(stat -c %a "$W/host1/run/db.env")" = 600 ] || fail "db.env is not 0600"
+in_ns host1 bash -c ". '$W/host1/run/db.env' && printf '%s\n' \"\$PGHOST\" \"\$PGDATABASE\" \"\$PGUSER\" \"\$PGPASSWORD\"" > "$W/db.out"
+printf '%s\n' db1.example.com app app "it's secret" | cmp -s - "$W/db.out" || { cat "$W/db.out"; fail "wrong settings rendered"; }
+echo "settings ok"
 
 log "the agent logs in again after the token's max TTL, with the token in the file"
 logins() { count 'authentication successful' "$W/agent.log"; }
@@ -326,8 +322,8 @@ daemon_config host2 "$H2" 7472 a2
 token_once host2
 T3=$(login "$W/host2.jwt") || { cat "$W/login.err"; fail "host2 refused"; }
 as_host2() { in_ns host1 env VAULT_TOKEN="$T3" "$VAULT_BIN" "$@"; }
-as_host2 kv get -field=restic_password "secret/host/$H2/backup/credentials" >/dev/null || fail "host2 cannot read its credentials"
-as_host2 kv get "secret/host/$H1/backup/config" >/dev/null 2>&1 && fail "host2 read host1's config"
+as_host2 kv get -field=password "secret/host/$H2/db/credentials" >/dev/null || fail "host2 cannot read its credentials"
+as_host2 kv get "secret/host/$H1/db/config" >/dev/null 2>&1 && fail "host2 read host1's config"
 event "$H1" host1 other.example
 authority other a2 7482 "$ISS" vault other.example
 token_once via-other "$H1" 7482 a2
