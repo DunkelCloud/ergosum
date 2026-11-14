@@ -153,12 +153,13 @@ The service user is `_ergosum`. Things to know:
   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/local/bin/ergosumd
   ```
 
-- **Managing the service:**
+- **Managing the service:** `kickstart -k` restarts it, `print` shows its
+  state, and `bootout` stops and unloads it.
 
   ```sh
-  sudo launchctl kickstart -k system/io.github.dunkelcloud.ergosumd   # restart
-  sudo launchctl print system/io.github.dunkelcloud.ergosumd          # state
-  sudo launchctl bootout system/io.github.dunkelcloud.ergosumd        # stop and unload
+  sudo launchctl kickstart -k system/io.github.dunkelcloud.ergosumd
+  sudo launchctl print system/io.github.dunkelcloud.ergosumd
+  sudo launchctl bootout system/io.github.dunkelcloud.ergosumd
   ```
 
 - **Tailscale.** The daemon finds the Tailscale CLI in `PATH`, inside the
@@ -243,9 +244,11 @@ Download the current `install.sh` and run it without options:
 
 ```sh
 curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
-sh install.sh                      # the latest release
-sh install.sh --version v0.2.1     # a specific release
+sh install.sh
 ```
+
+That installs the latest release. For a specific one, name it: `sh
+install.sh --version v0.2.1`.
 
 The script checks the signature against `/etc/ergosum/release-signers`,
 refuses to install an older version (unless you add `--allow-downgrade`),
