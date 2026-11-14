@@ -19,8 +19,9 @@ The admin tool runs on Linux, macOS and Windows.
    variant from the [releases
    page](https://github.com/DunkelCloud/ergosum/releases/latest), rename
    it to `ergosum` (`ergosum.exe`), make it executable and put it in your
-   `PATH`. [Verifying a release](releasing.md#verifying-a-release) shows how
-   to check it.
+   `PATH`. The [README](../README.md#installing-the-admin-tool) has
+   commands that do all of this on each system. [Verifying a
+   release](releasing.md#verifying-a-release) shows how to check it.
 2. **Have an SSH key** whose public key is listed in the authorities'
    registry (see [Administrator keys and the
    registry](#administrator-keys-and-the-registry)). Load it into your SSH

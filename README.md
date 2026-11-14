@@ -93,8 +93,9 @@ command; [How ergosum works](docs/concepts.md) explains the terms.
    and signs their tokens. You run it yourself, on a Linux host or as a
    container. It gets a signing key of its own, and its *fingerprint*
    (`SHA256:...`) is how machines recognize it.
-2. **Enroll a machine.** On each machine, as root, one script installs the
-   daemon `ergosumd`:
+2. **Enroll a machine.** On each machine, a Linux host or a Mac, one script
+   installs the daemon `ergosumd`. Run it as root; on a Mac, put `sudo`
+   before the second line:
 
    ```sh
    curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
@@ -106,18 +107,62 @@ command; [How ergosum works](docs/concepts.md) explains the terms.
    talks to first: its fingerprint, an `@`, and its address and port. The
    script checks the release signature, sets up the service, starts it and
    prints a *binding request*: the machine's name, key and the places where
-   it can be reached. It works the same on a Mac (with `sudo`) and updates
-   the machine later. All options: [Machines](docs/machines.md).
+   it can be reached. The same script updates the machine later. All
+   options: [Machines](docs/machines.md).
 3. **Approve the machine.** An administrator saves the request as a file
-   and signs it with `ergosum bind host1.txt`. From then on the machine
-   gets its token on its own and keeps it in `/run/ergosum/token` (on a
-   Mac `/var/db/ergosum/token`).
+   and signs it with `ergosum bind host1.txt`, on a workstation with the
+   [admin tool](#installing-the-admin-tool): Linux, macOS or Windows. From
+   then on the machine gets its token on its own and keeps it in
+   `/run/ergosum/token` (on a Mac `/var/db/ergosum/token`).
    [Administration](docs/administration.md) explains how to choose the
    places to check.
 4. **Use the token.** Vault Agent logs in to Vault or OpenBao with it
    ([Vault](docs/vault.md)), or `ergosumd secret` opens a sealed secret
    such as a backup password without Vault ([Secrets without
    Vault](docs/secrets.md)).
+
+### Installing the admin tool
+
+Administrators need only the `ergosum` binary on their workstation. On
+Windows that is all there is to install: there is no `ergosumd` for
+Windows, so a Windows computer cannot be enrolled as a machine.
+
+On **Linux and macOS**, in a terminal:
+
+```sh
+os=$(uname -s | tr 'A-Z' 'a-z')
+arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+curl -fsSLO "https://github.com/DunkelCloud/ergosum/releases/latest/download/ergosum-$os-$arch"
+sudo install -d /usr/local/bin
+sudo install -m 0755 "ergosum-$os-$arch" /usr/local/bin/ergosum
+```
+
+The first two lines name the system as the release files do: `linux` or
+`darwin`, and `amd64` or `arm64`.
+
+On **Windows**, in PowerShell (on an ARM64 computer, download
+`ergosum-windows-arm64.exe` instead):
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\ergosum"
+New-Item -ItemType Directory -Force $dir | Out-Null
+curl.exe -fsSL -o "$dir\ergosum.exe" https://github.com/DunkelCloud/ergosum/releases/latest/download/ergosum-windows-amd64.exe
+$old = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+Set-ItemProperty HKCU:\Environment Path "$old;$dir" -Type ExpandString
+$env:Path += ";$dir"
+```
+
+The last three lines add the directory to the `PATH` of your account and
+of the current window. Run them once; windows opened later find `ergosum`
+too, at the latest after you sign in again. To update, repeat the first
+three lines.
+
+On every system, `ergosum version` then prints the release, and `ergosum
+help` names the configuration file that [Getting
+started](docs/getting-started.md#step-3-set-up-the-admin-tool-on-your-workstation)
+fills in. Unlike `install.sh`, these commands do not check the release
+signature; [Verifying a release](docs/releasing.md#verifying-a-release)
+shows how, in a shell and in PowerShell.
 
 ## What it does not do
 
