@@ -38,8 +38,21 @@ ssh-keygen -Y verify -f release-signers -I release -n ergosum-release \
 sha256sum -c --ignore-missing SHA256SUMS   # on macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
 ```
 
-`ssh-keygen` needs OpenSSH 8.1 or later. With an `ergosum` binary at hand,
-on any system:
+`ssh-keygen` needs OpenSSH 8.1 or later. PowerShell has no `<`, and text
+piped through it does not arrive byte for byte, so the signature would not
+verify. There, `cmd` passes the file on, and `Get-FileHash` gives the
+checksum of a file, here the administrator tool:
+
+```powershell
+cmd /c "ssh-keygen -Y verify -f release-signers -I release -n ergosum-release -s SHA256SUMS.sig < SHA256SUMS"
+$sum = (Get-FileHash ergosum-windows-amd64.exe).Hash.ToLower()
+Select-String -Path SHA256SUMS -SimpleMatch "$sum  ergosum-windows-amd64.exe"
+```
+
+The last command prints the file's line of `SHA256SUMS` if the checksum
+matches, and nothing if it does not.
+
+With an `ergosum` binary at hand, on any system:
 
 ```sh
 ergosum release verify -signers release-signers DIR

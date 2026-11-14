@@ -218,8 +218,10 @@ listens on `127.0.0.1` anyway.
    `ergosum-darwin-amd64` (Intel Mac) or `ergosum-linux-amd64`. Rename it
    to `ergosum` (`ergosum.exe` on Windows), make it executable on Linux and
    macOS (`chmod +x ergosum`), and put it in a directory in your `PATH`.
-   [Verifying a release](releasing.md#verifying-a-release) shows how to
-   check its signature first.
+   The [README](../README.md#installing-the-admin-tool) has commands that
+   do all of this on each system. [Verifying a
+   release](releasing.md#verifying-a-release) shows how to check its
+   signature first.
 2. Run `ergosum help`. The line "Bindings, from an administrator's
    machine" names the configuration file it reads, for example
    `~/.config/ergosum/admin.yaml` on Linux or
