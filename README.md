@@ -130,12 +130,15 @@ Windows, so a Windows computer cannot be enrolled as a machine.
 On **Linux and macOS**, in a terminal:
 
 ```sh
-os=$(uname -s | tr 'A-Z' 'a-z')                               # linux or darwin
-arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')    # amd64 or arm64
+os=$(uname -s | tr 'A-Z' 'a-z')
+arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 curl -fsSLO "https://github.com/DunkelCloud/ergosum/releases/latest/download/ergosum-$os-$arch"
 sudo install -d /usr/local/bin
 sudo install -m 0755 "ergosum-$os-$arch" /usr/local/bin/ergosum
 ```
+
+The first two lines name the system as the release files do: `linux` or
+`darwin`, and `amd64` or `arm64`.
 
 On **Windows**, in PowerShell (on an ARM64 computer, download
 `ergosum-windows-arm64.exe` instead):
