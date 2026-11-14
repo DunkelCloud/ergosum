@@ -93,14 +93,23 @@ command; [How ergosum works](docs/concepts.md) explains the terms.
    and signs their tokens. You run it yourself, on a Linux host or as a
    container. It gets a signing key of its own, and its *fingerprint*
    (`SHA256:...`) is how machines recognize it.
-2. **Enroll a machine.** On each machine, a Linux host or a Mac, one script
-   installs the daemon `ergosumd`. Run it as root; on a Mac, put `sudo`
-   before the second line:
+2. **Enroll a machine.** On each machine, one script installs the daemon
+   `ergosumd`. On **Linux**, as root:
 
    ```sh
    curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
    sh install.sh --domain example.com --anchor 'SHA256:...@https://192.0.2.10:7432'
    ```
+
+   On a **Mac**, in Terminal:
+
+   ```sh
+   curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
+   sudo sh install.sh --domain example.com --anchor 'SHA256:...@https://192.0.2.10:7432'
+   ```
+
+   A **Windows** computer cannot be a machine: there is no `ergosumd` for
+   Windows, only the [admin tool](#installing-the-admin-tool).
 
    `--domain` is the domain of the machine's name in ergosum: `host1`
    becomes `host1.example.com`. `--anchor` names the authority the machine
@@ -123,9 +132,8 @@ command; [How ergosum works](docs/concepts.md) explains the terms.
 
 ### Installing the admin tool
 
-Administrators need only the `ergosum` binary on their workstation. On
-Windows that is all there is to install: there is no `ergosumd` for
-Windows, so a Windows computer cannot be enrolled as a machine.
+Administrators need only the `ergosum` binary on their workstation; on
+Windows it is all there is to install.
 
 On **Linux and macOS**, in a terminal:
 
