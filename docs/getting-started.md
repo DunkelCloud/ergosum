@@ -342,7 +342,7 @@ journalctl -u ergosumd -n 20
 # Mac
 sudo launchctl kickstart -k system/io.github.dunkelcloud.ergosumd
 ls -l /var/db/ergosum/token
-tail -n 20 /var/log/ergosum/ergosumd.log
+sudo tail -n 20 /var/log/ergosum/ergosumd.log
 ```
 
 On Alpine (OpenRC) restart with `rc-service ergosumd restart`; the log
