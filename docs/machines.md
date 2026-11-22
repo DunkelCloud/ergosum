@@ -153,12 +153,13 @@ The service user is `_ergosum`. Things to know:
   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/local/bin/ergosumd
   ```
 
-- **Managing the service:**
+- **Managing the service:** `kickstart -k` restarts it, `print` shows its
+  state, and `bootout` stops and unloads it.
 
   ```sh
-  sudo launchctl kickstart -k system/io.github.dunkelcloud.ergosumd   # restart
-  sudo launchctl print system/io.github.dunkelcloud.ergosumd          # state
-  sudo launchctl bootout system/io.github.dunkelcloud.ergosumd        # stop and unload
+  sudo launchctl kickstart -k system/io.github.dunkelcloud.ergosumd
+  sudo launchctl print system/io.github.dunkelcloud.ergosumd
+  sudo launchctl bootout system/io.github.dunkelcloud.ergosumd
   ```
 
 - **Tailscale.** The daemon finds the Tailscale CLI in `PATH`, inside the
@@ -182,7 +183,7 @@ The service user is `_ergosum`. Things to know:
 | Question | Linux | Mac |
 | --- | --- | --- |
 | Is there a token? | `ls -l /run/ergosum/token` | `ls -l /var/db/ergosum/token` |
-| What does the daemon say? | `journalctl -u ergosumd -n 50` (OpenRC: syslog) | `tail -n 50 /var/log/ergosum/ergosumd.log` |
+| What does the daemon say? | `journalctl -u ergosumd -n 50` (OpenRC: syslog) | `sudo tail -n 50 /var/log/ergosum/ergosumd.log` |
 | Which version runs? | `ergosumd version` | `ergosumd version` |
 | Which key does it have? | `sudo -u ergosum ergosumd fingerprint` | `sudo -u _ergosum ergosumd fingerprint` |
 | Do the authorities present the right key? | `sudo -u ergosum ergosumd check` | `sudo -u _ergosum ergosumd check` |
@@ -243,9 +244,11 @@ Download the current `install.sh` and run it without options:
 
 ```sh
 curl -fsSLO https://github.com/DunkelCloud/ergosum/releases/latest/download/install.sh
-sh install.sh                      # the latest release
-sh install.sh --version v0.2.1     # a specific release
+sh install.sh
 ```
+
+That installs the latest release. For a specific one, name it: `sh
+install.sh --version v0.2.1`.
 
 The script checks the signature against `/etc/ergosum/release-signers`,
 refuses to install an older version (unless you add `--allow-downgrade`),

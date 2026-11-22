@@ -266,11 +266,17 @@ If the tool cannot sign, sign with `ssh-keygen` directly and add the
 signature to the file:
 
 ```sh
-ergosum bind -text event.txt host1.txt   # completes host1.txt, writes the text to sign
+ergosum bind -text event.txt host1.txt
 ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n ergosum-binding event.txt
-cat event.txt.sig >> host1.txt           # PowerShell: Get-Content event.txt.sig | Add-Content host1.txt
-ergosum bind host1.txt                   # checks the signature, records at the threshold
+cat event.txt.sig >> host1.txt
+ergosum bind host1.txt
 ```
+
+The first command completes `host1.txt` and writes the text to sign, the
+second signs it, the third adds the signature to the file, and the last
+checks the signature and records the change at the threshold. In
+PowerShell the third is `Get-Content event.txt.sig | Add-Content
+host1.txt`.
 
 `-f` takes the private key or, with the key in the agent, its public key in
 OpenSSH format. A public key in the SSH2 format (RFC 4716, as PuTTYgen

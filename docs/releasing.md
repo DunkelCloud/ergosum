@@ -35,8 +35,11 @@ downloaded files:
 ```sh
 ssh-keygen -Y verify -f release-signers -I release -n ergosum-release \
   -s SHA256SUMS.sig < SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS   # on macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 ```
+
+On macOS, the last command is `shasum -a 256 -c --ignore-missing
+SHA256SUMS`.
 
 `ssh-keygen` needs OpenSSH 8.1 or later. PowerShell has no `<`, and text
 piped through it does not arrive byte for byte, so the signature would not
