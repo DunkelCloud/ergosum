@@ -18,23 +18,9 @@ func Recovery(plain []byte, recipients []string) (string, error) {
 	if len(recipients) == 0 {
 		return "", nil
 	}
-	rs := make([]age.Recipient, 0, len(recipients))
-	for _, s := range recipients {
-		s = strings.TrimSpace(s)
-		var r age.Recipient
-		var err error
-		switch {
-		case strings.HasPrefix(s, "age1"):
-			r, err = age.ParseX25519Recipient(s)
-		case strings.HasPrefix(s, "ssh-ed25519 "):
-			r, err = agessh.ParseRecipient(s)
-		default:
-			err = fmt.Errorf("neither an age X25519 nor an ssh-ed25519 public key")
-		}
-		if err != nil {
-			return "", fmt.Errorf("recovery recipient %q: %w", clip(s), err)
-		}
-		rs = append(rs, r)
+	rs, err := parseRecipients(recipients)
+	if err != nil {
+		return "", err
 	}
 	var b bytes.Buffer
 	aw := armor.NewWriter(&b)
@@ -52,6 +38,35 @@ func Recovery(plain []byte, recipients []string) (string, error) {
 		return "", err
 	}
 	return b.String(), nil
+}
+
+// CheckRecipients reports the first recipient that Recovery would not
+// take, for a command that seals only after other work.
+func CheckRecipients(recipients []string) error {
+	_, err := parseRecipients(recipients)
+	return err
+}
+
+func parseRecipients(recipients []string) ([]age.Recipient, error) {
+	rs := make([]age.Recipient, 0, len(recipients))
+	for _, s := range recipients {
+		s = strings.TrimSpace(s)
+		var r age.Recipient
+		var err error
+		switch {
+		case strings.HasPrefix(s, "age1"):
+			r, err = age.ParseX25519Recipient(s)
+		case strings.HasPrefix(s, "ssh-ed25519 "):
+			r, err = agessh.ParseRecipient(s)
+		default:
+			err = fmt.Errorf("neither an age X25519 nor an ssh-ed25519 public key")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("recovery recipient %q: %w", clip(s), err)
+		}
+		rs = append(rs, r)
+	}
+	return rs, nil
 }
 
 func clip(s string) string {
