@@ -23,8 +23,9 @@ import (
 
 // SecretRequest is what the CLI sends.
 type SecretRequest struct {
-	Op string `json:"op"` // "get" or "create"
-	// get: part A as the caller read it.
+	Op string `json:"op"` // "get", "create" or "forget"
+	// get: part A as the caller read it. forget: a part A that is no
+	// longer in use, since its file was replaced or never written.
 	PartA []byte `json:"part_a,omitempty"`
 	// create: name, threshold, the secret and the armored recovery copy.
 	Name      string `json:"name,omitempty"`
@@ -140,6 +141,11 @@ func (d *Daemon) handleSecret(ctx context.Context, conn net.Conn) {
 		resp.Secret, resp.PartA, err = d.GetSecret(ctx, req.PartA)
 	case "create":
 		resp.PartA, err = d.CreateSecret(ctx, req.Name, req.Threshold, req.Secret, req.Recovery)
+	case "forget":
+		if s, perr := secret.Parse(req.PartA); perr == nil {
+			name = s.Name
+		}
+		d.ForgetSecret(req.PartA)
 	default:
 		err = fmt.Errorf("unknown operation %q", req.Op)
 	}
