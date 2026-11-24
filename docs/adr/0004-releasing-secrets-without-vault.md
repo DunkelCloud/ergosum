@@ -194,9 +194,10 @@ A JSON file, written by the CLI:
   td || 0x00 || id || 0x00 || name, L = 32)`, a random nonce, and `C` as
   associated data.
 - `recovery`, if present, is the secret encrypted with age to the recipients
-  given at creation (X25519 or `ssh-ed25519`). It is the way back when no
-  instance can be reached: an administrator opens it with the stock `age`
-  tool and the private key, without ergosum.
+  given when the secret was sealed (X25519 or `ssh-ed25519`). It is the way
+  back when no instance can be reached: an administrator opens it with the
+  stock `age` tool and the private key, without ergosum. Part A does not
+  name the recipients.
 - Limits: at most 16 pins, a threshold from 1 to the number of pins, a
   secret of at most 64 KiB, part A of at most 1 MiB.
 
@@ -219,6 +220,35 @@ The commands are part of `ergosumd`, which every machine has:
   code is 1.
 - `ergosumd secret info NAME` (or `-file PATH`) shows name, identity,
   threshold and pins, never the secret.
+- `ergosumd secret replace NAME [-recovery RECIPIENT]... [-file PATH]`
+  reads a new secret from stdin, as `create` does, for a part A that
+  exists. The daemon seals it as for `create`, with the name and the
+  threshold of the existing part A: a new master, pinned to the instances
+  of the authority list in use. The CLI puts the new part A in place of
+  the file by renaming, with the file's owner and mode. An empty secret is
+  refused. Whatever fails before the rename leaves part A byte for byte as
+  it was.
+- `ergosumd secret edit NAME [-recovery RECIPIENT]... [-file PATH] [-tmpdir
+  DIR]` opens the secret as `get` does, writes it to a file for an editor
+  and seals what the editor leaves there as `replace` does. The file, mode
+  0600, lies in a new directory, mode 0700, on a file system in memory:
+  on Linux below the first of `$XDG_RUNTIME_DIR`, `/run` and `/dev/shm`
+  that is tmpfs or ramfs. Where there is none, as on macOS, `edit` stops
+  before it opens the secret unless `-tmpdir` names a directory, which it
+  takes as it is. The editor is `$VISUAL`, else `$EDITOR`, else `vi`. When
+  it ends, `edit` overwrites the file and removes it with the directory,
+  also on SIGTERM and SIGHUP, which end the editor too; an interrupt is
+  left to the editor while it runs. Nothing is sealed if the editor fails
+  or leaves the text empty or unchanged.
+- Part A may change while the editor is open. If the file is another one
+  when the editor ends, `edit` opens it: a part A that a `get` re-split
+  opens the same secret and is replaced; if it opens another secret,
+  `edit` stops and leaves it.
+- A part A with a recovery copy is replaced only with `-recovery`: the
+  copy holds the old secret, and part A does not name the recipients to
+  seal the new one to. `replace` and `edit` then stop before they change
+  anything, so that the way back is never lost unnoticed. `-recovery` for
+  a part A without a copy adds one.
 
 ### Who may open a secret
 
@@ -251,6 +281,10 @@ The commands are part of `ergosumd`, which every machine has:
   round.
 - Memory only: after a restart of the daemon, the first `get` of each
   secret needs K reachable instances.
+- The daemon holds a secret until it restarts, or until `replace` or
+  `edit` tell it that they replaced the part A: it then drops the secret
+  and no longer refreshes it. A `get` that still brings the old part A
+  opens it anew.
 
 ### Re-splitting
 
@@ -271,6 +305,13 @@ The commands are part of `ergosumd`, which every machine has:
   `get`, which replaces the file atomically with the same owner and mode
   and says so on stderr. If the CLI cannot write the file, the re-split
   stays pending.
+- Replacing the file means renaming a new file over it, here and in
+  `replace` and `edit`: a reader sees the old part A or the new one, never
+  half of one. A consumer that holds the old file itself rather than its
+  directory does not see the new one. A container with a bind mount of
+  that one file is such a consumer: it reads the old part A until the mount
+  is made anew, and a `get` inside it cannot replace the file. Part A is
+  therefore handed to a container with its directory.
 
 ### Metrics
 
@@ -295,11 +336,22 @@ lower threshold.
 
 ### Limits
 
-- No rotation: a changed secret needs a new part A. Old copies of part A,
-  for example in backups, open as long as their pins' exchange keys exist
-  and the identity passes its checks.
+- `replace` and `edit` are no revocation. They put a new part A in place
+  of the file, but old copies of part A, for example in backups, open the
+  old secret as long as their pins' exchange keys exist and the identity
+  passes its checks. A secret that has leaked has to be changed where it
+  is used.
 - No revocation of a single secret, only of the binding. No audit of single
   reads: the audit log shows exchanges per round, not each `get`.
+- While the editor of `edit` has the secret, it lies in a file. tmpfs can
+  be swapped out, and overwriting the file does not reach pages that were.
+  What an editor writes elsewhere, such as swap, backup, undo and history
+  files, is not in that directory: `edit` passes Vim and Neovim the flags
+  that turn these off (`-n -i NONE -c 'set nobackup nowritebackup
+  noundofile'`) and leaves any other editor to the caller. With `-tmpdir`
+  on a disk, the file is on that disk.
+- Part A does not name the recipients of its recovery copy. `replace` and
+  `edit` cannot carry the copy over and need the recipients again.
 - Root on the machine reads part A and reaches the socket. The daemon holds
   open secrets in memory, and a snapshot with memory contains them.
 - The authority must run on another machine than the consumers of its
@@ -337,4 +389,6 @@ lower threshold.
 - The exchange key is new key material per instance, to be kept like the
   signing key.
 - A re-split rewrites part A from inside a `get`.
-- The recovery recipients add the age format to `ergosumd`.
+- The recovery recipients add the age format to `ergosumd`, and they have
+  to be given again whenever a secret with a recovery copy is replaced.
+- `edit` puts the secret into a file for as long as the editor runs.

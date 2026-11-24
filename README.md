@@ -40,7 +40,9 @@ ergosum adds what a copy cannot take along: the machine's place.
 - **Secrets without Vault.** `ergosumd secret` seals a secret on the
   machine in the manner of Tang and Clevis: it opens only after the machine
   has passed its checks at a threshold of authority instances. It works as
-  the password command of restic or borg.
+  the password command of restic or borg. `secret replace` and `secret
+  edit` change a secret in place; `edit` keeps the text in memory while
+  the editor has it.
 - **No single point of trust.** Every binding needs SSH signatures from as
   many administrators as you require, on security keys if you like. The
   authority instances replicate a signed journal without a leader.
@@ -81,7 +83,9 @@ through signed checkpoints.
 
 Early development. Interfaces and formats are described in
 [`docs/adr/`](docs/adr) and may still change. Secrets without Vault
-(`ergosumd secret`) are in every release since `v0.2.0`.
+(`ergosumd secret`) are in every release since `v0.2.0`. Changing a secret
+in place (`ergosumd secret replace` and `edit`) is on `main` and comes
+with the release after `v0.2.3`.
 
 ## Getting started
 

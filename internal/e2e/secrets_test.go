@@ -168,6 +168,55 @@ func TestSecretRevoked(t *testing.T) {
 	}
 }
 
+// TestSecretForget: a secret the daemon was told to forget, as replace and
+// edit tell it for the part A they replaced, is no longer refreshed after a
+// token round and no longer answered from memory. A get that still brings
+// its part A opens it anew at the instances.
+func TestSecretForget(t *testing.T) {
+	envs := newSecretCluster(t, 2)
+	for _, e := range envs {
+		e.start()
+	}
+	m := envs[0].machine(host1, machineOptions{targets: []string{at(host1Tailnet)}, authorities: envs})
+	for _, e := range envs {
+		e.bind(host1, m.d.Fingerprint(), 1, tailnetCheck(host1Tailnet))
+	}
+	ctx := context.Background()
+	partA, err := m.d.CreateSecret(ctx, "restic", 2, []byte("old"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.d.Obtain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before := exchanges(envs...)
+	m.d.RefreshSecrets(ctx)
+	if after := exchanges(envs...); after[0] != before[0]+1 || after[1] != before[1]+1 {
+		t.Fatalf("the refresh of a held secret: %v -> %v", before, after)
+	}
+
+	if !m.d.ForgetSecret(partA) {
+		t.Fatal("the daemon did not hold the secret")
+	}
+	if m.d.ForgetSecret(partA) {
+		t.Fatal("the daemon held the secret after it forgot it")
+	}
+	before = exchanges(envs...)
+	m.d.RefreshSecrets(ctx)
+	if after := exchanges(envs...); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Fatalf("a forgotten secret was refreshed: %v -> %v", before, after)
+	}
+
+	// With a token, a held secret is answered from memory; this one is not.
+	got, _, err := m.d.GetSecret(ctx, partA)
+	if err != nil || string(got) != "old" {
+		t.Fatalf("get of a forgotten part A: %q, %v", got, err)
+	}
+	if after := exchanges(envs...); after[0] != before[0]+1 || after[1] != before[1]+1 {
+		t.Fatalf("the get of a forgotten part A did not ask the instances: %v -> %v", before, after)
+	}
+}
+
 // TestSecretReshare: a new instance in the list is pinned once the
 // threshold of pinned instances serves that list; the next get hands the
 // new part A over, which then opens with the new instance. A list that
@@ -224,6 +273,22 @@ func TestSecretReshare(t *testing.T) {
 	}
 	if len(n.Pins) != 3 || n.Threshold != 2 || n.Ciphertext != old.Ciphertext || n.Pins[2].Authority != c.fingerprint() {
 		t.Fatalf("re-split part A: %d pins, threshold %d", len(n.Pins), n.Threshold)
+	}
+	// Forgotten by the re-split part A, which replace and edit may find in
+	// the file: the secret goes, and the re-split that waits with it.
+	if !m.d.ForgetSecret(replace) {
+		t.Fatal("the re-split part A does not name the held secret")
+	}
+	if m.d.ForgetSecret(partA) {
+		t.Fatal("the secret was held after its re-split part A was forgotten")
+	}
+	// Opened anew, it is re-split again.
+	if _, again, err := m.d.GetSecret(ctx, partA); err != nil || again != nil {
+		t.Fatalf("get of a forgotten part A: re-split %v, %v", again != nil, err)
+	}
+	m.d.ReshareSecrets(ctx)
+	if _, replace, err = m.d.GetSecret(ctx, partA); err != nil || replace == nil {
+		t.Fatalf("no re-split after the forgotten part A was opened anew: %v", err)
 	}
 	// The caller wrote it; the old part A is done with.
 	if _, again, err := m.d.GetSecret(ctx, replace); err != nil || again != nil {
@@ -292,5 +357,16 @@ func TestSecretSocket(t *testing.T) {
 	}
 	if _, err := daemon.CallSecret(ctx, socket, daemon.SecretRequest{Op: "get", PartA: []byte("{}")}); err == nil {
 		t.Fatal("junk opened")
+	}
+	// forget, then the same part A again: opened anew.
+	if _, err := daemon.CallSecret(ctx, socket, daemon.SecretRequest{Op: "forget", PartA: created.PartA}); err != nil {
+		t.Fatal(err)
+	}
+	if m.d.ForgetSecret(created.PartA) {
+		t.Fatal("the secret was held after forget")
+	}
+	got, err = daemon.CallSecret(ctx, socket, daemon.SecretRequest{Op: "get", PartA: created.PartA})
+	if err != nil || string(got.Secret) != "pw" {
+		t.Fatalf("get after forget: %v", err)
 	}
 }

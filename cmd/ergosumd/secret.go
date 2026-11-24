@@ -21,7 +21,8 @@ import (
 // defaultSecretDir holds part A of each secret, by name.
 const defaultSecretDir = "/etc/ergosum/secrets" //nolint:gosec // a directory, not a credential
 
-// secretCmd implements "ergosumd secret create|get|info" (ADR 0004).
+// secretCmd implements "ergosumd secret create|get|info|replace|edit" (ADR
+// 0004).
 func secretCmd(args []string) error {
 	if len(args) < 1 {
 		usage()
@@ -34,6 +35,10 @@ func secretCmd(args []string) error {
 		return secretGet(args[1:])
 	case "info":
 		return secretInfo(args[1:])
+	case "replace":
+		return secretReplace(args[1:])
+	case "edit":
+		return secretEdit(args[1:])
 	default:
 		usage()
 		os.Exit(2)
@@ -72,9 +77,9 @@ func newSecretFlags(name, fileUsage string, daemonFlags bool) *secretFlags {
 	}
 	// Taken and ignored, so that one command line serves every secret command.
 	fs.String("config", "", "ignored, since "+name+" asks no daemon: the daemon configuration `FILE`, taken as "+
-		"create and get take it, so that one command line serves all three")
+		"the other secret commands take it, so that one command line serves all of them")
 	fs.String("socket", "", "ignored, since "+name+" asks no daemon: the daemon's socket `PATH`, taken as "+
-		"create and get take it")
+		"the other secret commands take it")
 	return f
 }
 
@@ -170,20 +175,9 @@ use secret_socket:
 	if _, err := os.Lstat(path); err == nil { //nolint:gosec // operator-supplied path
 		return fmt.Errorf("%s exists; refusing to overwrite part A", path)
 	}
-	plain, err := io.ReadAll(io.LimitReader(os.Stdin, secret.MaxSecret+3))
+	plain, err := readSecret(os.Stdin, *raw)
 	if err != nil {
 		return err
-	}
-	if !*raw {
-		// One trailing LF or CRLF, as an editor or echo leaves it.
-		if bytes.HasSuffix(plain, []byte("\r\n")) {
-			plain = plain[:len(plain)-2]
-		} else {
-			plain = bytes.TrimSuffix(plain, []byte("\n"))
-		}
-	}
-	if len(plain) > secret.MaxSecret {
-		return fmt.Errorf("the secret is longer than %d bytes", secret.MaxSecret)
 	}
 	recovery, err := secret.Recovery(plain, rec)
 	if err != nil {
@@ -225,6 +219,31 @@ use secret_socket:
 	return nil
 }
 
+// readSecret reads a secret from r. Unless raw, it removes one trailing
+// newline.
+func readSecret(r io.Reader, raw bool) ([]byte, error) {
+	plain, err := io.ReadAll(io.LimitReader(r, secret.MaxSecret+3))
+	if err != nil {
+		return nil, err
+	}
+	if !raw {
+		plain = trimNewline(plain)
+	}
+	if len(plain) > secret.MaxSecret {
+		return nil, fmt.Errorf("the secret is longer than %d bytes", secret.MaxSecret)
+	}
+	return plain, nil
+}
+
+// trimNewline removes one trailing LF or CRLF, as an editor or echo leaves
+// it.
+func trimNewline(b []byte) []byte {
+	if bytes.HasSuffix(b, []byte("\r\n")) {
+		return b[:len(b)-2]
+	}
+	return bytes.TrimSuffix(b, []byte("\n"))
+}
+
 // secretGet writes the secret to stdout: the bytes as stored, nothing
 // else. On any failure stdout stays empty.
 func secretGet(args []string) error {
@@ -247,11 +266,23 @@ stderr.
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	plain, _, err := f.open(context.Background(), name, path, partA)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(plain)
+	return err
+}
+
+// open asks the daemon for the secret of partA, which was read from path.
+// A re-split part A that the daemon hands over replaces the file, and open
+// says so on stderr. It returns the secret and part A as it lies at path.
+func (f *secretFlags) open(ctx context.Context, name, path string, partA []byte) (plain, current []byte, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	resp, err := daemon.CallSecret(ctx, f.socketPath(), daemon.SecretRequest{Op: "get", PartA: partA})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if resp.PartA != nil {
 		if name == "" {
@@ -261,10 +292,10 @@ stderr.
 			fmt.Fprintf(os.Stderr, "ergosumd: part A of %s was re-split, but %s cannot be written (%v); the re-split stays pending\n", name, path, err)
 		} else {
 			fmt.Fprintf(os.Stderr, "ergosumd: part A of %s re-split to the authority list in use; %s replaced\n", name, path)
+			partA = resp.PartA
 		}
 	}
-	_, err = os.Stdout.Write(resp.Secret)
-	return err
+	return resp.Secret, partA, nil
 }
 
 // replaceFile replaces path atomically with data, keeping its owner and

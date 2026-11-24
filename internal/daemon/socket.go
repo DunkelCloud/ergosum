@@ -23,8 +23,9 @@ import (
 
 // SecretRequest is what the CLI sends.
 type SecretRequest struct {
-	Op string `json:"op"` // "get" or "create"
-	// get: part A as the caller read it.
+	Op string `json:"op"` // "get", "create" or "forget"
+	// get: part A as the caller read it. forget: a part A that is no
+	// longer in use, since its file was replaced or never written.
 	PartA []byte `json:"part_a,omitempty"`
 	// create: name, threshold, the secret and the armored recovery copy.
 	Name      string `json:"name,omitempty"`
@@ -140,6 +141,11 @@ func (d *Daemon) handleSecret(ctx context.Context, conn net.Conn) {
 		resp.Secret, resp.PartA, err = d.GetSecret(ctx, req.PartA)
 	case "create":
 		resp.PartA, err = d.CreateSecret(ctx, req.Name, req.Threshold, req.Secret, req.Recovery)
+	case "forget":
+		if s, perr := secret.Parse(req.PartA); perr == nil {
+			name = s.Name
+		}
+		d.ForgetSecret(req.PartA)
 	default:
 		err = fmt.Errorf("unknown operation %q", req.Op)
 	}
@@ -152,7 +158,8 @@ func (d *Daemon) handleSecret(ctx context.Context, conn net.Conn) {
 	_ = json.NewEncoder(conn).Encode(resp) //nolint:gosec // the secret goes to the caller over the local socket
 }
 
-// CallSecret sends one request to the daemon's secret socket.
+// CallSecret sends one request to the daemon's secret socket. It returns
+// when ctx ends, with the cause of that.
 func CallSecret(ctx context.Context, socket string, req SecretRequest) (*SecretResponse, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "unix", socket)
@@ -163,11 +170,17 @@ func CallSecret(ctx context.Context, socket string, req SecretRequest) (*SecretR
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
+	// A caller that gives up does not wait for the answer.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	if err := json.NewEncoder(conn).Encode(req); err != nil { //nolint:gosec // the secret goes to the daemon over the local socket
 		return nil, err
 	}
 	var resp SecretResponse
 	if err := json.NewDecoder(io.LimitReader(conn, secretRequestLimit)).Decode(&resp); err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return nil, cause
+		}
 		return nil, fmt.Errorf("no answer from ergosumd: %w", err)
 	}
 	if resp.Error != "" {

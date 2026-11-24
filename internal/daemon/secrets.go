@@ -44,6 +44,9 @@ type heldSecret struct {
 	checked uint64
 	retryAt time.Time
 	refused map[string]bool
+	// gone: ForgetSecret dropped the secret; a refresh or re-split that
+	// still runs for it must leave no trace.
+	gone bool
 }
 
 type secretStore struct {
@@ -135,6 +138,27 @@ func (d *Daemon) GetSecret(ctx context.Context, partA []byte) (plain, replace []
 	h.plain, h.master, h.denied = plain, master, false
 	d.mSecretThreshold.Set(s.Name, float64(s.Threshold))
 	return bytes.Clone(plain), h.pending, nil
+}
+
+// ForgetSecret drops the secret of part A from memory, with a re-split
+// that waits for it: its file was replaced, or was never written. The daemon
+// no longer refreshes it; a get that brings this part A again opens it anew
+// at its pins. It reports whether the daemon held the secret.
+func (d *Daemon) ForgetSecret(partA []byte) bool {
+	st := d.secrets
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	h := st.held[sha256.Sum256(partA)]
+	if h == nil {
+		return false
+	}
+	delete(st.held, h.key)
+	if h.pending != nil {
+		delete(st.held, h.pendingKey)
+		d.mSecretReshare.Set(h.sealed.Name, 0)
+	}
+	h.gone, h.pending = true, nil
+	return true
 }
 
 // openSecret asks the listed instances among the pins, in list order,
@@ -314,6 +338,9 @@ func (d *Daemon) RefreshSecrets(ctx context.Context) {
 	d.secrets.mu.Lock()
 	defer d.secrets.mu.Unlock()
 	for _, h := range held {
+		if h.gone {
+			continue
+		}
 		h.denied = denied[h]
 		d.mSecretPins.Set(h.sealed.Name, float64(answered[h]))
 	}
@@ -352,6 +379,10 @@ func (d *Daemon) ReshareSecrets(ctx context.Context) {
 		d.secrets.mu.Lock()
 		for fp := range newRefused {
 			h.refused[fp] = true
+		}
+		if h.gone {
+			d.secrets.mu.Unlock()
+			continue
 		}
 		if err != nil {
 			d.log.Warn("re-split not possible", "name", s.Name, "err", err)

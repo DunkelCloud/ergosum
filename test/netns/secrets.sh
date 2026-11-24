@@ -9,7 +9,14 @@
 #
 # host1 seals a secret with a threshold of 2 at a and b, the instances of
 # list 1, and reads it back with "ergosumd secret get", byte for byte, also
-# after a restart of its daemon; with a down it does not open. A user who
+# after a restart of its daemon. "secret replace" seals a new secret in
+# place of part A with its threshold, owner and mode, and only with
+# -recovery, since part A has a recovery copy; the old part A still opens
+# the old secret. "secret edit" hands the secret to an editor in a file
+# with mode 0600 in a directory of its own with mode 0700 on tmpfs, leaves
+# part A alone if the editor fails or changes nothing, leaves no file
+# behind, also after SIGTERM and SIGHUP, and refuses to start where no
+# directory is in memory. With a down the secret does not open. A user who
 # cannot read part A gets nothing. List 2 adds c: the daemon re-splits the
 # held secret, the next get replaces part A, and the new part A opens with
 # b and c while a is down. A copy of host1's disk elsewhere opens nothing.
@@ -18,7 +25,8 @@
 # it looked only in the secrets directory, and get with that -file opens it
 # from elsewhere.
 #
-# Needs root, iproute2, curl, jq, ssh-keygen and setpriv. Usage:
+# Needs root, iproute2, curl, jq, ssh-keygen, and setpriv and unshare of
+# util-linux. Usage:
 #   sudo BIN=dist test/netns/secrets.sh
 set -euo pipefail
 
@@ -204,6 +212,141 @@ secret get -file "$PA" > "$W/got" || fail "get after restart"
 cmp "$W/want" "$W/got" || fail "get after restart returned other bytes"
 after=$(metric a machine_identity_exchanges_total '{result="issued"}')
 [ "$after" -gt "$before" ] || fail "the get after a restart did not ask a ($before -> $after)"
+
+log "replace: a new secret with the threshold, owner and mode of part A"
+cp "$PA" "$W/partA.old"
+if printf 'never\n' | secret replace restic -file "$PA" 2> "$W/replace.err"; then
+	fail "replace without -recovery replaced a part A with a recovery copy"
+fi
+grep -q -- '-recovery' "$W/replace.err" || { cat "$W/replace.err"; fail "replace does not ask for -recovery"; }
+cmp "$PA" "$W/partA.old" || fail "a refused replace changed part A"
+if : | secret replace restic -file "$PA" -recovery "$(cat "$W/alice.pub")" 2> /dev/null; then
+	fail "replace took an empty secret"
+fi
+cmp "$PA" "$W/partA.old" || fail "a refused replace changed part A"
+chown 0:12345 "$PA"
+chmod 0640 "$PA"
+printf 'replaced\n' | secret replace restic -file "$PA" -recovery "$(cat "$W/alice.pub")" 2> "$W/replace.err" ||
+	{ cat "$W/replace.err"; fail "replace"; }
+[ "$(stat -c '%u:%g %a' "$PA")" = "0:12345 640" ] || fail "replace changed owner or mode: $(stat -c '%u:%g %a' "$PA")"
+chown 0:0 "$PA"
+chmod 0600 "$PA"
+cmp -s "$PA" "$W/partA.old" && fail "replace left part A as it was"
+[ "$(ls -A "$W/host1/secrets")" = restic ] || fail "replace left a file next to part A"
+secret info restic -file "$PA" > "$W/info.out"
+grep -q '^threshold:    2 of 2' "$W/info.out" || { cat "$W/info.out"; fail "replace changed the threshold or the pins"; }
+grep -q '^recovery:     age file' "$W/info.out" || fail "replace lost the recovery copy"
+printf 'replaced' > "$W/want"
+secret get -file "$PA" > "$W/got" || fail "get after replace"
+cmp "$W/want" "$W/got" || fail "get after replace returned other bytes"
+# No revocation: the old part A still opens the old secret.
+secret get -file "$W/partA.old" > "$W/got" || fail "get of the old part A"
+printf 'it'"'"'s a secret' | cmp - "$W/got" || fail "the old part A returned other bytes"
+
+log "edit: the text on tmpfs in a directory of its own, and nothing left behind"
+# The editor notes where its file lies, then runs $EDITOR_DOES on it.
+cat > "$W/editor" <<'EOF'
+#!/bin/sh
+f=$1
+d=$(dirname "$f")
+printf '%s %s %s %s\n' "$(stat -f -c %T "$d")" "$(stat -c %a "$d")" "$(stat -c %a "$f")" "$d" > "$EDITOR_REPORT"
+eval "$EDITOR_DOES"
+EOF
+chmod 0755 "$W/editor"
+REPORT=$W/editor.report
+edit() { # what the editor does, arguments of edit...
+	local does=$1
+	shift
+	rm -f "$REPORT"
+	VISUAL='' EDITOR="$W/editor" EDITOR_REPORT="$REPORT" EDITOR_DOES="$does" \
+		secret edit restic -file "$PA" -recovery "$(cat "$W/alice.pub")" "$@"
+}
+edited_in_memory() { # the editor's file was on tmpfs or ramfs with mode 600 in a directory with 700, now gone
+	local fs dmode fmode dir
+	read -r fs dmode fmode dir < "$REPORT" || fail "the editor did not run"
+	case $fs in tmpfs | ramfs) ;; *) fail "the editor's file was on $fs" ;; esac
+	[ "$dmode" = 700 ] && [ "$fmode" = 600 ] || fail "the editor's file had mode $fmode in a directory with mode $dmode"
+	[ ! -e "$dir" ] || fail "edit left $dir behind"
+}
+edit 'printf "edited\nsecond line\n" > "$f"' 2> "$W/edit.err" || { cat "$W/edit.err"; fail "edit"; }
+edited_in_memory
+printf 'edited\nsecond line' > "$W/want"
+secret get -file "$PA" > "$W/got" || fail "get after edit"
+cmp "$W/want" "$W/got" || fail "get after edit returned other bytes"
+secret info restic -file "$PA" > "$W/info.out"
+grep -q '^threshold:    2 of 2' "$W/info.out" || { cat "$W/info.out"; fail "edit changed the threshold or the pins"; }
+grep -q '^recovery:     age file' "$W/info.out" || fail "edit lost the recovery copy"
+[ "$(stat -c %a "$PA")" = 600 ] || fail "edit changed the mode of part A"
+
+log "edit: no change, a failing editor, an empty file and a signal leave part A alone"
+cp "$PA" "$W/partA.edited"
+edit true 2> "$W/edit.err" || { cat "$W/edit.err"; fail "edit without a change did not end with 0"; }
+grep -q 'not replaced' "$W/edit.err" || { cat "$W/edit.err"; fail "edit without a change does not say so"; }
+edited_in_memory
+cmp "$PA" "$W/partA.edited" || fail "edit without a change replaced part A"
+if edit 'echo spoiled > "$f"; exit 3' 2> /dev/null; then fail "edit took what a failing editor left"; fi
+edited_in_memory
+cmp "$PA" "$W/partA.edited" || fail "a failing editor changed part A"
+if edit ': > "$f"' 2> /dev/null; then fail "edit took an empty secret"; fi
+edited_in_memory
+cmp "$PA" "$W/partA.edited" || fail "an empty file changed part A"
+for sig in TERM HUP; do
+	rm -f "$REPORT"
+	VISUAL='' EDITOR="$W/editor" EDITOR_REPORT="$REPORT" EDITOR_DOES='exec sleep 60' \
+		ip netns exec host1 "$BIN/ergosumd" secret edit restic -file "$PA" -recovery "$(cat "$W/alice.pub")" \
+		-config "$W/host1/ergosumd.yaml" -socket "$SOCK" 2> "$W/edit.err" &
+	pid=$!
+	wait_for 20 "the editor to open" test -s "$REPORT"
+	kill -s "$sig" "$pid"
+	if wait "$pid"; then fail "edit ended with 0 after SIG$sig"; fi
+	grep -q 'ended by a signal' "$W/edit.err" || { cat "$W/edit.err"; fail "edit does not name SIG$sig"; }
+	edited_in_memory
+	cmp "$PA" "$W/partA.edited" || fail "SIG$sig changed part A"
+done
+[ "$(ls -A "$W/host1/secrets")" = restic ] || fail "edit left a file next to part A"
+
+log "edit: without a directory in memory it stops before it opens the secret"
+# In a mount namespace of its own, with a directory of the disk over /run
+# and /dev/shm. A working directory that is itself in memory cannot show it.
+mkdir -p "$W/disk"
+case $(stat -f -c %T "$W/disk") in
+tmpfs | ramfs)
+	echo "skipped: $W is in memory"
+	;;
+*)
+	gets() { grep -c 'op=get' "$W/host1-daemon.log" || true; }
+	on_disk() { # arguments of edit...
+		rm -f "$REPORT"
+		VISUAL='' EDITOR="$W/editor" EDITOR_REPORT="$REPORT" EDITOR_DOES=true DISK="$W/disk" \
+			ip netns exec host1 env -u XDG_RUNTIME_DIR unshare -m sh -c \
+			'mount --bind "$DISK" /run && mount --bind "$DISK" /dev/shm && exec "$@"' sh \
+			"$BIN/ergosumd" secret edit restic -file "$PA" -recovery "$(cat "$W/alice.pub")" \
+			-config "$W/host1/ergosumd.yaml" -socket "$SOCK" "$@"
+	}
+	before=$(gets)
+	if on_disk 2> "$W/edit.err"; then fail "edit wrote the secret to a disk"; fi
+	grep -q -- '-tmpdir' "$W/edit.err" || { cat "$W/edit.err"; fail "edit does not point to -tmpdir"; }
+	[ ! -e "$REPORT" ] || fail "the editor ran without a directory in memory"
+	[ "$(gets)" = "$before" ] || fail "edit opened the secret before it stopped"
+	# -tmpdir is taken as it is, with a warning.
+	on_disk -tmpdir "$W/disk" 2> "$W/edit.err" || { cat "$W/edit.err"; fail "edit with -tmpdir"; }
+	grep -q 'neither tmpfs nor ramfs' "$W/edit.err" || { cat "$W/edit.err"; fail "edit does not warn about a -tmpdir on a disk"; }
+	read -r _ _ _ dir < "$REPORT" || fail "the editor did not run with -tmpdir"
+	case $dir in "$W/disk"/*) ;; *) fail "the editor's file was in $dir, not below -tmpdir" ;; esac
+	# Not "nothing in -tmpdir": mount leaves a directory of its own in what
+	# lies over /run.
+	[ ! -e "$dir" ] || fail "edit left $dir behind"
+	cmp "$PA" "$W/partA.edited" || fail "edit without a directory in memory changed part A"
+	;;
+esac
+
+# An instance allows an identity ten requests at once and then one per
+# minute, and forgets the count when it starts. What follows has the
+# requests it had before replace and edit were tried here.
+for n in a b; do
+	stop "$n"
+	start "$n"
+done
 
 log "a user who cannot read part A gets nothing"
 if in_ns host1 setpriv --reuid=65534 --regid=65534 --clear-groups "$BIN/ergosumd" secret get -file "$PA" -socket "$SOCK" > "$W/got" 2> /dev/null; then
