@@ -72,8 +72,7 @@ RESTIC_PASSWORD_COMMAND='ergosumd secret get restic' restic snapshots
 
 `create` fails if fewer than the threshold of instances answer, and names
 those that did not and why. It never overwrites an existing secret; to
-change a secret, create a new one under another name, or delete the old
-file first.
+change one, see [Changing a secret](#changing-a-secret).
 
 `get` prints the secret and nothing else, or prints nothing and exits with
 code 1 if it cannot open it.
@@ -89,7 +88,53 @@ with the standard `age` tool, without ergosum: copy the `recovery` member
 of part A into a file and run `age -d -i KEY FILE`. Keep the recovery
 private keys offline.
 
-## Monitoring
+## Changing a secret
+
+Two commands put a new secret in place of an existing one. Both keep its
+name, its threshold and the owner and mode of the file, and seal the new
+secret to the instances of the authority list in use. `replace` reads the
+new secret from stdin:
+
+```sh
+printf '%s\n' "$NEW_PASSWORD" | ergosumd secret replace restic \
+  -recovery 'age1...'
+```
+
+`edit` opens the secret in an editor:
+
+```sh
+ergosumd secret edit restic -recovery 'age1...'
+```
+
+- **Recovery.** Part A holds the recovery copy, but not its recipients. If
+  the secret has a recovery copy, give the recipients again with
+  `-recovery`; without it both commands stop and change nothing, so that
+  the way back is never lost unnoticed. `ergosumd secret info` shows
+  whether a copy exists. For a secret without one, `-recovery` adds it:
+  `ergosumd secret get NAME | ergosumd secret replace NAME -raw -recovery
+  ...` does that without changing the secret.
+- **Nothing halfway.** The new part A replaces the file in one step.
+  Whatever fails before that, an instance that does not answer or an
+  editor that ends with an error, leaves part A byte for byte as it was.
+- **The editor's file.** `edit` writes the secret to a file that only the
+  caller can read, in a new directory on tmpfs or ramfs: below the first
+  of `$XDG_RUNTIME_DIR`, `/run` and `/dev/shm` that is one. When the editor
+  ends, the file is overwritten and removed with its directory, also if
+  `edit` is ended by SIGTERM or SIGHUP. Where no such directory exists, as
+  on a Mac, `edit` stops before it opens the secret; `-tmpdir DIR` names a
+  directory to use instead, such as the mount point of a RAM disk, and is
+  taken as it is.
+- **The editor.** `$VISUAL`, else `$EDITOR`, else `vi`. It has to stay in
+  the foreground until the file is closed (`code -w`, `gvim -f`). Vim and
+  Neovim are started so that they keep no swap, backup, undo or history
+  file. With any other editor, check where it keeps such files.
+- **Consumers.** `get` returns the new secret from then on. A program
+  that read the secret when it started keeps the old one until it starts
+  again.
+
+Changing a secret here does not change it where it is used: set the new
+password in the backup repository or the database as well. It is also no
+revocation, see [Limits](#limits).
 
 Alert when fewer instances answer for a secret than its threshold needs:
 the metric `machine_identity_secret_pins` below
@@ -100,9 +145,14 @@ does that. Fix the instances; do not lower the threshold.
 
 ## Limits
 
-- **No rotation.** A changed secret needs a new part A. Old copies of part
-  A open the old secret as long as the exchange keys of their instances
-  exist.
+- **Changing a secret is no revocation.** `replace` and `edit` write a new
+  part A. Old copies of part A, in a backup for example, open the old
+  secret as long as the exchange keys of their instances exist. If a
+  secret has leaked, change it where it is used.
+- **The editor's file can reach the swap.** `edit` keeps the secret in
+  memory, and memory can be swapped out; overwriting the file afterwards
+  does not reach what was. Use encrypted swap, or none, on machines where
+  that matters.
 - **Root on the machine** can read part A and use the daemon's socket, so
   it can open the secret, as the machine itself can.
 - **Threshold 1** is weak (see above).
@@ -127,6 +177,31 @@ does that. Fix the instances; do not lower the threshold.
   failure stdout stays empty and the exit code is 1.
 - `info` shows name, identity, threshold, the instances and whether a
   recovery copy exists; it needs no daemon.
+- `replace` reads stdin as `create` does: one trailing newline is removed,
+  `-raw` keeps it. It refuses an empty secret and a part A that is not
+  there, and takes `-file` as `get` does. Run it as a user that may write
+  the directory of part A.
+- `edit` shows the secret with one newline after it and removes one
+  newline after the editor, so a secret that ends with a newline shows an
+  empty last line. It writes nothing if the editor fails, or leaves the
+  text empty or as it was; the last ends with exit code 0. An interrupt
+  (Ctrl-C) is left to the editor while it runs. If the new secret cannot
+  be sealed after the editor, the changes are lost: the text is kept
+  nowhere.
+- While the editor is open, a `get` may re-split part A, or another
+  command may replace it. `edit` replaces a part A that still opens the
+  same secret and stops at one that opens another.
+
+### Part A in a container
+
+`get`, `replace` and `edit` replace part A by renaming a new file over it.
+A container that has the file itself mounted (a bind mount of that one
+file) keeps reading the old file until the mount is made anew, usually
+when the container starts again, and a `get` inside it cannot replace the
+file. Mount the directory that holds part A instead, read-write if `get`
+runs inside the container and should write a re-split part A. Give each
+consumer its own directory, with `-file`, so that it sees only its own
+secrets.
 
 ### Who may open a secret
 
@@ -145,6 +220,9 @@ token round it refreshes every held secret at its instances, one request
 per instance. A revoked binding stops the secret at the next round; an
 outage of the authorities does not, while the token lasts. After a restart
 of the daemon, the first `get` needs the threshold of instances again.
+`replace` and `edit` tell the daemon which part A they replaced; it drops
+that secret from memory. A `get` that still brings the old part A opens the
+old secret anew at the instances.
 
 ### When the authority list changes
 
