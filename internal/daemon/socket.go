@@ -158,7 +158,8 @@ func (d *Daemon) handleSecret(ctx context.Context, conn net.Conn) {
 	_ = json.NewEncoder(conn).Encode(resp) //nolint:gosec // the secret goes to the caller over the local socket
 }
 
-// CallSecret sends one request to the daemon's secret socket.
+// CallSecret sends one request to the daemon's secret socket. It returns
+// when ctx ends, with the cause of that.
 func CallSecret(ctx context.Context, socket string, req SecretRequest) (*SecretResponse, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "unix", socket)
@@ -169,11 +170,17 @@ func CallSecret(ctx context.Context, socket string, req SecretRequest) (*SecretR
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
+	// A caller that gives up does not wait for the answer.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	if err := json.NewEncoder(conn).Encode(req); err != nil { //nolint:gosec // the secret goes to the daemon over the local socket
 		return nil, err
 	}
 	var resp SecretResponse
 	if err := json.NewDecoder(io.LimitReader(conn, secretRequestLimit)).Decode(&resp); err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return nil, cause
+		}
 		return nil, fmt.Errorf("no answer from ergosumd: %w", err)
 	}
 	if resp.Error != "" {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/DunkelCloud/ergosum/internal/cli"
@@ -67,7 +68,8 @@ func asItWas(err error) error { return fmt.Errorf("%w; part A is as it was", err
 
 // existing reads the part A that replace and edit change. It refuses a
 // part A that holds another secret than the one named, one whose recovery
-// copy the command would lose, and recipients that cannot be used.
+// copy the command would lose, recipients that cannot be used, and a part A
+// in a directory that the caller cannot write.
 func (f *secretFlags) existing(name, path string, rec recipients) ([]byte, *secret.Sealed, error) {
 	partA, err := f.readPartA(name, path)
 	if err != nil {
@@ -87,6 +89,14 @@ func (f *secretFlags) existing(name, path string, rec recipients) ([]byte, *secr
 	if err := secret.CheckRecipients(rec); err != nil {
 		return nil, nil, asItWas(err)
 	}
+	// The new part A is written next to the old one and renamed over it.
+	// Where that cannot be done, say so before a secret is sealed or edited.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return nil, nil, asItWas(fmt.Errorf("part A cannot be replaced: %w", err))
+	}
+	_ = tmp.Close()
+	_ = os.Remove(tmp.Name()) //nolint:gosec // the temporary file next to part A
 	return partA, s, nil
 }
 
@@ -156,7 +166,7 @@ func (f *secretFlags) current(name, path string, old, was []byte) ([]byte, error
 	if err != nil || was == nil || bytes.Equal(now, old) {
 		return now, err
 	}
-	plain, now, err := f.open(name, path, now)
+	plain, now, err := f.open(context.Background(), name, path, now)
 	if err != nil {
 		return nil, fmt.Errorf("part A changed meanwhile and does not open: %w", err)
 	}

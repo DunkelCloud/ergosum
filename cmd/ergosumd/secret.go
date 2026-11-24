@@ -37,6 +37,8 @@ func secretCmd(args []string) error {
 		return secretInfo(args[1:])
 	case "replace":
 		return secretReplace(args[1:])
+	case "edit":
+		return secretEdit(args[1:])
 	default:
 		usage()
 		os.Exit(2)
@@ -264,7 +266,7 @@ stderr.
 	if err != nil {
 		return err
 	}
-	plain, _, err := f.open(name, path, partA)
+	plain, _, err := f.open(context.Background(), name, path, partA)
 	if err != nil {
 		return err
 	}
@@ -275,8 +277,8 @@ stderr.
 // open asks the daemon for the secret of partA, which was read from path.
 // A re-split part A that the daemon hands over replaces the file, and open
 // says so on stderr. It returns the secret and part A as it lies at path.
-func (f *secretFlags) open(name, path string, partA []byte) (plain, current []byte, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+func (f *secretFlags) open(ctx context.Context, name, path string, partA []byte) (plain, current []byte, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	resp, err := daemon.CallSecret(ctx, f.socketPath(), daemon.SecretRequest{Op: "get", PartA: partA})
 	if err != nil {
